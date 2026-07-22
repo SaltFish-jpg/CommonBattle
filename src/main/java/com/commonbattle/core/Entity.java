@@ -6,8 +6,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Generic battlefield object.
- * A unit, card, summon, building, projectile, or other gameplay object can all be modeled as an entity.
+ * 通用战场对象。
+ * 单位、卡牌、召唤物、建筑、投射物或其他玩法对象都可以建模为实体。
  */
 public final class Entity {
     private final EntityId id;

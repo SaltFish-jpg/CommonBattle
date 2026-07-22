@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Resolves effective attributes from base component values plus active buff modifiers.
+ * 根据基础属性和当前 Buff 修正值计算最终属性。
  */
 public final class AttributeValueResolver {
     private AttributeValueResolver() {

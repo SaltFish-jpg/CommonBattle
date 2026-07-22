@@ -6,8 +6,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Registry and dispatcher for triggers.
- * Trigger order is the registration order for each timing.
+ * 触发器注册表和分发器。
+ * 同一时机下，触发器按注册顺序执行。
  */
 public final class TriggerSystem {
     private final Map<TriggerTiming, List<Trigger>> triggers = new EnumMap<>(TriggerTiming.class);

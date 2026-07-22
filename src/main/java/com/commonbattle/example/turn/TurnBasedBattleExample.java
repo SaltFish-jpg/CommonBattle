@@ -10,7 +10,7 @@ import com.commonbattle.core.ApplyBuffCommand;
 import com.commonbattle.core.StatusEffect;
 
 /**
- * Runnable turn-based example: attack buff, stun control, turn advance, then monster attacks.
+ * 可运行的回合制示例：攻击增益、眩晕控制、推进回合，然后怪物攻击。
  */
 public final class TurnBasedBattleExample {
     private TurnBasedBattleExample() {

@@ -6,8 +6,8 @@ import com.commonbattle.core.EntityId;
 import java.util.List;
 
 /**
- * Turn-based global state.
- * It keeps actor order and the current round without changing core battle state semantics.
+ * 回合制全局状态。
+ * 保存行动顺序和当前轮次，同时不改变核心战斗状态语义。
  */
 public final class TurnComponent implements Component {
     private final List<EntityId> order;

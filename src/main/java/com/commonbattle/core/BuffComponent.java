@@ -5,8 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Holds active buffs for one entity.
- * Rule sets and value resolvers query this component to apply modifiers and control states.
+ * 保存单个实体身上的当前 Buff。
+ * 规则集和属性解析器会读取该组件，以应用属性修正和控制状态。
  */
 public final class BuffComponent implements Component {
     private final Map<String, Buff> buffs = new LinkedHashMap<>();

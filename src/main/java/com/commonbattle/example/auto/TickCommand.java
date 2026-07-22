@@ -10,8 +10,8 @@ import com.commonbattle.core.EntityId;
 import java.util.List;
 
 /**
- * Auto-battle heartbeat.
- * Each tick advances time and queues an attack from the first alive player unit to the first alive enemy unit.
+ * 自动战斗心跳命令。
+ * 每次心跳推进时间，并让第一个存活玩家单位攻击第一个存活敌方单位。
  */
 public record TickCommand() implements Command {
     @Override

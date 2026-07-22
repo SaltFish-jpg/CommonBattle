@@ -3,8 +3,8 @@ package com.commonbattle.core;
 import java.util.List;
 
 /**
- * Generic skill command.
- * The skill is represented as an ordered effect list, so concrete games can build skills from data or scripts.
+ * 通用技能命令。
+ * 技能表示为有序效果列表，具体游戏可以从数据或脚本构建技能。
  */
 public record CastSkillCommand(EntityId caster, String skillId, List<Effect> effects) implements Command {
     public CastSkillCommand {

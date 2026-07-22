@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Published when a skill command expands into its effects.
+ * 技能命令展开为效果时发布的事件。
  */
 public record SkillCastEvent(EntityId caster, String skillId) implements Event {
 }

@@ -6,8 +6,8 @@ import com.commonbattle.core.BattleContext;
 import com.commonbattle.core.Command;
 
 /**
- * Example rule set for turn-based games.
- * It reuses basic attack validation and adds current-actor checks.
+ * 回合制玩法示例规则集。
+ * 复用基础攻击校验，并额外检查当前行动者。
  */
 public final class TurnRuleSet extends BasicRuleSet {
     @Override

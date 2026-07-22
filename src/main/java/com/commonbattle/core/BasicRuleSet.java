@@ -1,8 +1,8 @@
 package com.commonbattle.core;
 
 /**
- * Minimal reusable rule set for unit attacks.
- * More specialized games can extend this class and add mode-specific validation.
+ * 可复用的最小单位战斗规则集。
+ * 更具体的玩法可以继承它，并补充模式自己的校验。
  */
 public class BasicRuleSet implements RuleSet {
     @Override

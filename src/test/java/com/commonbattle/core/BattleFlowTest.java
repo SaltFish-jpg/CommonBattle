@@ -42,4 +42,39 @@ class BattleFlowTest {
         assertTrue(context.log().entries().stream().anyMatch(entry -> entry.type().equals("effect.damage")));
         assertTrue(context.log().entries().stream().anyMatch(entry -> entry.type().equals("command.completed")));
     }
+
+    @Test
+    void attackDamageGainsRageAndFullRageQueuesSkill() {
+        BattleState state = new BattleState();
+        Entity attacker = state.createEntity("hero");
+        attacker.add(new HealthComponent(100));
+        attacker.add(new AttributeComponent().set("attack", 25));
+        attacker.add(new RageEnergyComponent(100, 80, 30, 10));
+
+        Entity defender = state.createEntity("monster");
+        defender.add(new HealthComponent(100));
+        defender.add(new RageEnergyComponent(100, 0, 10, 15));
+        attacker.add(new RageSkillComponent(
+                "ultimate_slash",
+                List.of(new DealDamageEffect(attacker.id(), defender.id(), 40))
+        ));
+
+        List<Event> events = new ArrayList<>();
+        BattleContext context = BattleContext.builder()
+                .state(state)
+                .ruleSet(new BasicRuleSet())
+                .build();
+        context.eventBus().subscribe(events::add);
+        context.triggerSystem().register(TriggerTiming.AFTER_DAMAGE, new GainRageOnAttackTrigger());
+
+        context.submit(new AttackCommand(attacker.id(), defender.id()));
+        context.runUntilIdle();
+
+        assertEquals(35, defender.require(HealthComponent.class).current());
+        assertEquals(0, attacker.require(RageEnergyComponent.class).current());
+        assertEquals(15, defender.require(RageEnergyComponent.class).current());
+        assertTrue(events.stream().anyMatch(event -> event instanceof SkillCastEvent skill
+                && skill.skillId().equals("ultimate_slash")));
+        assertTrue(context.log().entries().stream().anyMatch(entry -> entry.type().equals("effect.rage_skill_ready")));
+    }
 }

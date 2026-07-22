@@ -6,7 +6,7 @@ import com.commonbattle.core.Entity;
 import com.commonbattle.core.HealthComponent;
 
 /**
- * Small factory used by tests and the runnable example to assemble a card battle.
+ * 卡牌战斗示例工厂，用于测试和可运行示例快速组装战斗。
  */
 public final class CardExampleFactory {
     private CardExampleFactory() {

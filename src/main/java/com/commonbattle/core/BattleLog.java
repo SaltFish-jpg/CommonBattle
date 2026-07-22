@@ -5,8 +5,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Append-only battle log.
- * Logs are intended for replay, client presentation, debugging, reconnect recovery, and sync verification.
+ * 只追加的战斗日志。
+ * 日志可用于回放、客户端展示、调试、断线恢复和同步校验。
  */
 public final class BattleLog {
     private final List<BattleLogEntry> entries = new ArrayList<>();

@@ -6,8 +6,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Mutable battle snapshot.
- * Stores all entities plus global battle-level components such as turn order, wave state, or match resources.
+ * 可变的战斗快照。
+ * 保存所有实体，以及回合顺序、波次状态、全局资源等战斗级组件。
  */
 public final class BattleState {
     private final Map<EntityId, Entity> entities = new LinkedHashMap<>();
@@ -37,7 +37,7 @@ public final class BattleState {
     }
 
     /**
-     * Reads a required global component. Use this for state that belongs to the battle rather than one entity.
+     * 读取必需的全局组件。属于整场战斗而不是单个实体的状态应放在这里。
      */
     public <T extends Component> T requireGlobal(Class<T> componentType) {
         Component component = globals.get(Objects.requireNonNull(componentType, "componentType"));

@@ -10,8 +10,8 @@ import com.commonbattle.core.EntityId;
 import java.util.List;
 
 /**
- * Card play intent.
- * The command composes spending mana, moving the card, and applying the card's damage effect.
+ * 出牌意图。
+ * 该命令组合了消耗法力、移动卡牌和结算卡牌伤害效果。
  */
 public record PlayCardCommand(EntityId player, EntityId card, EntityId target) implements Command {
     @Override

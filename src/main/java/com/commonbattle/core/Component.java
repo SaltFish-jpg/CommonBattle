@@ -1,8 +1,8 @@
 package com.commonbattle.core;
 
 /**
- * Marker for data attached to an {@link Entity} or to the whole {@link BattleState}.
- * Components should hold state only; gameplay decisions belong in commands, rules, effects, or triggers.
+ * 挂到 {@link Entity} 或整个 {@link BattleState} 上的数据标记。
+ * 组件只保存状态；玩法决策应放在命令、规则、效果或触发器中。
  */
 public interface Component {
 }

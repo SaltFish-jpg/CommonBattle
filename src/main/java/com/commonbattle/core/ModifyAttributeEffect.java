@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Convenience effect that models an attribute modifier as a buff.
+ * 将属性修正建模为 Buff 的便捷效果。
  */
 public record ModifyAttributeEffect(EntityId target, String buffId, String attribute, int delta, int remainingTurns) implements Effect {
     @Override

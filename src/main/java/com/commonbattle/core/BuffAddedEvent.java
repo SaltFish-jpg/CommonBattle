@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Published after a buff is attached to an entity.
+ * Buff 挂到实体后发布的事件。
  */
 public record BuffAddedEvent(EntityId target, Buff buff) implements Event {
 }

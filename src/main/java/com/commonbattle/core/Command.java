@@ -3,8 +3,8 @@ package com.commonbattle.core;
 import java.util.List;
 
 /**
- * External input or AI decision.
- * A command describes intent and expands into effects after the active {@link RuleSet} validates it.
+ * 外部输入或 AI 决策。
+ * 命令描述战斗意图，并在当前 {@link RuleSet} 校验通过后展开为效果。
  */
 public interface Command {
     List<Effect> effects(BattleContext context);

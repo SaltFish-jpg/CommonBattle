@@ -5,8 +5,8 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Lightweight in-process event broadcaster.
- * Client sync, statistics, achievements, and replay collectors can subscribe without joining core settlement logic.
+ * 轻量级进程内事件广播器。
+ * 客户端同步、统计、成就和回放采集可以订阅事件，而不进入核心结算逻辑。
  */
 public final class EventBus {
     private final List<Consumer<Event>> subscribers = new ArrayList<>();

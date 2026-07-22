@@ -9,7 +9,7 @@ import com.commonbattle.core.ApplyBuffCommand;
 import com.commonbattle.core.StatusEffect;
 
 /**
- * Runnable card example: player casts a freeze fireball card onto a target.
+ * 可运行的卡牌示例：玩家对目标打出带冻结效果的火球牌。
  */
 public final class CardBattleExample {
     private CardBattleExample() {

@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Adds a buff to an entity, creating its buff component if needed.
+ * 给实体添加 Buff；目标还没有 Buff 组件时会自动创建。
  */
 public record AddBuffEffect(EntityId target, Buff buff) implements Effect {
     @Override

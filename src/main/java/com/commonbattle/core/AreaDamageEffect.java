@@ -1,7 +1,7 @@
 package com.commonbattle.core;
 
 /**
- * Deals the same damage to every target selected at resolution time.
+ * 对结算时选中的每个目标造成相同伤害。
  */
 public record AreaDamageEffect(EntityId source, TargetSelector selector, int amount) implements Effect {
     @Override

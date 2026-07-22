@@ -4,8 +4,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Runtime buff definition.
- * A buff may carry an attribute modifier, a control status, or both.
+ * 运行时 Buff 定义。
+ * 一个 Buff 可以携带属性修正、控制状态，或两者同时存在。
  */
 public record Buff(String id, String attribute, int attributeDelta, StatusEffect status, int remainingTurns) {
     public Buff {

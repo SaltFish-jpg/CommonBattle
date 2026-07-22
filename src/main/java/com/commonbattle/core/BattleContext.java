@@ -3,10 +3,11 @@ package com.commonbattle.core;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
- * Runtime container for one battle instance.
- * It wires state, rules, command queue, triggers, effects, random, events, and logs into one settlement pipeline.
+ * 单场战斗的运行时容器。
+ * 负责把状态、规则、命令队列、触发器、效果、随机数、事件和日志串成统一结算流水线。
  */
 public final class BattleContext {
     private final BattleState state;
@@ -59,12 +60,16 @@ public final class BattleContext {
     }
 
     /**
-     * Drains queued commands. Effects may enqueue additional commands, which are processed in the same run.
+     * 清空待处理命令。效果可以继续提交新命令，新命令会在同一次运行中继续结算。
      */
     public void runUntilIdle() {
         while (!commandQueue.isEmpty()) {
             commandQueue.poll().ifPresent(this::execute);
         }
+    }
+
+    public <T> Optional<T> find(Class<T> type) {
+        return Optional.ofNullable(type.cast(scoped.get(type)));
     }
 
     public <T> T require(Class<T> type) {
@@ -89,11 +94,13 @@ public final class BattleContext {
     }
 
     private void execute(Command command) {
-        ruleSet.validate(this, command);
-        triggerSystem.fire(TriggerTiming.BEFORE_COMMAND, this);
-        effectResolver.resolve(this, command.effects(this));
-        triggerSystem.fire(TriggerTiming.AFTER_COMMAND, this);
-        log.add("command.completed", command.getClass().getSimpleName() + " completed");
+        withScoped(Command.class, command, () -> {
+            ruleSet.validate(this, command);
+            triggerSystem.fire(TriggerTiming.BEFORE_COMMAND, this);
+            effectResolver.resolve(this, command.effects(this));
+            triggerSystem.fire(TriggerTiming.AFTER_COMMAND, this);
+            log.add("command.completed", command.getClass().getSimpleName() + " completed");
+        });
     }
 
     public static final class Builder {

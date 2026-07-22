@@ -5,10 +5,12 @@ import com.commonbattle.core.BattleContext;
 import com.commonbattle.core.BattleState;
 import com.commonbattle.core.Entity;
 import com.commonbattle.core.FactionComponent;
+import com.commonbattle.core.GainRageOnAttackTrigger;
 import com.commonbattle.core.HealthComponent;
+import com.commonbattle.core.TriggerTiming;
 
 /**
- * Small factory used by tests and the runnable example to assemble an auto battle.
+ * 自动战斗示例工厂，用于测试和可运行示例快速组装战斗。
  */
 public final class AutoBattleExampleFactory {
     private AutoBattleExampleFactory() {
@@ -23,9 +25,11 @@ public final class AutoBattleExampleFactory {
     }
 
     public static BattleContext createBattle(BattleState state) {
-        return BattleContext.builder()
+        BattleContext battle = BattleContext.builder()
                 .state(state)
                 .ruleSet(new AutoBattleRuleSet())
                 .build();
+        battle.triggerSystem().register(TriggerTiming.AFTER_DAMAGE, new GainRageOnAttackTrigger());
+        return battle;
     }
 }

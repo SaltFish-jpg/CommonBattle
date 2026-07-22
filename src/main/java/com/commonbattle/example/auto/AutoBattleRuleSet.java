@@ -8,8 +8,8 @@ import com.commonbattle.core.FactionComponent;
 import com.commonbattle.core.HealthComponent;
 
 /**
- * Example rule set for automatic battle.
- * A tick is legal only while both sides still have an alive unit.
+ * 自动战斗示例规则集。
+ * 只有双方都仍有存活单位时，心跳命令才合法。
  */
 public final class AutoBattleRuleSet extends BasicRuleSet {
     @Override

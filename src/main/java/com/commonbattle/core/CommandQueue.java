@@ -5,7 +5,7 @@ import java.util.Optional;
 import java.util.Queue;
 
 /**
- * FIFO queue for commands submitted by players, AI, rules, or effects.
+ * 玩家、AI、规则或效果提交命令时使用的先进先出队列。
  */
 public final class CommandQueue {
     private final Queue<Command> queue = new ArrayDeque<>();

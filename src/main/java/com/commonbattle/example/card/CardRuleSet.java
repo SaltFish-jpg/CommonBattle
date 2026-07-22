@@ -6,8 +6,8 @@ import com.commonbattle.core.Entity;
 import com.commonbattle.core.RuleSet;
 
 /**
- * Example rule set for card games.
- * It checks hand zone, enough mana, and target existence before a card can be played.
+ * 卡牌玩法示例规则集。
+ * 出牌前会校验手牌区域、法力是否足够以及目标是否存在。
  */
 public final class CardRuleSet implements RuleSet {
     @Override
