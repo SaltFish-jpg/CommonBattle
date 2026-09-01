@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package commonbattle.cluster;
+
+option java_package = "com.commonbattle.cluster.generated";
+option java_multiple_files = true;
+
+message ClusterEnvelope {
+  message MetadataEntry {
+    string key = 1;
+    string value = 2;
+  }
+
+  int64 request_id = 1;
+  string source_kind = 2;
+  string source_region = 3;
+  string source_node = 4;
+  string target_kind = 5;
+  string target_region = 6;
+  string target_node = 7;
+  string operation = 8;
+  string payload_codec = 9;
+  string payload_type = 10;
+  bytes payload_bytes = 11;
+  repeated MetadataEntry metadata = 12;
+}

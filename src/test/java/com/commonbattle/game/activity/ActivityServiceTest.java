@@ -1,0 +1,137 @@
+package com.commonbattle.game.activity;
+
+import com.commonbattle.game.bag.BagService;
+import com.commonbattle.game.bag.ItemCatalog;
+import com.commonbattle.game.bag.ItemDefinition;
+import com.commonbattle.game.bag.ItemStack;
+import com.commonbattle.game.bag.PlayerBag;
+import com.commonbattle.game.bag.Reward;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.time.Instant;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class ActivityServiceTest {
+    @Test
+    void counterActivityCanBeClaimedOnceAfterThreshold() {
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "kill-3",
+                ActivityType.COUNTER,
+                3,
+                Reward.of(new ItemStack("gem", 10))
+        ));
+        ActivityService service = new ActivityService(activities, new BagService(items));
+        PlayerActivities playerActivities = new PlayerActivities();
+        PlayerBag bag = new PlayerBag();
+
+        service.increase(playerActivities, "kill-3", 2);
+        assertThrows(IllegalStateException.class, () -> service.claim(playerActivities, bag, "kill-3"));
+
+        service.increase(playerActivities, "kill-3", 1);
+        service.claim(playerActivities, bag, "kill-3");
+
+        assertEquals(10, bag.count("gem"));
+        assertThrows(IllegalStateException.class, () -> service.claim(playerActivities, bag, "kill-3"));
+    }
+
+    @Test
+    void naturalTimeActivityOnlyWorksInsideWindow() {
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "spring-login",
+                ActivityType.LOGIN,
+                1,
+                Reward.of(new ItemStack("gem", 1)),
+                ActivitySchedule.naturalWindow(Instant.parse("2026-02-01T00:00:00Z"), Instant.parse("2026-03-01T00:00:00Z")),
+                ParticipationCondition.always()
+        ));
+        ActivityService service = new ActivityService(activities, new BagService(items));
+        PlayerActivities playerActivities = new PlayerActivities();
+        ActivityAccessContext beforeOpen = new ActivityAccessContext(
+                Instant.parse("2026-01-31T23:59:59Z"),
+                Instant.parse("2026-01-01T00:00:00Z"),
+                ActivityParticipant.none()
+        );
+        ActivityAccessContext opened = new ActivityAccessContext(
+                Instant.parse("2026-02-10T00:00:00Z"),
+                Instant.parse("2026-01-01T00:00:00Z"),
+                ActivityParticipant.none()
+        );
+
+        assertThrows(IllegalStateException.class, () ->
+                service.recordLogin(playerActivities, beforeOpen, "spring-login"));
+
+        service.recordLogin(playerActivities, opened, "spring-login");
+
+        assertEquals(1, playerActivities.progress("spring-login").value());
+    }
+
+    @Test
+    void openServerActivityUsesServerOpenTimeAndMinLevelCondition() {
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "open-day-2",
+                ActivityType.COUNTER,
+                1,
+                Reward.of(new ItemStack("gem", 1)),
+                ActivitySchedule.openServerWindow(Duration.ofDays(1), Duration.ofDays(3)),
+                ParticipationCondition.minLevel(10)
+        ));
+        ActivityService service = new ActivityService(activities, new BagService(items));
+        Instant serverOpenTime = Instant.parse("2026-08-01T00:00:00Z");
+        ActivityAccessContext tooEarly = new ActivityAccessContext(
+                Instant.parse("2026-08-01T12:00:00Z"),
+                serverOpenTime,
+                participant(20)
+        );
+        ActivityAccessContext lowLevel = new ActivityAccessContext(
+                Instant.parse("2026-08-02T12:00:00Z"),
+                serverOpenTime,
+                participant(9)
+        );
+        ActivityAccessContext eligible = new ActivityAccessContext(
+                Instant.parse("2026-08-02T12:00:00Z"),
+                serverOpenTime,
+                participant(10)
+        );
+        PlayerActivities playerActivities = new PlayerActivities();
+
+        assertThrows(IllegalStateException.class, () ->
+                service.increase(playerActivities, tooEarly, "open-day-2", 1));
+        assertThrows(IllegalStateException.class, () ->
+                service.increase(playerActivities, lowLevel, "open-day-2", 1));
+
+        service.increase(playerActivities, eligible, "open-day-2", 1);
+
+        assertEquals(1, playerActivities.progress("open-day-2").value());
+    }
+
+    private static ActivityParticipant participant(int level) {
+        return new ActivityParticipant() {
+            @Override
+            public long playerId() {
+                return 10001L;
+            }
+
+            @Override
+            public int level() {
+                return level;
+            }
+
+            @Override
+            public Instant createdAt() {
+                return Instant.EPOCH;
+            }
+        };
+    }
+}
