@@ -50,11 +50,29 @@ public final class CrossServerPlayerAgent {
             lastError = null;
             RpcRequest<EnterSceneResult> request = new RpcRequest<>(
                     ServiceKind.SCENE.name(),
-                    "scene.enter",
+                    SceneOperations.ENTER,
                     new EnterSceneRequest(playerId, targetSceneId),
                     EnterSceneResult.class
             );
             rpc.call(request, this::onEnterSceneSuccess, this::onEnterSceneFailure);
+        });
+    }
+
+    public void leaveScene() {
+        system.send(self, context -> {
+            if (status != AgentStatus.IN_SCENE || sceneId == null) {
+                lastError = "player is not in scene";
+                return;
+            }
+            status = AgentStatus.LEAVING_SCENE;
+            lastError = null;
+            RpcRequest<LeaveSceneResult> request = new RpcRequest<>(
+                    ServiceKind.SCENE.name(),
+                    SceneOperations.LEAVE,
+                    new LeaveSceneRequest(playerId, sceneId),
+                    LeaveSceneResult.class
+            );
+            rpc.call(request, this::onLeaveSceneSuccess, this::onLeaveSceneFailure);
         });
     }
 
@@ -64,6 +82,21 @@ public final class CrossServerPlayerAgent {
     }
 
     private void onEnterSceneFailure(Object ignored, Throwable error) {
+        status = AgentStatus.FAILED;
+        lastError = error.getMessage();
+    }
+
+    private void onLeaveSceneSuccess(Object ignored, LeaveSceneResult result) {
+        if (!result.left()) {
+            status = AgentStatus.FAILED;
+            lastError = "scene leave rejected";
+            return;
+        }
+        status = AgentStatus.LOCAL;
+        sceneId = null;
+    }
+
+    private void onLeaveSceneFailure(Object ignored, Throwable error) {
         status = AgentStatus.FAILED;
         lastError = error.getMessage();
     }

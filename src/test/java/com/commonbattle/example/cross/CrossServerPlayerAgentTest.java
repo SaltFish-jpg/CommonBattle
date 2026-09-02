@@ -58,15 +58,90 @@ class CrossServerPlayerAgentTest {
         assertEquals("scene unavailable", agent.lastError());
     }
 
+    @Test
+    void leaveSceneAlsoResumesPlayerAgentThroughMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+        enterSuccessfully(executor, gateway, agent);
+
+        agent.leaveScene();
+        executor.runNext();
+
+        assertEquals(AgentStatus.LEAVING_SCENE, agent.status());
+        assertEquals("scene.leave", gateway.request.operation());
+        LeaveSceneRequest payload = assertInstanceOf(LeaveSceneRequest.class, gateway.request.payload());
+        assertEquals(10001L, payload.playerId());
+        assertEquals("scene-9", payload.sceneId());
+
+        gateway.success(new LeaveSceneResult(10001L, "scene-9", true));
+        assertEquals(AgentStatus.LEAVING_SCENE, agent.status());
+        executor.runNext();
+
+        assertEquals(AgentStatus.LOCAL, agent.status());
+        assertEquals(null, agent.sceneId());
+    }
+
+    @Test
+    void leaveSceneFailureReturnsToPlayerMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+        enterSuccessfully(executor, gateway, agent);
+
+        agent.leaveScene();
+        executor.runNext();
+        gateway.failure(new IllegalStateException("leave timeout"));
+
+        assertEquals(AgentStatus.LEAVING_SCENE, agent.status());
+        executor.runNext();
+
+        assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals("leave timeout", agent.lastError());
+        assertEquals("scene-9", agent.sceneId());
+    }
+
+    @Test
+    void leaveSceneWithoutSceneDoesNotIssueRpc() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+
+        agent.leaveScene();
+        executor.runNext();
+
+        assertEquals(AgentStatus.LOCAL, agent.status());
+        assertEquals("player is not in scene", agent.lastError());
+        assertEquals(null, gateway.request);
+    }
+
+    private static void enterSuccessfully(RecordingExecutor executor, RecordingGateway gateway, CrossServerPlayerAgent agent) {
+        agent.enterScene("scene-9");
+        executor.runNext();
+        gateway.success(new EnterSceneResult(10001L, "scene-9", 7001L));
+        executor.runNext();
+    }
+
     private static final class RecordingGateway implements RpcGateway {
-        private RpcRequest<EnterSceneResult> request;
-        private RpcCallback<EnterSceneResult> callback;
+        private RpcRequest<?> request;
+        private RpcCallback<Object> callback;
 
         @Override
         @SuppressWarnings("unchecked")
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
-            this.request = (RpcRequest<EnterSceneResult>) request;
-            this.callback = (RpcCallback<EnterSceneResult>) callback;
+            this.request = request;
+            this.callback = (RpcCallback<Object>) callback;
+        }
+
+        void success(Object response) {
+            callback.success(response);
+        }
+
+        void failure(Throwable error) {
+            callback.failure(error);
         }
     }
 

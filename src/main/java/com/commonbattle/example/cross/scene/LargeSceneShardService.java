@@ -6,6 +6,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.example.cross.SceneOperations;
 
 import java.util.Map;
 import java.util.Set;
@@ -37,7 +38,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         this.descriptor = new ServiceDescriptor(
                 serviceId,
                 endpoint,
-                Set.of("scene.enter", "scene.leave", "scene.message"),
+                Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE),
                 Map.of(
                         "scene.mode", SceneHostingMode.LARGE_SCENE_SHARD.name(),
                         "scene.id", sceneId,

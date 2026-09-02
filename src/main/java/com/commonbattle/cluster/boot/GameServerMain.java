@@ -8,13 +8,27 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
+import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
+import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
+import com.commonbattle.game.config.GameConfigValidator;
+import com.commonbattle.game.config.GameConfigAutoRecovery;
+import com.commonbattle.game.config.GameConfigChangedEvent;
+import com.commonbattle.game.config.GameConfigEventReplayRepairer;
+import com.commonbattle.game.config.GameConfigWarmupResult;
+import com.commonbattle.game.config.GameConfigWarmupService;
+import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
+import com.commonbattle.game.profile.InMemoryProfileSnapshotRepository;
+import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
+import com.commonbattle.game.profile.ProfileSnapshotRepository;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
@@ -38,11 +52,45 @@ public final class GameServerMain {
                 codecs
         );
         ClusterRpcGateway gateway = new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport);
+        ProfileSnapshotRepository profileSnapshots = new InMemoryProfileSnapshotRepository();
+        new ProfileSnapshotEndpoint(profileSnapshots).bind(gateway);
         RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
         ClusterNode node = new ClusterNode(registry, local, directory);
-        node.start(List.of(ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION));
         ActorSystem actors = new ActorSystem(config.actorWorkers());
-        System.out.println("Game server started: " + local.id().wireName() + ", actors=" + actors);
+        node.start(
+                List.of(ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+                config.registryLeaseTtl(),
+                config.registryHeartbeatInterval()
+        );
+        LocalGameConfigCache configCache = new LocalGameConfigCache(
+                new GameConfigValidator(),
+                Clock.systemUTC()
+        );
+        ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(local.id(), gateway);
+        ClusterEventSubscriptionManager eventSubscriptions = new ClusterEventSubscriptionManager(eventBus);
+        RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
+        GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
+        configCache.attachRecoveryTrigger(configAutoRecovery);
+        eventSubscriptions.register(
+                GameConfigChangedEvent.TOPIC,
+                configCache,
+                () -> java.util.Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision()),
+                new GameConfigEventReplayRepairer(configAutoRecovery, configCache::appliedEventRevision, configCache::stale)
+        );
+        eventSubscriptions.start();
+        GameConfigWarmupResult warmup = new GameConfigWarmupService(
+                configRecovery,
+                Clock.systemUTC()
+        ).warmup(config.configWarmupTimeout());
+        if (!warmup.ready()) {
+            throw new IllegalStateException("Game config warmup failed: " + warmup.message());
+        }
+        BootOpsHttp.start(config, local, actors, directory, gateway, transport, node,
+                List.of(configCache), List.of(configAutoRecovery), List.of(eventSubscriptions));
+        System.out.println("Game server started: " + local.id().wireName()
+                + ", config=" + configCache.active().version()
+                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port()
+                + ", actors=" + actors);
         new CountDownLatch(1).await();
     }
 }

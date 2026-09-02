@@ -17,4 +17,8 @@ public final class MinLevelCondition implements ParticipationCondition {
     public boolean allows(ActivityAccessContext context) {
         return context.participant().level() >= level;
     }
+
+    public int level() {
+        return level;
+    }
 }

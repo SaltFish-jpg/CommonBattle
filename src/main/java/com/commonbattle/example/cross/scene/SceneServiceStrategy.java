@@ -10,4 +10,12 @@ public interface SceneServiceStrategy {
     ServiceDescriptor descriptor();
 
     ScenePlacement place(String sceneId, int chunkX, int chunkY);
+
+    default ScenePlacement enter(long playerId, String sceneId, int chunkX, int chunkY) {
+        return place(sceneId, chunkX, chunkY);
+    }
+
+    default boolean leave(long playerId, String sceneId) {
+        return true;
+    }
 }

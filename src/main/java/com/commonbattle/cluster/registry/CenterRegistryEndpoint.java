@@ -48,8 +48,17 @@ public final class CenterRegistryEndpoint implements AutoCloseable {
     private void bindHandlers() {
         gateway.handle(RegistryOperations.REGISTER, (request, responder) -> {
             RegistryRegisterRequest payload = (RegistryRegisterRequest) request.payload();
-            registry.register(payload.service());
+            if (payload.leaseTtl().isZero()) {
+                registry.register(payload.service());
+            } else {
+                registry.register(payload.service(), payload.leaseTtl());
+            }
             responder.success(new RegistryAck("registered"));
+        });
+        gateway.handle(RegistryOperations.HEARTBEAT, (request, responder) -> {
+            RegistryHeartbeatRequest payload = (RegistryHeartbeatRequest) request.payload();
+            boolean renewed = registry.heartbeat(payload.serviceId(), payload.leaseTtl());
+            responder.success(new RegistryAck(renewed ? "heartbeat.renewed" : "heartbeat.missing"));
         });
         gateway.handle(RegistryOperations.UNREGISTER, (request, responder) -> {
             RegistryUnregisterRequest payload = (RegistryUnregisterRequest) request.payload();

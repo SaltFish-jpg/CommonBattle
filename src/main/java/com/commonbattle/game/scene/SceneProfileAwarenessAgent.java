@@ -5,8 +5,10 @@ import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.profile.CachedProfile;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
+import com.commonbattle.game.profile.ProfileInterestControl;
 
 import java.util.HashSet;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -17,20 +19,44 @@ import java.util.Set;
 public final class SceneProfileAwarenessAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
-    private final LocalProfileCache cache = new LocalProfileCache();
+    private final ProfileInterestControl interests;
+    private final LocalProfileCache cache;
     private final Set<Long> onlinePlayers = new HashSet<>();
 
     public SceneProfileAwarenessAgent(AgentMessagePort messages, ActorRef self) {
+        this(messages, self, ProfileInterestControl.noop());
+    }
+
+    public SceneProfileAwarenessAgent(AgentMessagePort messages, ActorRef self, ProfileInterestControl interests) {
+        this(messages, self, interests, new LocalProfileCache());
+    }
+
+    public SceneProfileAwarenessAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            ProfileInterestControl interests,
+            LocalProfileCache cache
+    ) {
         this.messages = messages;
         this.self = self;
+        this.interests = Objects.requireNonNull(interests, "interests");
+        this.cache = Objects.requireNonNull(cache, "cache");
     }
 
     public void enter(long playerId) {
-        messages.tellLocal(self, ignored -> onlinePlayers.add(playerId));
+        messages.tellLocal(self, ignored -> {
+            if (onlinePlayers.add(playerId)) {
+                interests.watch(playerId);
+            }
+        });
     }
 
     public void leave(long playerId) {
-        messages.tellLocal(self, ignored -> onlinePlayers.remove(playerId));
+        messages.tellLocal(self, ignored -> {
+            if (onlinePlayers.remove(playerId)) {
+                interests.unwatch(playerId);
+            }
+        });
     }
 
     public void onProfileChanged(ProfileChangedEvent event) {

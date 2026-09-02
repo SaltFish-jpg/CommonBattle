@@ -5,16 +5,39 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.event.ClusterEventCenter;
+import com.commonbattle.cluster.event.ClusterEventCenterStats;
+import com.commonbattle.cluster.netty.NettyClusterTransport;
+import com.commonbattle.cluster.netty.NettyTransportStats;
+import com.commonbattle.cluster.registry.RegistryLeaseReaper;
+import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
+import com.commonbattle.cluster.registry.RegistryLeaseRenewalStats;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
+import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
+import com.commonbattle.cluster.event.ClusterEventSubscriptionStats;
+import com.commonbattle.cluster.event.ClusterEventTopicStats;
+import com.commonbattle.game.config.GameConfigAutoRecovery;
+import com.commonbattle.game.config.GameConfigAutoRecoveryStats;
+import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.PendingVersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.profile.ProfileInterestStats;
+import com.commonbattle.game.profile.ProfileInterestView;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
+import com.commonbattle.game.session.PlayerCommandAuditRecord;
+import com.commonbattle.game.session.PlayerCommandAuditStats;
+import com.commonbattle.game.session.PlayerCommandAuditView;
+import com.commonbattle.game.session.PlayerCommandDispatcher;
+import com.commonbattle.game.session.PlayerCommandStats;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -28,6 +51,16 @@ public final class RuntimeHealthProbe {
     private final VersionedEventOutbox outbox;
     private final ClusterDirectory directory;
     private final Collection<ClusterRpcGateway> rpcGateways;
+    private final Collection<PlayerCommandDispatcher> commandDispatchers;
+    private final Collection<NettyClusterTransport> networkTransports;
+    private final Collection<RegistryLeaseRenewer> leaseRenewers;
+    private final Collection<RegistryLeaseReaper> leaseReapers;
+    private final Collection<LocalGameConfigCache> configCaches;
+    private final Collection<GameConfigAutoRecovery> configRecoveries;
+    private final Collection<PlayerCommandAuditView> commandAudits;
+    private final Collection<ClusterEventCenter> eventCenters;
+    private final Collection<ClusterEventSubscriptionManager> eventSubscriptions;
+    private final Collection<ProfileInterestView> profileInterests;
     private final RuntimeHealthPolicy policy;
 
     public RuntimeHealthProbe(
@@ -50,29 +83,232 @@ public final class RuntimeHealthProbe {
             Collection<ClusterRpcGateway> rpcGateways,
             RuntimeHealthPolicy policy
     ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<LocalGameConfigCache> configCaches,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers,
+                configCaches, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers,
+                configCaches, configRecoveries, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers,
+                List.of(), List.of(), List.of(), configCaches, configRecoveries, commandAudits, policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers,
+                List.of(), leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits,
+                List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, List.of(),
+                eventSubscriptions, policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventCenter> eventCenters,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, eventCenters,
+                eventSubscriptions, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventCenter> eventCenters,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            Collection<ProfileInterestView> profileInterests,
+            RuntimeHealthPolicy policy
+    ) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.actors = Objects.requireNonNull(actors, "actors");
         this.lifecycles = Objects.requireNonNull(lifecycles, "lifecycles");
         this.outbox = Objects.requireNonNull(outbox, "outbox");
         this.directory = Objects.requireNonNull(directory, "directory");
         this.rpcGateways = List.copyOf(Objects.requireNonNull(rpcGateways, "rpcGateways"));
+        this.commandDispatchers = List.copyOf(Objects.requireNonNull(commandDispatchers, "commandDispatchers"));
+        this.networkTransports = List.copyOf(Objects.requireNonNull(networkTransports, "networkTransports"));
+        this.leaseRenewers = List.copyOf(Objects.requireNonNull(leaseRenewers, "leaseRenewers"));
+        this.leaseReapers = List.copyOf(Objects.requireNonNull(leaseReapers, "leaseReapers"));
+        this.configCaches = List.copyOf(Objects.requireNonNull(configCaches, "configCaches"));
+        this.configRecoveries = List.copyOf(Objects.requireNonNull(configRecoveries, "configRecoveries"));
+        this.commandAudits = List.copyOf(Objects.requireNonNull(commandAudits, "commandAudits"));
+        this.eventCenters = List.copyOf(Objects.requireNonNull(eventCenters, "eventCenters"));
+        this.eventSubscriptions = List.copyOf(Objects.requireNonNull(eventSubscriptions, "eventSubscriptions"));
+        this.profileInterests = List.copyOf(Objects.requireNonNull(profileInterests, "profileInterests"));
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     public RuntimeHealthSnapshot snapshot() {
         var actorStats = actors.stats();
         RpcGatewayStats rpcStats = rpcStats();
+        PlayerCommandStats commandStats = commandStats();
         AgentLifecycleStats agentStats = agentStats();
         EventOutboxStats outboxStats = outboxStats();
         ClusterServiceStats clusterStats = clusterStats();
-        RuntimeHealthStatus status = status(actorStats.queuedTasks(), outboxStats.pendingEvents());
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, agentStats, outboxStats, clusterStats);
+        RegistryLeaseHealthStats leaseStats = leaseStats();
+        NetworkTransportHealthStats networkStats = networkStats();
+        ConfigCacheHealthStats configStats = configStats();
+        ConfigRecoveryHealthStats recoveryStats = configRecoveryStats();
+        PlayerCommandAuditHealthStats auditStats = commandAuditStats();
+        EventCenterHealthStats eventCenterStats = eventCenterStats();
+        EventSubscriptionHealthStats eventSubscriptionStats = eventSubscriptionStats();
+        ProfileInterestHealthStats profileInterestStats = profileInterestStats();
+        RuntimeHealthStatus status = status(
+                actorStats.queuedTasks(),
+                outboxStats.pendingEvents(),
+                configStats,
+                leaseStats,
+                networkStats,
+                eventSubscriptionStats,
+                profileInterestStats
+        );
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, commandStats, agentStats,
+                outboxStats, clusterStats, leaseStats, networkStats, configStats, recoveryStats,
+                eventCenterStats, eventSubscriptionStats, profileInterestStats, auditStats);
     }
 
     private RpcGatewayStats rpcStats() {
         return rpcGateways.stream()
                 .map(ClusterRpcGateway::stats)
                 .reduce(RpcGatewayStats.empty(), RpcGatewayStats::plus);
+    }
+
+    private PlayerCommandStats commandStats() {
+        return commandDispatchers.stream()
+                .map(PlayerCommandDispatcher::stats)
+                .reduce(PlayerCommandStats.empty(), PlayerCommandStats::plus);
     }
 
     private AgentLifecycleStats agentStats() {
@@ -101,13 +337,317 @@ public final class RuntimeHealthProbe {
         return new ClusterServiceStats(counts);
     }
 
-    private RuntimeHealthStatus status(int queuedTasks, int pendingEvents) {
+    private RegistryLeaseHealthStats leaseStats() {
+        long successfulHeartbeats = 0;
+        long reRegistrations = 0;
+        long failedRenewals = 0;
+        for (RegistryLeaseRenewer renewer : leaseRenewers) {
+            RegistryLeaseRenewalStats stats = renewer.stats();
+            successfulHeartbeats += stats.successfulHeartbeats();
+            reRegistrations += stats.reRegistrations();
+            failedRenewals += stats.failedRenewals();
+        }
+        long expiredServices = leaseReapers.stream()
+                .mapToLong(RegistryLeaseReaper::expiredServices)
+                .sum();
+        return new RegistryLeaseHealthStats(
+                leaseRenewers.size(),
+                successfulHeartbeats,
+                reRegistrations,
+                failedRenewals,
+                leaseReapers.size(),
+                expiredServices
+        );
+    }
+
+    private NetworkTransportHealthStats networkStats() {
+        if (networkTransports.isEmpty()) {
+            return NetworkTransportHealthStats.empty();
+        }
+        int activeConnections = 0;
+        long connectionAttempts = 0;
+        long connectionFailures = 0;
+        long sentEnvelopes = 0;
+        long failedWrites = 0;
+        long receivedEnvelopes = 0;
+        long inboundFailures = 0;
+        for (NettyClusterTransport transport : networkTransports) {
+            NettyTransportStats stats = transport.stats();
+            activeConnections += stats.activeConnections();
+            connectionAttempts += stats.connectionAttempts();
+            connectionFailures += stats.connectionFailures();
+            sentEnvelopes += stats.sentEnvelopes();
+            failedWrites += stats.failedWrites();
+            receivedEnvelopes += stats.receivedEnvelopes();
+            inboundFailures += stats.inboundFailures();
+        }
+        return new NetworkTransportHealthStats(
+                networkTransports.size(),
+                activeConnections,
+                connectionAttempts,
+                connectionFailures,
+                sentEnvelopes,
+                failedWrites,
+                receivedEnvelopes,
+                inboundFailures
+        );
+    }
+
+    private ConfigCacheHealthStats configStats() {
+        if (configCaches.isEmpty()) {
+            return ConfigCacheHealthStats.empty();
+        }
+        int ready = 0;
+        int active = 0;
+        int stale = 0;
+        long minRevision = Long.MAX_VALUE;
+        long maxRevision = 0;
+        for (LocalGameConfigCache cache : configCaches) {
+            if (cache.activeVersion().isPresent()) {
+                active++;
+            }
+            if (cache.ready()) {
+                ready++;
+            }
+            if (cache.stale()) {
+                stale++;
+            }
+            long revision = cache.appliedEventRevision();
+            minRevision = Math.min(minRevision, revision);
+            maxRevision = Math.max(maxRevision, revision);
+        }
+        return new ConfigCacheHealthStats(configCaches.size(), active, ready, stale,
+                minRevision == Long.MAX_VALUE ? 0 : minRevision, maxRevision);
+    }
+
+    private ConfigRecoveryHealthStats configRecoveryStats() {
+        if (configRecoveries.isEmpty()) {
+            return ConfigRecoveryHealthStats.empty();
+        }
+        int requested = 0;
+        int skipped = 0;
+        int succeeded = 0;
+        int failed = 0;
+        int inFlight = 0;
+        for (GameConfigAutoRecovery recovery : configRecoveries) {
+            GameConfigAutoRecoveryStats stats = recovery.stats();
+            requested += stats.requested();
+            skipped += stats.skippedWhileInFlight();
+            succeeded += stats.succeeded();
+            failed += stats.failed();
+            if (stats.inFlight()) {
+                inFlight++;
+            }
+        }
+        return new ConfigRecoveryHealthStats(configRecoveries.size(), requested, skipped, succeeded, failed, inFlight);
+    }
+
+    private PlayerCommandAuditHealthStats commandAuditStats() {
+        if (commandAudits.isEmpty()) {
+            return PlayerCommandAuditHealthStats.empty();
+        }
+        long executed = 0;
+        long failed = 0;
+        long rejected = 0;
+        long routedRemote = 0;
+        long retained = 0;
+        long dropped = 0;
+        long maxElapsedMillis = 0;
+        Map<Long, Long> configVersions = new HashMap<>();
+        for (PlayerCommandAuditView audit : commandAudits) {
+            PlayerCommandAuditStats stats = audit.stats();
+            retained += stats.retained();
+            dropped += stats.dropped();
+            for (PlayerCommandAuditRecord record : audit.records()) {
+                if (record.outcome() == PlayerCommandAuditOutcome.EXECUTED) {
+                    executed++;
+                } else if (record.outcome() == PlayerCommandAuditOutcome.FAILED) {
+                    failed++;
+                } else if (record.outcome() == PlayerCommandAuditOutcome.REJECTED) {
+                    rejected++;
+                } else if (record.outcome() == PlayerCommandAuditOutcome.ROUTED_REMOTE) {
+                    routedRemote++;
+                }
+                maxElapsedMillis = Math.max(maxElapsedMillis, record.elapsed().toMillis());
+                configVersions.merge(record.configVersion(), 1L, Long::sum);
+            }
+        }
+        long total = executed + failed + rejected + routedRemote;
+        return new PlayerCommandAuditHealthStats(total, retained, dropped, executed, failed, rejected, routedRemote,
+                maxElapsedMillis, configVersions);
+    }
+
+    private EventSubscriptionHealthStats eventSubscriptionStats() {
+        if (eventSubscriptions.isEmpty()) {
+            return EventSubscriptionHealthStats.empty();
+        }
+        int registered = 0;
+        int active = 0;
+        long subscribeAttempts = 0;
+        long subscribeFailures = 0;
+        long replayAttempts = 0;
+        long replayFailures = 0;
+        long replayDelivered = 0;
+        long replayUnavailableOwners = 0;
+        long replayRepairRequests = 0;
+        long replayRepairOwnerCount = 0;
+        long replayRepairFailures = 0;
+        long cursorFailures = 0;
+        for (ClusterEventSubscriptionManager manager : eventSubscriptions) {
+            ClusterEventSubscriptionStats stats = manager.stats();
+            registered += stats.registered();
+            active += stats.active();
+            subscribeAttempts += stats.subscribeAttempts();
+            subscribeFailures += stats.subscribeFailures();
+            replayAttempts += stats.replayAttempts();
+            replayFailures += stats.replayFailures();
+            replayDelivered += stats.replayDelivered();
+            replayUnavailableOwners += stats.replayUnavailableOwners();
+            replayRepairRequests += stats.replayRepairRequests();
+            replayRepairOwnerCount += stats.replayRepairOwnerCount();
+            replayRepairFailures += stats.replayRepairFailures();
+            cursorFailures += stats.cursorFailures();
+        }
+        return new EventSubscriptionHealthStats(eventSubscriptions.size(), registered, active, subscribeAttempts,
+                subscribeFailures, replayAttempts, replayFailures, replayDelivered, replayUnavailableOwners,
+                replayRepairRequests, replayRepairOwnerCount, replayRepairFailures, cursorFailures);
+    }
+
+    private EventCenterHealthStats eventCenterStats() {
+        if (eventCenters.isEmpty()) {
+            return EventCenterHealthStats.empty();
+        }
+        int topicCount = 0;
+        int retainedEvents = 0;
+        int retainedOwners = 0;
+        int subscribers = 0;
+        long publishedEvents = 0;
+        long droppedEvents = 0;
+        Map<String, EventCenterTopicAccumulator> topics = new HashMap<>();
+        for (ClusterEventCenter center : eventCenters) {
+            ClusterEventCenterStats stats = center.stats();
+            topicCount += stats.topics().size();
+            for (ClusterEventTopicStats topic : stats.topics().values()) {
+                retainedEvents += topic.retainedEvents();
+                retainedOwners += topic.retainedOwners();
+                subscribers += topic.subscribers();
+                publishedEvents += topic.publishedEvents();
+                droppedEvents += topic.droppedEvents();
+                topics.computeIfAbsent(topic.topic(), ignored -> new EventCenterTopicAccumulator(topic.topic()))
+                        .add(topic);
+            }
+        }
+        Map<String, EventCenterTopicHealthStats> topicStats = new HashMap<>();
+        topics.forEach((topic, accumulator) -> topicStats.put(topic, accumulator.snapshot()));
+        return new EventCenterHealthStats(eventCenters.size(), topicCount, retainedEvents, retainedOwners,
+                subscribers, publishedEvents, droppedEvents, topicStats);
+    }
+
+    private ProfileInterestHealthStats profileInterestStats() {
+        if (profileInterests.isEmpty()) {
+            return ProfileInterestHealthStats.empty();
+        }
+        int watchedOwners = 0;
+        long watchRequests = 0;
+        long unwatchRequests = 0;
+        long replayAttempts = 0;
+        long replayFailures = 0;
+        long repairRequests = 0;
+        long repairFailures = 0;
+        for (ProfileInterestView interest : profileInterests) {
+            ProfileInterestStats stats = interest.stats();
+            watchedOwners += stats.watchedOwners();
+            watchRequests += stats.watchRequests();
+            unwatchRequests += stats.unwatchRequests();
+            replayAttempts += stats.replayAttempts();
+            replayFailures += stats.replayFailures();
+            repairRequests += stats.repairRequests();
+            repairFailures += stats.repairFailures();
+        }
+        return new ProfileInterestHealthStats(profileInterests.size(), watchedOwners, watchRequests, unwatchRequests,
+                replayAttempts, replayFailures, repairRequests, repairFailures);
+    }
+
+    private RuntimeHealthStatus status(
+            int queuedTasks,
+            int pendingEvents,
+            ConfigCacheHealthStats configStats,
+            RegistryLeaseHealthStats leaseStats,
+            NetworkTransportHealthStats networkStats,
+            EventSubscriptionHealthStats eventSubscriptionStats,
+            ProfileInterestHealthStats profileInterestStats
+    ) {
         if (!actors.isAccepting()) {
             return RuntimeHealthStatus.DOWN;
+        }
+        if (configStats.cacheCount() > 0 && configStats.activeCaches() < configStats.cacheCount()) {
+            return RuntimeHealthStatus.DOWN;
+        }
+        if (configStats.staleCaches() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (leaseStats.failedRenewals() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (networkStats.connectionFailures() > 0 || networkStats.failedWrites() > 0 || networkStats.inboundFailures() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (eventSubscriptionStats.subscribeFailures() > 0
+                || eventSubscriptionStats.replayFailures() > 0
+                || eventSubscriptionStats.replayUnavailableOwners() > 0
+                || eventSubscriptionStats.replayRepairFailures() > 0
+                || eventSubscriptionStats.cursorFailures() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (profileInterestStats.replayFailures() > 0 || profileInterestStats.repairFailures() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
         }
         if (queuedTasks > policy.maxQueuedTasks() || pendingEvents > policy.maxPendingOutboxEvents()) {
             return RuntimeHealthStatus.DEGRADED;
         }
         return RuntimeHealthStatus.UP;
+    }
+
+    private static final class EventCenterTopicAccumulator {
+        private final String topic;
+        private int historyLimit;
+        private int retainedEvents;
+        private int retainedOwners;
+        private int subscribers;
+        private long publishedEvents;
+        private long droppedEvents;
+        private long minRetainedRevision = Long.MAX_VALUE;
+        private long maxRetainedRevision;
+
+        private EventCenterTopicAccumulator(String topic) {
+            this.topic = topic;
+        }
+
+        private void add(ClusterEventTopicStats stats) {
+            historyLimit += stats.historyLimit();
+            retainedEvents += stats.retainedEvents();
+            retainedOwners += stats.retainedOwners();
+            subscribers += stats.subscribers();
+            publishedEvents += stats.publishedEvents();
+            droppedEvents += stats.droppedEvents();
+            if (stats.minRetainedRevision() > 0) {
+                minRetainedRevision = Math.min(minRetainedRevision, stats.minRetainedRevision());
+            }
+            maxRetainedRevision = Math.max(maxRetainedRevision, stats.maxRetainedRevision());
+        }
+
+        private EventCenterTopicHealthStats snapshot() {
+            return new EventCenterTopicHealthStats(
+                    topic,
+                    historyLimit,
+                    retainedEvents,
+                    retainedOwners,
+                    subscribers,
+                    publishedEvents,
+                    droppedEvents,
+                    minRetainedRevision == Long.MAX_VALUE ? 0 : minRetainedRevision,
+                    maxRetainedRevision
+            );
+        }
     }
 }

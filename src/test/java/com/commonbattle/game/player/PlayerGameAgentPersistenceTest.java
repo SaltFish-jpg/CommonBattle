@@ -117,7 +117,7 @@ class PlayerGameAgentPersistenceTest {
             ActorTimerHandle handle = agent.scheduleAutoSave(
                     timers,
                     Duration.ofMillis(1),
-                    Duration.ofMillis(100),
+                    Duration.ofSeconds(5),
                     repository,
                     saved::set
             );

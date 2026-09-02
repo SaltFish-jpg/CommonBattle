@@ -4,6 +4,11 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.event.ClusterEventOperations;
+import com.commonbattle.cluster.registry.RegistryOperations;
+import com.commonbattle.game.config.GameConfigOperations;
+import com.commonbattle.game.profile.ProfileSnapshotOperations;
+import com.commonbattle.example.cross.SceneOperations;
 
 import java.util.Map;
 import java.util.Set;
@@ -26,10 +31,19 @@ final class ClusterDescriptors {
 
     private static Set<String> topics(ServiceKind kind) {
         return switch (kind) {
-            case CENTER -> Set.of("registry.register", "registry.unregister", "registry.list", "registry.subscribe");
+            case CENTER -> Set.of(
+                    RegistryOperations.REGISTER,
+                    RegistryOperations.UNREGISTER,
+                    RegistryOperations.LIST,
+                    RegistryOperations.SUBSCRIBE,
+                    ClusterEventOperations.SUBSCRIBE,
+                    ClusterEventOperations.UNSUBSCRIBE,
+                    ClusterEventOperations.PUBLISH,
+                    GameConfigOperations.SNAPSHOT
+            );
             case REGION -> Set.of("region.route", "region.heartbeat");
-            case GAME -> Set.of("game.resume", "game.heartbeat");
-            case SCENE -> Set.of("scene.enter", "scene.leave", "scene.message");
+            case GAME -> Set.of("game.resume", "game.heartbeat", ProfileSnapshotOperations.GET);
+            case SCENE -> Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE);
             case PROXY -> Set.of("proxy.forward", "proxy.heartbeat");
         };
     }

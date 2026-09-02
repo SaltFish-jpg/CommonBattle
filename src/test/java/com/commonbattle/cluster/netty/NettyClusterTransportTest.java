@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NettyClusterTransportTest {
@@ -60,6 +61,42 @@ class NettyClusterTransportTest {
             assertEquals("scene.enter", envelope.operation());
             EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, envelope.payload());
             assertEquals("room-1", payload.sceneId());
+            assertEventually(() -> gameTransport.stats().sentEnvelopes() == 1);
+            assertEquals(1, gameTransport.stats().activeConnections());
+            assertEquals(1, gameTransport.stats().connectionAttempts());
+            assertEquals(0, gameTransport.stats().connectionFailures());
+            assertEquals(1, sceneTransport.stats().receivedEnvelopes());
+        }
+    }
+
+    @Test
+    void recordsConnectionFailureWhenTargetIsUnavailable() throws Exception {
+        int gamePort = freePort();
+        int missingScenePort = freePort();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", gamePort, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", missingScenePort, Set.of("scene.enter"));
+        Map<ServiceId, ServiceEndpoint> endpoints = Map.of(
+                game.id(), game.endpoint(),
+                scene.id(), scene.endpoint()
+        );
+        PayloadCodecRegistry codecs = RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create());
+
+        try (NettyClusterTransport gameTransport = new NettyClusterTransport(endpoints::get, codecs)) {
+            gameTransport.bind(game, ignored -> {
+            });
+
+            assertThrows(IllegalStateException.class, () -> gameTransport.send(scene.id(), new ClusterEnvelope(
+                    1,
+                    game.id(),
+                    scene.id(),
+                    "scene.enter",
+                    new EnterSceneRequest(10001L, "room-1")
+            )));
+
+            assertEquals(1, gameTransport.stats().connectionAttempts());
+            assertEquals(1, gameTransport.stats().connectionFailures());
+            assertEquals(0, gameTransport.stats().activeConnections());
+            assertEquals(0, gameTransport.stats().sentEnvelopes());
         }
     }
 
@@ -76,5 +113,21 @@ class NettyClusterTransportTest {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
         }
+    }
+
+    private static void assertEventually(BooleanSupplier assertion) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (System.nanoTime() < deadline) {
+            if (assertion.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertTrue(assertion.getAsBoolean());
+    }
+
+    @FunctionalInterface
+    private interface BooleanSupplier {
+        boolean getAsBoolean();
     }
 }

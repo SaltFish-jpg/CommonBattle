@@ -7,6 +7,8 @@ import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.activity.ActivityAccessContext;
 import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityService;
+import com.commonbattle.game.config.GameConfigRegistry;
+import com.commonbattle.game.config.GameConfigView;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
 
@@ -15,6 +17,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.LongFunction;
 
 /**
  * 玩家通用业务 Agent。
@@ -24,8 +27,7 @@ public final class PlayerGameAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
     private final PlayerProfile profile;
-    private final ActivityService activityService;
-    private final GrowthService growthService;
+    private final LongFunction<PlayerGameRuntime> runtimeResolver;
     private final Clock clock;
     private final Instant serverOpenTime;
     private long stateRevision;
@@ -44,6 +46,24 @@ public final class PlayerGameAgent {
             AgentMessagePort messages,
             ActorRef self,
             PlayerProfile profile,
+            GameConfigRegistry configRegistry
+    ) {
+        this(messages, self, profile, configRegistry, Clock.systemUTC(), Instant.EPOCH);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView
+    ) {
+        this(messages, self, profile, configView, Clock.systemUTC(), Instant.EPOCH);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
             ActivityService activityService,
             GrowthService growthService,
             Clock clock,
@@ -56,8 +76,58 @@ public final class PlayerGameAgent {
             AgentMessagePort messages,
             ActorRef self,
             PlayerProfile profile,
+            GameConfigRegistry configRegistry,
+            Clock clock,
+            Instant serverOpenTime
+    ) {
+        this(messages, self, profile, (GameConfigView) configRegistry, clock, serverOpenTime);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                runtimeResolver(configView),
+                clock,
+                serverOpenTime,
+                0
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
             ActivityService activityService,
             GrowthService growthService,
+            Clock clock,
+            Instant serverOpenTime,
+            long initialStateRevision
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                fixedRuntimeResolver(activityService, growthService),
+                clock,
+                serverOpenTime,
+                initialStateRevision
+        );
+    }
+
+    private PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            LongFunction<PlayerGameRuntime> runtimeResolver,
             Clock clock,
             Instant serverOpenTime,
             long initialStateRevision
@@ -65,8 +135,7 @@ public final class PlayerGameAgent {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.profile = Objects.requireNonNull(profile, "profile");
-        this.activityService = Objects.requireNonNull(activityService, "activityService");
-        this.growthService = Objects.requireNonNull(growthService, "growthService");
+        this.runtimeResolver = Objects.requireNonNull(runtimeResolver, "runtimeResolver");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.serverOpenTime = Objects.requireNonNull(serverOpenTime, "serverOpenTime");
         loadRevision(initialStateRevision);
@@ -77,26 +146,35 @@ public final class PlayerGameAgent {
     }
 
     public void onLogin(String activityId, Consumer<ActivityClaimResult> callback) {
-        messages.tellLocal(self, ignored -> {
-            ActivityAccessContext access = activityAccess();
-            activityService.recordLogin(profile.activities(), access, activityId);
-            callback.accept(activityService.claim(profile.activities(), profile.bag(), access, activityId));
+        execute(execution -> {
+            ActivityService service = execution.runtime().activityService();
+            service.recordLogin(profile.activities(), execution.activityAccess(), activityId);
+            callback.accept(service.claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId));
         });
     }
 
     public void addActivityProgress(String activityId, int delta) {
-        messages.tellLocal(self, ignored ->
-                activityService.increase(profile.activities(), activityAccess(), activityId, delta));
+        execute(execution ->
+                execution.runtime().activityService().increase(profile.activities(), execution.activityAccess(), activityId, delta));
     }
 
     public void claimActivity(String activityId, Consumer<ActivityClaimResult> callback) {
-        messages.tellLocal(self, ignored ->
-                callback.accept(activityService.claim(profile.activities(), profile.bag(), activityAccess(), activityId)));
+        execute(execution ->
+                callback.accept(execution.runtime().activityService()
+                        .claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId)));
     }
 
     public void useExpItems(int count, Consumer<GrowthResult> callback) {
-        messages.tellLocal(self, ignored ->
-                callback.accept(growthService.useExpItems(profile.bag(), profile.growth(), count)));
+        execute(execution ->
+                callback.accept(execution.runtime().growthService().useExpItems(profile.bag(), profile.growth(), count)));
+    }
+
+    /**
+     * 在玩家邮箱中执行自定义业务逻辑，并在入口绑定本次消息使用的配置版本。
+     */
+    public void execute(Consumer<PlayerGameExecution> handler) {
+        Objects.requireNonNull(handler, "handler");
+        messages.tellLocal(self, ignored -> handler.accept(execution()));
     }
 
     public void save(PlayerStateRepository repository, Consumer<PlayerStateSnapshot> callback) {
@@ -140,6 +218,24 @@ public final class PlayerGameAgent {
 
     private ActivityAccessContext activityAccess() {
         return new ActivityAccessContext(clock.instant(), serverOpenTime, profile);
+    }
+
+    private PlayerGameExecution execution() {
+        PlayerGameRuntime runtime = runtimeResolver.apply(profile.playerId());
+        return new PlayerGameExecution(profile, runtime, activityAccess());
+    }
+
+    private static LongFunction<PlayerGameRuntime> fixedRuntimeResolver(
+            ActivityService activityService,
+            GrowthService growthService
+    ) {
+        PlayerGameRuntime runtime = PlayerGameRuntime.fixed(activityService, growthService);
+        return ignored -> runtime;
+    }
+
+    private static LongFunction<PlayerGameRuntime> runtimeResolver(GameConfigView configView) {
+        Objects.requireNonNull(configView, "configView");
+        return playerId -> PlayerGameRuntime.from(configView.resolve(playerId));
     }
 
     private PlayerStateSnapshot nextSnapshot() {

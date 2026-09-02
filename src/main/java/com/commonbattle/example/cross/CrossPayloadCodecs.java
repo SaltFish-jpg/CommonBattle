@@ -13,6 +13,8 @@ public final class CrossPayloadCodecs {
         PayloadCodecRegistry registry = PayloadCodecRegistry.commonDefaults();
         registry.register(new EnterSceneRequestCodec());
         registry.register(new EnterSceneResultCodec());
+        registry.register(new LeaveSceneRequestCodec());
+        registry.register(new LeaveSceneResultCodec());
         registry.register(new RpcErrorPayloadCodec());
         return registry;
     }

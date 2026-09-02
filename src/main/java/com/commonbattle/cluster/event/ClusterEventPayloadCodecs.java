@@ -4,6 +4,24 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.protocol.PayloadCodec;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
+import com.commonbattle.game.activity.ActivityDefinition;
+import com.commonbattle.game.activity.ActivitySchedule;
+import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.activity.AlwaysOpenSchedule;
+import com.commonbattle.game.activity.AlwaysParticipationCondition;
+import com.commonbattle.game.activity.MinLevelCondition;
+import com.commonbattle.game.activity.NaturalTimeSchedule;
+import com.commonbattle.game.activity.OpenServerTimeSchedule;
+import com.commonbattle.game.activity.ParticipationCondition;
+import com.commonbattle.game.bag.ItemDefinition;
+import com.commonbattle.game.bag.ItemStack;
+import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.config.GameConfigChangeType;
+import com.commonbattle.game.config.GameConfigChangedEvent;
+import com.commonbattle.game.config.GameConfigPackage;
+import com.commonbattle.game.config.GameConfigSnapshot;
+import com.commonbattle.game.config.GameConfigSnapshotRequest;
+import com.commonbattle.game.config.GrowthTuning;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.profile.AllianceBrief;
 import com.commonbattle.game.profile.AppearanceSummary;
@@ -11,6 +29,8 @@ import com.commonbattle.game.profile.FriendBrief;
 import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
+import com.commonbattle.game.profile.ProfileSnapshotRequest;
+import com.commonbattle.game.profile.ProfileSnapshotResponse;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import com.google.protobuf.CodedInputStream;
@@ -18,9 +38,12 @@ import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -31,7 +54,8 @@ import java.util.Set;
 public final class ClusterEventPayloadCodecs {
     private static final Map<Class<?>, EventCodec<?>> EVENT_BY_CLASS = Map.of(
             ProfileChangedEvent.class, new ProfileChangedEventCodec(),
-            AllianceMemberChangedEvent.class, new AllianceMemberChangedEventCodec()
+            AllianceMemberChangedEvent.class, new AllianceMemberChangedEventCodec(),
+            GameConfigChangedEvent.class, new GameConfigChangedEventCodec()
     );
     private static final Map<String, EventCodec<?>> EVENT_BY_TYPE = indexByType();
 
@@ -43,6 +67,12 @@ public final class ClusterEventPayloadCodecs {
         registry.register(new EventUnsubscribeRequestCodec());
         registry.register(new EventPublishRequestCodec());
         registry.register(new EventDeliverRequestCodec());
+        registry.register(new EventReplayRequestCodec());
+        registry.register(new EventReplayResultCodec());
+        registry.register(new ProfileSnapshotRequestCodec());
+        registry.register(new ProfileSnapshotResponseCodec());
+        registry.register(new GameConfigSnapshotRequestCodec());
+        registry.register(new GameConfigSnapshotCodec());
         return registry;
     }
 
@@ -132,13 +162,13 @@ public final class ClusterEventPayloadCodecs {
 
         @Override
         public byte[] encode(EventSubscribeRequest payload) {
-            return encodeSubscription(payload.subscriber(), payload.topic());
+            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys());
         }
 
         @Override
         public EventSubscribeRequest decode(byte[] bytes) {
             Subscription subscription = decodeSubscription(bytes);
-            return new EventSubscribeRequest(subscription.subscriber(), subscription.topic());
+            return new EventSubscribeRequest(subscription.subscriber(), subscription.topic(), subscription.ownerKeys());
         }
     }
 
@@ -155,13 +185,13 @@ public final class ClusterEventPayloadCodecs {
 
         @Override
         public byte[] encode(EventUnsubscribeRequest payload) {
-            return encodeSubscription(payload.subscriber(), payload.topic());
+            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys());
         }
 
         @Override
         public EventUnsubscribeRequest decode(byte[] bytes) {
             Subscription subscription = decodeSubscription(bytes);
-            return new EventUnsubscribeRequest(subscription.subscriber(), subscription.topic());
+            return new EventUnsubscribeRequest(subscription.subscriber(), subscription.topic(), subscription.ownerKeys());
         }
     }
 
@@ -206,6 +236,340 @@ public final class ClusterEventPayloadCodecs {
         @Override
         public EventDeliverRequest decode(byte[] bytes) {
             return new EventDeliverRequest(decodeEventRequest(bytes));
+        }
+    }
+
+    private static final class EventReplayRequestCodec implements PayloadCodec<EventReplayRequest> {
+        @Override
+        public String typeName() {
+            return EventReplayRequest.class.getName();
+        }
+
+        @Override
+        public Class<EventReplayRequest> javaType() {
+            return EventReplayRequest.class;
+        }
+
+        @Override
+        public byte[] encode(EventReplayRequest payload) {
+            int size = stringSize(1, payload.subscriber().kind().name())
+                    + stringSize(2, payload.subscriber().region())
+                    + stringSize(3, payload.subscriber().node())
+                    + stringSize(4, payload.topic());
+            for (Map.Entry<String, Long> entry : payload.knownRevisions().entrySet()) {
+                size += CodedOutputStream.computeByteArraySize(5, encodeKnownRevision(entry.getKey(), entry.getValue()));
+            }
+            for (String ownerKey : payload.ownerKeys()) {
+                size += stringSize(6, ownerKey);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeString(1, payload.subscriber().kind().name());
+                output.writeString(2, payload.subscriber().region());
+                output.writeString(3, payload.subscriber().node());
+                output.writeString(4, payload.topic());
+                for (Map.Entry<String, Long> entry : payload.knownRevisions().entrySet()) {
+                    output.writeByteArray(5, encodeKnownRevision(entry.getKey(), entry.getValue()));
+                }
+                for (String ownerKey : payload.ownerKeys()) {
+                    output.writeString(6, ownerKey);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode event replay request", e);
+            }
+        }
+
+        @Override
+        public EventReplayRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            String kind = ServiceKind.CENTER.name();
+            String region = "default";
+            String node = "default";
+            String topic = "";
+            Map<String, Long> knownRevisions = new HashMap<>();
+            Set<String> ownerKeys = new HashSet<>();
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> kind = input.readString();
+                        case 2 -> region = input.readString();
+                        case 3 -> node = input.readString();
+                        case 4 -> topic = input.readString();
+                        case 5 -> {
+                            KnownRevision revision = decodeKnownRevision(input.readByteArray());
+                            knownRevisions.put(revision.ownerKey(), revision.revision());
+                        }
+                        case 6 -> ownerKeys.add(input.readString());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new EventReplayRequest(ServiceId.of(ServiceKind.valueOf(kind), region, node), topic, knownRevisions, ownerKeys);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode event replay request", e);
+            }
+        }
+    }
+
+    private static final class EventReplayResultCodec implements PayloadCodec<EventReplayResult> {
+        @Override
+        public String typeName() {
+            return EventReplayResult.class.getName();
+        }
+
+        @Override
+        public Class<EventReplayResult> javaType() {
+            return EventReplayResult.class;
+        }
+
+        @Override
+        public byte[] encode(EventReplayResult payload) {
+            int size = CodedOutputStream.computeInt32Size(1, payload.delivered())
+                    + CodedOutputStream.computeInt32Size(2, payload.unavailableOwners());
+            for (String ownerKey : payload.unavailableOwnerKeys()) {
+                size += stringSize(3, ownerKey);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt32(1, payload.delivered());
+                output.writeInt32(2, payload.unavailableOwners());
+                for (String ownerKey : payload.unavailableOwnerKeys()) {
+                    output.writeString(3, ownerKey);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode event replay result", e);
+            }
+        }
+
+        @Override
+        public EventReplayResult decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            int delivered = 0;
+            int unavailableOwners = 0;
+            Set<String> unavailableOwnerKeys = new HashSet<>();
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> delivered = input.readInt32();
+                        case 2 -> unavailableOwners = input.readInt32();
+                        case 3 -> unavailableOwnerKeys.add(input.readString());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new EventReplayResult(delivered, unavailableOwners, unavailableOwnerKeys);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode event replay result", e);
+            }
+        }
+    }
+
+    private static final class ProfileSnapshotRequestCodec implements PayloadCodec<ProfileSnapshotRequest> {
+        @Override
+        public String typeName() {
+            return ProfileSnapshotRequest.class.getName();
+        }
+
+        @Override
+        public Class<ProfileSnapshotRequest> javaType() {
+            return ProfileSnapshotRequest.class;
+        }
+
+        @Override
+        public byte[] encode(ProfileSnapshotRequest payload) {
+            int size = CodedOutputStream.computeInt64Size(1, payload.playerId());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.playerId());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode profile snapshot request", e);
+            }
+        }
+
+        @Override
+        public ProfileSnapshotRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long playerId = 1;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> playerId = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new ProfileSnapshotRequest(playerId);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode profile snapshot request", e);
+            }
+        }
+    }
+
+    private static final class ProfileSnapshotResponseCodec implements PayloadCodec<ProfileSnapshotResponse> {
+        @Override
+        public String typeName() {
+            return ProfileSnapshotResponse.class.getName();
+        }
+
+        @Override
+        public Class<ProfileSnapshotResponse> javaType() {
+            return ProfileSnapshotResponse.class;
+        }
+
+        @Override
+        public byte[] encode(ProfileSnapshotResponse payload) {
+            byte[] snapshot = payload.snapshot() == null ? null : encodeSnapshot(payload.snapshot());
+            int size = CodedOutputStream.computeBoolSize(1, payload.found());
+            if (snapshot != null) {
+                size += CodedOutputStream.computeByteArraySize(2, snapshot);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeBool(1, payload.found());
+                if (snapshot != null) {
+                    output.writeByteArray(2, snapshot);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode profile snapshot response", e);
+            }
+        }
+
+        @Override
+        public ProfileSnapshotResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            boolean found = false;
+            PlayerProfileSnapshot snapshot = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> found = input.readBool();
+                        case 2 -> snapshot = decodeSnapshot(input.readByteArray());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return found ? ProfileSnapshotResponse.found(snapshot) : ProfileSnapshotResponse.missing();
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode profile snapshot response", e);
+            }
+        }
+    }
+
+    private static final class GameConfigSnapshotRequestCodec implements PayloadCodec<GameConfigSnapshotRequest> {
+        @Override
+        public String typeName() {
+            return GameConfigSnapshotRequest.class.getName();
+        }
+
+        @Override
+        public Class<GameConfigSnapshotRequest> javaType() {
+            return GameConfigSnapshotRequest.class;
+        }
+
+        @Override
+        public byte[] encode(GameConfigSnapshotRequest payload) {
+            int size = CodedOutputStream.computeInt64Size(1, payload.knownEventRevision());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.knownEventRevision());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode config snapshot request", e);
+            }
+        }
+
+        @Override
+        public GameConfigSnapshotRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long revision = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> revision = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new GameConfigSnapshotRequest(revision);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode config snapshot request", e);
+            }
+        }
+    }
+
+    private static final class GameConfigSnapshotCodec implements PayloadCodec<GameConfigSnapshot> {
+        @Override
+        public String typeName() {
+            return GameConfigSnapshot.class.getName();
+        }
+
+        @Override
+        public Class<GameConfigSnapshot> javaType() {
+            return GameConfigSnapshot.class;
+        }
+
+        @Override
+        public byte[] encode(GameConfigSnapshot payload) {
+            byte[] active = encodeConfigPackage(payload.activeConfig());
+            byte[] gray = payload.grayConfig() == null ? null : encodeConfigPackage(payload.grayConfig());
+            int size = CodedOutputStream.computeInt64Size(1, payload.eventRevision())
+                    + CodedOutputStream.computeByteArraySize(2, active)
+                    + CodedOutputStream.computeInt32Size(4, payload.grayPercent());
+            if (gray != null) {
+                size += CodedOutputStream.computeByteArraySize(3, gray);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.eventRevision());
+                output.writeByteArray(2, active);
+                if (gray != null) {
+                    output.writeByteArray(3, gray);
+                }
+                output.writeInt32(4, payload.grayPercent());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode config snapshot", e);
+            }
+        }
+
+        @Override
+        public GameConfigSnapshot decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long eventRevision = 0;
+            GameConfigPackage active = null;
+            GameConfigPackage gray = null;
+            int grayPercent = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> eventRevision = input.readInt64();
+                        case 2 -> active = decodeConfigPackage(input.readByteArray());
+                        case 3 -> gray = decodeConfigPackage(input.readByteArray());
+                        case 4 -> grayPercent = input.readInt32();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new GameConfigSnapshot(eventRevision, active, gray, grayPercent);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode config snapshot", e);
+            }
         }
     }
 
@@ -312,14 +676,440 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
-    private record Subscription(ServiceId subscriber, String topic) {
+    private static final class GameConfigChangedEventCodec implements EventCodec<GameConfigChangedEvent> {
+        @Override
+        public String typeName() {
+            return GameConfigChangedEvent.class.getName();
+        }
+
+        @Override
+        public byte[] encode(GameConfigChangedEvent event) {
+            byte[] config = encodeConfigPackage(event.config());
+            int size = CodedOutputStream.computeInt64Size(1, event.revision())
+                    + stringSize(2, event.changeType().name())
+                    + CodedOutputStream.computeByteArraySize(3, config)
+                    + CodedOutputStream.computeInt32Size(4, event.grayPercent());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, event.revision());
+                output.writeString(2, event.changeType().name());
+                output.writeByteArray(3, config);
+                output.writeInt32(4, event.grayPercent());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode game config event", e);
+            }
+        }
+
+        @Override
+        public GameConfigChangedEvent decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long revision = 0;
+            GameConfigChangeType changeType = GameConfigChangeType.ACTIVE_PUBLISHED;
+            GameConfigPackage config = null;
+            int grayPercent = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> revision = input.readInt64();
+                        case 2 -> changeType = GameConfigChangeType.valueOf(input.readString());
+                        case 3 -> config = decodeConfigPackage(input.readByteArray());
+                        case 4 -> grayPercent = input.readInt32();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new GameConfigChangedEvent(revision, changeType, config, grayPercent);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode game config event", e);
+            }
+        }
     }
 
-    private static byte[] encodeSubscription(ServiceId subscriber, String topic) {
+    private record Subscription(ServiceId subscriber, String topic, Set<String> ownerKeys) {
+    }
+
+    private record KnownRevision(String ownerKey, long revision) {
+    }
+
+    private static byte[] encodeConfigPackage(GameConfigPackage config) {
+        byte[] growth = encodeGrowth(config.growth());
+        int size = CodedOutputStream.computeInt64Size(1, config.version())
+                + CodedOutputStream.computeByteArraySize(4, growth)
+                + CodedOutputStream.computeInt64Size(5, config.createdAt().getEpochSecond())
+                + CodedOutputStream.computeInt32Size(6, config.createdAt().getNano());
+        for (ItemDefinition item : config.items()) {
+            size += CodedOutputStream.computeByteArraySize(2, encodeItemDefinition(item));
+        }
+        for (ActivityDefinition activity : config.activities()) {
+            size += CodedOutputStream.computeByteArraySize(3, encodeActivityDefinition(activity));
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, config.version());
+            for (ItemDefinition item : config.items()) {
+                output.writeByteArray(2, encodeItemDefinition(item));
+            }
+            for (ActivityDefinition activity : config.activities()) {
+                output.writeByteArray(3, encodeActivityDefinition(activity));
+            }
+            output.writeByteArray(4, growth);
+            output.writeInt64(5, config.createdAt().getEpochSecond());
+            output.writeInt32(6, config.createdAt().getNano());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode config package", e);
+        }
+    }
+
+    private static GameConfigPackage decodeConfigPackage(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long version = 0;
+        List<ItemDefinition> items = new ArrayList<>();
+        List<ActivityDefinition> activities = new ArrayList<>();
+        GrowthTuning growth = null;
+        long epochSecond = 0;
+        int nano = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> version = input.readInt64();
+                    case 2 -> items.add(decodeItemDefinition(input.readByteArray()));
+                    case 3 -> activities.add(decodeActivityDefinition(input.readByteArray()));
+                    case 4 -> growth = decodeGrowth(input.readByteArray());
+                    case 5 -> epochSecond = input.readInt64();
+                    case 6 -> nano = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new GameConfigPackage(version, items, activities, growth, Instant.ofEpochSecond(epochSecond, nano));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode config package", e);
+        }
+    }
+
+    private static byte[] encodeItemDefinition(ItemDefinition item) {
+        int size = stringSize(1, item.itemId())
+                + stringSize(2, item.type())
+                + CodedOutputStream.computeInt32Size(3, item.stackLimit());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, item.itemId());
+            output.writeString(2, item.type());
+            output.writeInt32(3, item.stackLimit());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode item definition", e);
+        }
+    }
+
+    private static ItemDefinition decodeItemDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String itemId = "";
+        String type = "";
+        int stackLimit = 1;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> itemId = input.readString();
+                    case 2 -> type = input.readString();
+                    case 3 -> stackLimit = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new ItemDefinition(itemId, type, stackLimit);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode item definition", e);
+        }
+    }
+
+    private static byte[] encodeActivityDefinition(ActivityDefinition activity) {
+        byte[] reward = encodeReward(activity.reward());
+        byte[] schedule = encodeSchedule(activity.schedule());
+        byte[] participation = encodeParticipation(activity.participation());
+        int size = stringSize(1, activity.activityId())
+                + stringSize(2, activity.type().name())
+                + CodedOutputStream.computeInt32Size(3, activity.threshold())
+                + CodedOutputStream.computeByteArraySize(4, reward)
+                + CodedOutputStream.computeByteArraySize(5, schedule)
+                + CodedOutputStream.computeByteArraySize(6, participation);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, activity.activityId());
+            output.writeString(2, activity.type().name());
+            output.writeInt32(3, activity.threshold());
+            output.writeByteArray(4, reward);
+            output.writeByteArray(5, schedule);
+            output.writeByteArray(6, participation);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode activity definition", e);
+        }
+    }
+
+    private static ActivityDefinition decodeActivityDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String activityId = "";
+        ActivityType type = ActivityType.LOGIN;
+        int threshold = 1;
+        Reward reward = Reward.of();
+        ActivitySchedule schedule = ActivitySchedule.alwaysOpen();
+        ParticipationCondition participation = ParticipationCondition.always();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> activityId = input.readString();
+                    case 2 -> type = ActivityType.valueOf(input.readString());
+                    case 3 -> threshold = input.readInt32();
+                    case 4 -> reward = decodeReward(input.readByteArray());
+                    case 5 -> schedule = decodeSchedule(input.readByteArray());
+                    case 6 -> participation = decodeParticipation(input.readByteArray());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new ActivityDefinition(activityId, type, threshold, reward, schedule, participation);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode activity definition", e);
+        }
+    }
+
+    private static byte[] encodeReward(Reward reward) {
+        int size = 0;
+        for (ItemStack item : reward.items()) {
+            size += CodedOutputStream.computeByteArraySize(1, encodeItemStack(item));
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            for (ItemStack item : reward.items()) {
+                output.writeByteArray(1, encodeItemStack(item));
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode reward", e);
+        }
+    }
+
+    private static Reward decodeReward(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        List<ItemStack> items = new ArrayList<>();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> items.add(decodeItemStack(input.readByteArray()));
+                    default -> input.skipField(tag);
+                }
+            }
+            return new Reward(items);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode reward", e);
+        }
+    }
+
+    private static byte[] encodeItemStack(ItemStack item) {
+        int size = stringSize(1, item.itemId())
+                + CodedOutputStream.computeInt32Size(2, item.count());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, item.itemId());
+            output.writeInt32(2, item.count());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode item stack", e);
+        }
+    }
+
+    private static ItemStack decodeItemStack(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String itemId = "";
+        int count = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> itemId = input.readString();
+                    case 2 -> count = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new ItemStack(itemId, count);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode item stack", e);
+        }
+    }
+
+    private static byte[] encodeSchedule(ActivitySchedule schedule) {
+        String type = "ALWAYS";
+        long first = 0;
+        long second = 0;
+        if (schedule instanceof NaturalTimeSchedule natural) {
+            type = "NATURAL";
+            first = natural.startInclusive().toEpochMilli();
+            second = natural.endExclusive().toEpochMilli();
+        } else if (schedule instanceof OpenServerTimeSchedule openServer) {
+            type = "OPEN_SERVER";
+            first = openServer.startAfterOpen().toMillis();
+            second = openServer.endAfterOpen().toMillis();
+        } else if (!(schedule instanceof AlwaysOpenSchedule)) {
+            throw new IllegalArgumentException("Unsupported activity schedule codec: " + schedule.getClass().getName());
+        }
+        int size = stringSize(1, type)
+                + CodedOutputStream.computeInt64Size(2, first)
+                + CodedOutputStream.computeInt64Size(3, second);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, type);
+            output.writeInt64(2, first);
+            output.writeInt64(3, second);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode activity schedule", e);
+        }
+    }
+
+    private static ActivitySchedule decodeSchedule(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String type = "ALWAYS";
+        long first = 0;
+        long second = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> type = input.readString();
+                    case 2 -> first = input.readInt64();
+                    case 3 -> second = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return switch (type) {
+                case "NATURAL" -> ActivitySchedule.naturalWindow(
+                        Instant.ofEpochMilli(first),
+                        Instant.ofEpochMilli(second)
+                );
+                case "OPEN_SERVER" -> ActivitySchedule.openServerWindow(
+                        Duration.ofMillis(first),
+                        Duration.ofMillis(second)
+                );
+                case "ALWAYS" -> ActivitySchedule.alwaysOpen();
+                default -> throw new IllegalArgumentException("Unsupported activity schedule type: " + type);
+            };
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode activity schedule", e);
+        }
+    }
+
+    private static byte[] encodeParticipation(ParticipationCondition participation) {
+        String type = "ALWAYS";
+        int value = 0;
+        if (participation instanceof MinLevelCondition minLevel) {
+            type = "MIN_LEVEL";
+            value = minLevel.level();
+        } else if (!(participation instanceof AlwaysParticipationCondition)) {
+            throw new IllegalArgumentException("Unsupported participation codec: " + participation.getClass().getName());
+        }
+        int size = stringSize(1, type)
+                + CodedOutputStream.computeInt32Size(2, value);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, type);
+            output.writeInt32(2, value);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode participation", e);
+        }
+    }
+
+    private static ParticipationCondition decodeParticipation(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String type = "ALWAYS";
+        int value = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> type = input.readString();
+                    case 2 -> value = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            if ("MIN_LEVEL".equals(type)) {
+                return ParticipationCondition.minLevel(value);
+            }
+            if ("ALWAYS".equals(type)) {
+                return ParticipationCondition.always();
+            }
+            throw new IllegalArgumentException("Unsupported participation type: " + type);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode participation", e);
+        }
+    }
+
+    private static byte[] encodeGrowth(GrowthTuning growth) {
+        int size = stringSize(1, growth.expItemId())
+                + CodedOutputStream.computeInt32Size(2, growth.expPerItem())
+                + CodedOutputStream.computeInt32Size(3, growth.expPerLevel());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, growth.expItemId());
+            output.writeInt32(2, growth.expPerItem());
+            output.writeInt32(3, growth.expPerLevel());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode growth config", e);
+        }
+    }
+
+    private static GrowthTuning decodeGrowth(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String expItemId = "";
+        int expPerItem = 0;
+        int expPerLevel = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> expItemId = input.readString();
+                    case 2 -> expPerItem = input.readInt32();
+                    case 3 -> expPerLevel = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new GrowthTuning(expItemId, expPerItem, expPerLevel);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode growth config", e);
+        }
+    }
+
+    private static byte[] encodeSubscription(ServiceId subscriber, String topic, Set<String> ownerKeys) {
         int size = stringSize(1, subscriber.kind().name())
                 + stringSize(2, subscriber.region())
                 + stringSize(3, subscriber.node())
                 + stringSize(4, topic);
+        for (String ownerKey : ownerKeys) {
+            size += stringSize(5, ownerKey);
+        }
         byte[] bytes = new byte[size];
         try {
             CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -327,6 +1117,9 @@ public final class ClusterEventPayloadCodecs {
             output.writeString(2, subscriber.region());
             output.writeString(3, subscriber.node());
             output.writeString(4, topic);
+            for (String ownerKey : ownerKeys) {
+                output.writeString(5, ownerKey);
+            }
             output.flush();
             return bytes;
         } catch (IOException e) {
@@ -340,6 +1133,7 @@ public final class ClusterEventPayloadCodecs {
         String region = "";
         String node = "";
         String topic = "";
+        Set<String> ownerKeys = new HashSet<>();
         try {
             int tag;
             while ((tag = input.readTag()) != 0) {
@@ -348,12 +1142,47 @@ public final class ClusterEventPayloadCodecs {
                     case 2 -> region = input.readString();
                     case 3 -> node = input.readString();
                     case 4 -> topic = input.readString();
+                    case 5 -> ownerKeys.add(input.readString());
                     default -> input.skipField(tag);
                 }
             }
-            return new Subscription(ServiceId.of(ServiceKind.valueOf(kind), region, node), topic);
+            return new Subscription(ServiceId.of(ServiceKind.valueOf(kind), region, node), topic, ownerKeys);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode event subscription", e);
+        }
+    }
+
+    private static byte[] encodeKnownRevision(String ownerKey, long revision) {
+        int size = stringSize(1, ownerKey)
+                + CodedOutputStream.computeInt64Size(2, revision);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, ownerKey);
+            output.writeInt64(2, revision);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode event known revision", e);
+        }
+    }
+
+    private static KnownRevision decodeKnownRevision(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String ownerKey = "";
+        long revision = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> ownerKey = input.readString();
+                    case 2 -> revision = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new KnownRevision(ownerKey, revision);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode event known revision", e);
         }
     }
 

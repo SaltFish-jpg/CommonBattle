@@ -5,6 +5,7 @@ package com.commonbattle.cluster.registry;
  */
 public final class RegistryOperations {
     public static final String REGISTER = "registry.register";
+    public static final String HEARTBEAT = "registry.heartbeat";
     public static final String UNREGISTER = "registry.unregister";
     public static final String LIST = "registry.list";
     public static final String SUBSCRIBE = "registry.subscribe";

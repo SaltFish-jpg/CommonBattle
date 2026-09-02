@@ -25,14 +25,32 @@ public final class AdmissionControlledAgentRouter {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(operation, "operation");
         Objects.requireNonNull(task, "task");
+        AdmissionRouteResult routed = route(target, operation);
+        if (routed.admission().accepted()) {
+            router.tellResolvedLocal(routed.route(), task);
+        }
+        return routed;
+    }
+
+    public AdmissionRouteResult route(AgentIdentity target, String operation) {
+        Objects.requireNonNull(target, "target");
+        Objects.requireNonNull(operation, "operation");
         AdmissionDecision decision = admissions.admit(target, operation);
         if (!decision.accepted()) {
             return new AdmissionRouteResult(decision, AgentRoute.missing());
         }
-        AgentRoute route = router.tellLocalOrRoute(target, task);
+        AgentRoute route = router.resolve(target);
         if (route.type() == AgentRouteType.MISSING) {
             return new AdmissionRouteResult(AdmissionDecision.reject("agent_missing", java.time.Duration.ZERO), route);
         }
         return new AdmissionRouteResult(decision, route);
+    }
+
+    public void deliverLocal(AdmissionRouteResult routed, ActorTask task) {
+        Objects.requireNonNull(routed, "routed");
+        Objects.requireNonNull(task, "task");
+        if (routed.admission().accepted()) {
+            router.tellResolvedLocal(routed.route(), task);
+        }
     }
 }

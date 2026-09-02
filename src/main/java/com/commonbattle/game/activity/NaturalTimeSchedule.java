@@ -23,4 +23,12 @@ public final class NaturalTimeSchedule implements ActivitySchedule {
         Instant now = context.now();
         return !now.isBefore(startInclusive) && now.isBefore(endExclusive);
     }
+
+    public Instant startInclusive() {
+        return startInclusive;
+    }
+
+    public Instant endExclusive() {
+        return endExclusive;
+    }
 }

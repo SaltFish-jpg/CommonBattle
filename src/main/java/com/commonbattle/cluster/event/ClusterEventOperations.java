@@ -8,6 +8,7 @@ public final class ClusterEventOperations {
     public static final String UNSUBSCRIBE = "event.unsubscribe";
     public static final String PUBLISH = "event.publish";
     public static final String DELIVER = "event.deliver";
+    public static final String REPLAY = "event.replay";
 
     private ClusterEventOperations() {
     }

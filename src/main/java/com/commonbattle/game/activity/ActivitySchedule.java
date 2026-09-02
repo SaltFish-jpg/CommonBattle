@@ -11,7 +11,7 @@ public interface ActivitySchedule {
     boolean isOpen(ActivityAccessContext context);
 
     static ActivitySchedule alwaysOpen() {
-        return context -> true;
+        return AlwaysOpenSchedule.INSTANCE;
     }
 
     static ActivitySchedule naturalWindow(Instant startInclusive, Instant endExclusive) {

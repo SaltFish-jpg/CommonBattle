@@ -8,7 +8,7 @@ public interface ParticipationCondition {
     boolean allows(ActivityAccessContext context);
 
     static ParticipationCondition always() {
-        return context -> true;
+        return AlwaysParticipationCondition.INSTANCE;
     }
 
     static ParticipationCondition minLevel(int level) {

@@ -5,6 +5,8 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.ClusterEnvelope;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
+import com.commonbattle.example.cross.LeaveSceneRequest;
+import com.commonbattle.example.cross.LeaveSceneResult;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -75,6 +77,34 @@ class ProtoClusterCodecTest {
         ClusterEnvelope decoded = codec.decode(codec.encode(envelope));
 
         assertEquals("player-10001-enter-room-1", decoded.metadata().get("rpc.idempotency_key"));
+    }
+
+    @Test
+    void encodesLeaveScenePayloads() {
+        ProtoClusterCodec codec = new ProtoClusterCodec(CrossPayloadCodecs.create());
+        ClusterEnvelope request = new ClusterEnvelope(
+                10,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                "scene.leave",
+                new LeaveSceneRequest(10001L, "room-1")
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                10,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                "$rpc.success",
+                new LeaveSceneResult(10001L, "room-1", true)
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        LeaveSceneRequest requestPayload = assertInstanceOf(LeaveSceneRequest.class, decodedRequest.payload());
+        LeaveSceneResult responsePayload = assertInstanceOf(LeaveSceneResult.class, decodedResponse.payload());
+        assertEquals(10001L, requestPayload.playerId());
+        assertEquals("room-1", requestPayload.sceneId());
+        assertEquals(true, responsePayload.left());
     }
 
     public static class PrototypeMoveRequest {

@@ -52,7 +52,11 @@ public final class LocalProfileCache {
     }
 
     public long revisionOf(long playerId) {
-        return checkpoint.revisionOf("profile:" + playerId);
+        return checkpoint.revisionOf(ProfileChangedEvent.ownerKey(playerId));
+    }
+
+    public Map<String, Long> knownRevisions() {
+        return checkpoint.snapshot();
     }
 
     private static final class SetOf {

@@ -28,9 +28,15 @@ public final class LifecycleAwareAgentRouter {
     public AgentRoute tellLocalOrRoute(AgentIdentity identity, ActorTask task) {
         Objects.requireNonNull(task, "task");
         AgentRoute route = resolve(identity);
+        tellResolvedLocal(route, task);
+        return route;
+    }
+
+    public void tellResolvedLocal(AgentRoute route, ActorTask task) {
+        Objects.requireNonNull(route, "route");
+        Objects.requireNonNull(task, "task");
         if (route.type() == AgentRouteType.LOCAL) {
             messages.tellLocal(route.location().orElseThrow().actorRef(), task);
         }
-        return route;
     }
 }

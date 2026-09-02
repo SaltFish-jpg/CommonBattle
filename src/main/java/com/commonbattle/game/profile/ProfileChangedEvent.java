@@ -33,11 +33,15 @@ public record ProfileChangedEvent(
 
     @Override
     public String ownerKey() {
-        return "profile:" + playerId;
+        return ownerKey(playerId);
     }
 
     @Override
     public long revision() {
         return snapshot.revision();
+    }
+
+    public static String ownerKey(long playerId) {
+        return "profile:" + playerId;
     }
 }

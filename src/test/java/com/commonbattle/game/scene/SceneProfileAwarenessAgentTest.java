@@ -11,6 +11,7 @@ import com.commonbattle.game.profile.FriendBrief;
 import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
+import com.commonbattle.game.profile.ProfileInterestControl;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -65,11 +66,35 @@ class SceneProfileAwarenessAgentTest {
         assertEquals(3, scene.profileOf(10001L).orElseThrow().snapshot().revision());
     }
 
+    @Test
+    void enterAndLeaveDriveProfileInterestLifecycle() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingInterestControl interests = new RecordingInterestControl();
+        SceneProfileAwarenessAgent scene = createScene(executor, interests);
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.enter(10001L);
+        executor.runNext();
+        scene.leave(10001L);
+        executor.runNext();
+        scene.leave(10001L);
+        executor.runNext();
+
+        assertEquals(List.of(10001L), interests.watched);
+        assertEquals(List.of(10001L), interests.unwatched);
+    }
+
     private static SceneProfileAwarenessAgent createScene(Executor executor) {
+        return createScene(executor, ProfileInterestControl.noop());
+    }
+
+    private static SceneProfileAwarenessAgent createScene(Executor executor, ProfileInterestControl interests) {
         ActorSystem actors = new ActorSystem(executor, 64);
         return new SceneProfileAwarenessAgent(
                 new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
-                actors.actor("scene-profile")
+                actors.actor("scene-profile"),
+                interests
         );
     }
 
@@ -106,6 +131,21 @@ class SceneProfileAwarenessAgentTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class RecordingInterestControl implements ProfileInterestControl {
+        private final List<Long> watched = new ArrayList<>();
+        private final List<Long> unwatched = new ArrayList<>();
+
+        @Override
+        public void watch(long playerId) {
+            watched.add(playerId);
+        }
+
+        @Override
+        public void unwatch(long playerId) {
+            unwatched.add(playerId);
         }
     }
 }

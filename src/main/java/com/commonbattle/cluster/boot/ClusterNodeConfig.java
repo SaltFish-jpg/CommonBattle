@@ -3,14 +3,18 @@ package com.commonbattle.cluster.boot;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 
@@ -67,7 +71,14 @@ public final class ClusterNodeConfig {
         require(issues, "cluster.node");
         require(issues, "cluster.host");
         validatePort(issues, "cluster.port");
+        validateOptionalPort(issues, "cluster.ops.port");
         validatePositiveInteger(issues, "cluster.actor.workers");
+        validatePositiveInteger(issues, "cluster.config.warmup.timeout.millis");
+        validatePositiveInteger(issues, "cluster.registry.lease.ttl.millis");
+        validatePositiveInteger(issues, "cluster.registry.heartbeat.interval.millis");
+        validatePositiveInteger(issues, "cluster.registry.lease.scan.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.history.default.limit");
+        validateEventHistoryTopicLimits(issues);
         ServiceKind actualKind = validateKind(issues, "cluster.kind");
         if (actualKind != null && expectedKind != null && actualKind != expectedKind) {
             issues.add(new ClusterConfigIssue("cluster.kind", "expected " + expectedKind + " but was " + actualKind));
@@ -103,12 +114,45 @@ public final class ClusterNodeConfig {
         return new ServiceEndpoint(required("cluster.center.host"), integer("cluster.center.port", 0));
     }
 
+    public ServiceEndpoint opsEndpoint() {
+        return new ServiceEndpoint(property("cluster.ops.host", "127.0.0.1"), integer("cluster.ops.port", endpoint().port() + 10_000));
+    }
+
     public ServiceId centerServiceId() {
         return ServiceId.of(ServiceKind.CENTER, property("cluster.center.region", region()), property("cluster.center.node", "center-1"));
     }
 
     public int actorWorkers() {
         return integer("cluster.actor.workers", Runtime.getRuntime().availableProcessors());
+    }
+
+    public Duration configWarmupTimeout() {
+        return Duration.ofMillis(integer("cluster.config.warmup.timeout.millis", 5_000));
+    }
+
+    public Duration registryLeaseTtl() {
+        return Duration.ofMillis(integer("cluster.registry.lease.ttl.millis", 15_000));
+    }
+
+    public Duration registryHeartbeatInterval() {
+        return Duration.ofMillis(integer("cluster.registry.heartbeat.interval.millis", 5_000));
+    }
+
+    public Duration registryLeaseScanInterval() {
+        return Duration.ofMillis(integer("cluster.registry.lease.scan.interval.millis", 1_000));
+    }
+
+    public ClusterEventHistoryPolicy eventHistoryPolicy() {
+        String prefix = "cluster.event.history.topic.";
+        String suffix = ".limit";
+        Map<String, Integer> topicLimits = new HashMap<>();
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix) && key.endsWith(suffix)) {
+                String topic = key.substring(prefix.length(), key.length() - suffix.length());
+                topicLimits.put(topic, integer(key, 0));
+            }
+        }
+        return new ClusterEventHistoryPolicy(integer("cluster.event.history.default.limit", 10_000), topicLimits);
     }
 
     public SceneHostingMode sceneMode() {
@@ -196,6 +240,14 @@ public final class ClusterNodeConfig {
         }
     }
 
+    private void validateOptionalPort(List<ClusterConfigIssue> issues, String key) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        validatePort(issues, key);
+    }
+
     private void validatePositiveInteger(List<ClusterConfigIssue> issues, String key) {
         String value = properties.getProperty(key);
         if (value == null || value.isBlank()) {
@@ -208,6 +260,20 @@ public final class ClusterNodeConfig {
             }
         } catch (NumberFormatException e) {
             issues.add(new ClusterConfigIssue(key, "must be an integer"));
+        }
+    }
+
+    private void validateEventHistoryTopicLimits(List<ClusterConfigIssue> issues) {
+        String prefix = "cluster.event.history.topic.";
+        String suffix = ".limit";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix) && key.endsWith(suffix)) {
+                String topic = key.substring(prefix.length(), key.length() - suffix.length());
+                if (topic.isBlank()) {
+                    issues.add(new ClusterConfigIssue(key, "topic must not be blank"));
+                }
+                validatePositiveInteger(issues, key);
+            }
         }
     }
 }

@@ -14,6 +14,7 @@ import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
+import com.commonbattle.actor.ActorSystem;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -48,8 +49,15 @@ public final class ProxyServerMain {
         });
         RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
         ClusterNode node = new ClusterNode(registry, local, directory);
-        node.start(List.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.REGION));
-        System.out.println("Proxy server started: " + local.id().wireName());
+        ActorSystem actors = new ActorSystem(config.actorWorkers());
+        node.start(
+                List.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.REGION),
+                config.registryLeaseTtl(),
+                config.registryHeartbeatInterval()
+        );
+        BootOpsHttp.start(config, local, actors, directory, gateway, transport, node);
+        System.out.println("Proxy server started: " + local.id().wireName()
+                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
         new CountDownLatch(1).await();
     }
 }

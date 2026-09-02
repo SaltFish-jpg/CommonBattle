@@ -15,6 +15,7 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Objects;
+import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -53,12 +54,28 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
 
     @Override
     public void register(ServiceDescriptor service) {
+        register(service, Duration.ZERO);
+    }
+
+    @Override
+    public void register(ServiceDescriptor service, Duration leaseTtl) {
         await(new RpcRequest<>(
                 ServiceKind.CENTER.name(),
                 RegistryOperations.REGISTER,
-                new RegistryRegisterRequest(service),
+                new RegistryRegisterRequest(service, leaseTtl),
                 RegistryAck.class
         ));
+    }
+
+    @Override
+    public boolean heartbeat(ServiceId serviceId, Duration leaseTtl) {
+        RegistryAck ack = await(new RpcRequest<>(
+                ServiceKind.CENTER.name(),
+                RegistryOperations.HEARTBEAT,
+                new RegistryHeartbeatRequest(serviceId, leaseTtl),
+                RegistryAck.class
+        ));
+        return "heartbeat.renewed".equals(ack.message());
     }
 
     @Override

@@ -2,6 +2,7 @@ package com.commonbattle.observability;
 
 import com.commonbattle.actor.ActorSystemStats;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
+import com.commonbattle.game.session.PlayerCommandStats;
 
 import java.time.Instant;
 
@@ -13,8 +14,17 @@ public record RuntimeHealthSnapshot(
         RuntimeHealthStatus status,
         ActorSystemStats actorSystem,
         RpcGatewayStats rpc,
+        PlayerCommandStats commands,
         AgentLifecycleStats agents,
         EventOutboxStats outbox,
-        ClusterServiceStats cluster
+        ClusterServiceStats cluster,
+        RegistryLeaseHealthStats registryLeases,
+        NetworkTransportHealthStats networkTransports,
+        ConfigCacheHealthStats configCaches,
+        ConfigRecoveryHealthStats configRecoveries,
+        EventCenterHealthStats eventCenters,
+        EventSubscriptionHealthStats eventSubscriptions,
+        ProfileInterestHealthStats profileInterests,
+        PlayerCommandAuditHealthStats commandAudits
 ) {
 }

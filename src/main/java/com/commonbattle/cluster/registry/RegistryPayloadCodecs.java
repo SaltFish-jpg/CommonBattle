@@ -14,6 +14,7 @@ import com.google.protobuf.WireFormat;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,7 @@ public final class RegistryPayloadCodecs {
 
     public static PayloadCodecRegistry registerTo(PayloadCodecRegistry registry) {
         registry.register(new RegisterRequestCodec());
+        registry.register(new HeartbeatRequestCodec());
         registry.register(new UnregisterRequestCodec());
         registry.register(new ListRequestCodec());
         registry.register(new ListResponseCodec());
@@ -107,12 +109,106 @@ public final class RegistryPayloadCodecs {
 
         @Override
         public byte[] encode(RegistryRegisterRequest payload) {
-            return encodeDescriptor(payload.service());
+            byte[] service = encodeDescriptor(payload.service());
+            long leaseMillis = payload.leaseTtl().toMillis();
+            int size = CodedOutputStream.computeByteArraySize(1, service);
+            if (leaseMillis > 0) {
+                size += CodedOutputStream.computeInt64Size(2, leaseMillis);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, service);
+                if (leaseMillis > 0) {
+                    output.writeInt64(2, leaseMillis);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry register request", e);
+            }
         }
 
         @Override
         public RegistryRegisterRequest decode(byte[] bytes) {
-            return new RegistryRegisterRequest(decodeDescriptor(bytes));
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ServiceDescriptor service = null;
+            long leaseMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    int field = WireFormat.getTagFieldNumber(tag);
+                    if (field == 1) {
+                        service = decodeDescriptor(input.readByteArray());
+                    } else if (field == 2) {
+                        leaseMillis = input.readInt64();
+                    } else {
+                        input.skipField(tag);
+                    }
+                }
+                if (service == null) {
+                    throw new IllegalStateException("Missing service in registry register request");
+                }
+                return new RegistryRegisterRequest(service, Duration.ofMillis(leaseMillis));
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry register request", e);
+            }
+        }
+    }
+
+    private static final class HeartbeatRequestCodec implements PayloadCodec<RegistryHeartbeatRequest> {
+        @Override
+        public String typeName() {
+            return RegistryHeartbeatRequest.class.getName();
+        }
+
+        @Override
+        public Class<RegistryHeartbeatRequest> javaType() {
+            return RegistryHeartbeatRequest.class;
+        }
+
+        @Override
+        public byte[] encode(RegistryHeartbeatRequest payload) {
+            byte[] serviceId = encodeServiceId(payload.serviceId());
+            long leaseMillis = payload.leaseTtl().toMillis();
+            int size = CodedOutputStream.computeByteArraySize(1, serviceId)
+                    + CodedOutputStream.computeInt64Size(2, leaseMillis);
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, serviceId);
+                output.writeInt64(2, leaseMillis);
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry heartbeat request", e);
+            }
+        }
+
+        @Override
+        public RegistryHeartbeatRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ServiceId serviceId = null;
+            long leaseMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    int field = WireFormat.getTagFieldNumber(tag);
+                    if (field == 1) {
+                        serviceId = decodeServiceId(input.readByteArray());
+                    } else if (field == 2) {
+                        leaseMillis = input.readInt64();
+                    } else {
+                        input.skipField(tag);
+                    }
+                }
+                if (serviceId == null) {
+                    throw new IllegalStateException("Missing service id in registry heartbeat request");
+                }
+                return new RegistryHeartbeatRequest(serviceId, Duration.ofMillis(leaseMillis));
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry heartbeat request", e);
+            }
         }
     }
 

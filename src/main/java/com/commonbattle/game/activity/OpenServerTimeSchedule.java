@@ -26,4 +26,12 @@ public final class OpenServerTimeSchedule implements ActivitySchedule {
         Instant now = context.now();
         return !now.isBefore(start) && now.isBefore(end);
     }
+
+    public Duration startAfterOpen() {
+        return startAfterOpen;
+    }
+
+    public Duration endAfterOpen() {
+        return endAfterOpen;
+    }
 }
