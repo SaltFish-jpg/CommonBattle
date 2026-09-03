@@ -2,6 +2,7 @@ package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
+import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
@@ -15,6 +16,7 @@ import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
+import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
@@ -56,85 +58,104 @@ public final class SceneServerMain {
     private SceneServerMain() {
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/scene-small.properties");
-        config.validate(ServiceKind.SCENE).throwIfInvalid();
-        ActorSystem actors = new ActorSystem(config.actorWorkers());
-        SceneServiceStrategy sceneService = sceneService(config, actors);
-        ServiceDescriptor local = sceneService.descriptor();
-        ServiceDescriptor center = ClusterDescriptors.center(config);
-        ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
-        directory.seed(center);
-        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
-        NettyClusterTransport transport = new NettyClusterTransport(
-                new DirectoryEndpointView(directory, local, center),
-                codecs
-        );
-        ClusterRpcGateway gateway = new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport);
-        ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(local.id(), gateway);
-        LocalProfileCache sceneProfileCache = new LocalProfileCache();
-        ExecutorService profileRepairExecutor = Executors.newFixedThreadPool(
-                profileRepairWorkers(config),
-                new NamedThreadFactory("common-battle-profile-repair")
-        );
-        ProfileInterestSubscription profileInterests = new ProfileInterestSubscription(
-                eventBus,
-                sceneProfileCache,
-                new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1)),
-                profileRepairExecutor
-        );
-        SceneProfileAwarenessAgent profileAwareness = new SceneProfileAwarenessAgent(
-                new DefaultAgentMessagePort(actors, gateway),
-                actors.actor("scene-profile:" + local.id().node()),
-                profileInterests,
-                sceneProfileCache
-        );
-        SceneServiceStrategy activeSceneService = new ProfileAwareSceneService(sceneService, profileAwareness);
-        gateway.handle(SceneOperations.ENTER, (request, responder) -> {
-            EnterSceneRequest payload = (EnterSceneRequest) request.payload();
-            ScenePlacement placement = activeSceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
-            responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), 0));
-        });
-        gateway.handle(SceneOperations.LEAVE, (request, responder) -> {
-            LeaveSceneRequest payload = (LeaveSceneRequest) request.payload();
-            boolean left = activeSceneService.leave(payload.playerId(), payload.sceneId());
-            responder.success(new LeaveSceneResult(payload.playerId(), payload.sceneId(), left));
-        });
-        RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
-        ClusterNode node = new ClusterNode(registry, local, directory);
-        node.start(
-                List.of(ServiceKind.GAME, ServiceKind.PROXY, ServiceKind.REGION),
-                config.registryLeaseTtl(),
-                config.registryHeartbeatInterval()
-        );
-        LocalGameConfigCache configCache = new LocalGameConfigCache(
-                new GameConfigValidator(),
-                Clock.systemUTC()
-        );
-        ClusterEventSubscriptionManager eventSubscriptions = new ClusterEventSubscriptionManager(eventBus);
-        RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
-        GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
-        configCache.attachRecoveryTrigger(configAutoRecovery);
-        eventSubscriptions.register(
-                GameConfigChangedEvent.TOPIC,
-                configCache,
-                () -> java.util.Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision()),
-                new GameConfigEventReplayRepairer(configAutoRecovery, configCache::appliedEventRevision, configCache::stale)
-        );
-        eventSubscriptions.start();
-        GameConfigWarmupResult warmup = new GameConfigWarmupService(
-                configRecovery,
-                Clock.systemUTC()
-        ).warmup(config.configWarmupTimeout());
-        if (!warmup.ready()) {
-            throw new IllegalStateException("Scene config warmup failed: " + warmup.message());
+    public static void main(String[] args) throws Exception {
+        BootRuntime runtime = new BootRuntime().installShutdownHook();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/scene-small.properties");
+            config.validate(ServiceKind.SCENE).throwIfInvalid();
+            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            SceneServiceStrategy sceneService = sceneService(config, actors);
+            ServiceDescriptor local = sceneService.descriptor();
+            ServiceDescriptor center = ClusterDescriptors.center(config);
+            ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
+            directory.seed(center);
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
+                    new DirectoryEndpointView(directory, local, center),
+                    codecs
+            ));
+            ClusterRpcGateway gateway = runtime.add("rpcGateway",
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+            RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
+            ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
+            ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(local.id(), gateway);
+            LocalProfileCache sceneProfileCache = new LocalProfileCache();
+            ExecutorService profileRepairExecutor = runtime.add("profileRepairExecutor", Executors.newFixedThreadPool(
+                    profileRepairWorkers(config),
+                    new NamedThreadFactory("common-battle-profile-repair")
+            ));
+            ProfileInterestSubscription profileInterests = runtime.add("profileInterests", new ProfileInterestSubscription(
+                    eventBus,
+                    sceneProfileCache,
+                    new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1)),
+                    profileRepairExecutor
+            ));
+            DefaultAgentMessagePort profileMessagePort = runtime.add(
+                    "profileMessagePort",
+                    new DefaultAgentMessagePort(
+                            actors,
+                            gateway,
+                            new ExecutorAskTimeoutScheduler(),
+                            new ClusterRpcDeliveryFailureMapper()
+                    )
+            );
+            SceneProfileAwarenessAgent profileAwareness = new SceneProfileAwarenessAgent(
+                    profileMessagePort,
+                    actors.actor("scene-profile:" + local.id().node()),
+                    profileInterests,
+                    sceneProfileCache
+            );
+            SceneServiceStrategy activeSceneService = new ProfileAwareSceneService(sceneService, profileAwareness);
+            gateway.handle(SceneOperations.ENTER, (request, responder) -> {
+                EnterSceneRequest payload = (EnterSceneRequest) request.payload();
+                ScenePlacement placement = activeSceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
+                responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), 0));
+            });
+            gateway.handle(SceneOperations.LEAVE, (request, responder) -> {
+                LeaveSceneRequest payload = (LeaveSceneRequest) request.payload();
+                boolean left = activeSceneService.leave(payload.playerId(), payload.sceneId());
+                responder.success(new LeaveSceneResult(payload.playerId(), payload.sceneId(), left));
+            });
+            node.start(
+                    List.of(ServiceKind.GAME, ServiceKind.PROXY, ServiceKind.REGION),
+                    config.registryLeaseTtl(),
+                    config.registryHeartbeatInterval()
+            );
+            LocalGameConfigCache configCache = runtime.add("configCache", new LocalGameConfigCache(
+                    new GameConfigValidator(),
+                    Clock.systemUTC()
+            ));
+            ClusterEventSubscriptionManager eventSubscriptions = runtime.add(
+                    "eventSubscriptions",
+                    new ClusterEventSubscriptionManager(eventBus)
+            );
+            RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
+            GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
+            configCache.attachRecoveryTrigger(configAutoRecovery);
+            eventSubscriptions.register(
+                    GameConfigChangedEvent.TOPIC,
+                    configCache,
+                    () -> java.util.Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision()),
+                    new GameConfigEventReplayRepairer(configAutoRecovery, configCache::appliedEventRevision, configCache::stale)
+            );
+            eventSubscriptions.start();
+            GameConfigWarmupResult warmup = new GameConfigWarmupService(
+                    configRecovery,
+                    Clock.systemUTC()
+            ).warmup(config.configWarmupTimeout());
+            if (!warmup.ready()) {
+                throw new IllegalStateException("Scene config warmup failed: " + warmup.message());
+            }
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node,
+                    List.of(configCache), List.of(configAutoRecovery), List.of(eventSubscriptions), List.of(profileInterests)));
+            System.out.println("Scene server started: " + local.id().wireName()
+                    + ", config=" + configCache.active().version()
+                    + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
+            new CountDownLatch(1).await();
+        } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
         }
-        BootOpsHttp.start(config, local, actors, directory, gateway, transport, node,
-                List.of(configCache), List.of(configAutoRecovery), List.of(eventSubscriptions), List.of(profileInterests));
-        System.out.println("Scene server started: " + local.id().wireName()
-                + ", config=" + configCache.active().version()
-                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
-        new CountDownLatch(1).await();
     }
 
     private static SceneServiceStrategy sceneService(ClusterNodeConfig config, ActorSystem actors) {

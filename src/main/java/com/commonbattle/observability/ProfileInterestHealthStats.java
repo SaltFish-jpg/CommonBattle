@@ -6,6 +6,7 @@ package com.commonbattle.observability;
 public record ProfileInterestHealthStats(
         int subscriptionCount,
         int watchedOwners,
+        int watchReferences,
         long watchRequests,
         long unwatchRequests,
         long replayAttempts,
@@ -14,6 +15,6 @@ public record ProfileInterestHealthStats(
         long repairFailures
 ) {
     public static ProfileInterestHealthStats empty() {
-        return new ProfileInterestHealthStats(0, 0, 0, 0, 0, 0, 0, 0);
+        return new ProfileInterestHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 }

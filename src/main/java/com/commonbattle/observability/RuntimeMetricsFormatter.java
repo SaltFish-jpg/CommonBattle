@@ -1,6 +1,8 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
+import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
@@ -21,6 +23,8 @@ public final class RuntimeMetricsFormatter {
         status(metrics, snapshot);
         actorSystem(metrics, snapshot);
         rpc(metrics, snapshot);
+        rpcResilience(metrics, snapshot);
+        actorRpc(metrics, snapshot);
         commands(metrics, snapshot);
         agents(metrics, snapshot);
         outbox(metrics, snapshot);
@@ -49,8 +53,19 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_actor_completed_tasks_total", snapshot.actorSystem().completedTasks());
         gauge(metrics, "commonbattle_actor_failed_tasks_total", snapshot.actorSystem().failedTasks());
         gauge(metrics, "commonbattle_actor_rejected_tasks_total", snapshot.actorSystem().rejectedTasks());
+        gauge(metrics, "commonbattle_actor_dropped_tasks_total", snapshot.actorSystem().droppedTasks());
         gauge(metrics, "commonbattle_actor_queued_tasks", snapshot.actorSystem().queuedTasks());
         gauge(metrics, "commonbattle_actor_running_mailboxes", snapshot.actorSystem().runningMailboxes());
+        gauge(metrics, "commonbattle_actor_active_mailboxes", snapshot.actorSystem().activeMailboxes());
+        gauge(metrics, "commonbattle_actor_largest_mailbox_queued_tasks", snapshot.actorSystem().largestMailboxQueuedTasks());
+        gauge(metrics, "commonbattle_actor_peak_queued_tasks", snapshot.actorSystem().peakQueuedTasks());
+        gauge(metrics, "commonbattle_actor_peak_running_mailboxes", snapshot.actorSystem().peakRunningMailboxes());
+        labeledEnum(metrics, "commonbattle_actor_queued_tasks_by_category", "category",
+                snapshot.actorSystem().queuedTasksByCategory(), ActorTaskCategory.values());
+        labeledEnum(metrics, "commonbattle_actor_rejected_tasks_by_category_total", "category",
+                snapshot.actorSystem().rejectedTasksByCategory(), ActorTaskCategory.values());
+        labeledEnum(metrics, "commonbattle_actor_dropped_tasks_by_category_total", "category",
+                snapshot.actorSystem().droppedTasksByCategory(), ActorTaskCategory.values());
     }
 
     private static void rpc(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -62,6 +77,27 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_rpc_slow_requests_total", snapshot.rpc().slowRequests());
         gauge(metrics, "commonbattle_rpc_pending_requests", snapshot.rpc().pendingRequests());
         gauge(metrics, "commonbattle_rpc_idempotency_cache_size", snapshot.rpc().idempotencyCacheSize());
+    }
+
+    private static void rpcResilience(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_rpc_resilience_attempts_total", snapshot.rpcResilience().attempts());
+        gauge(metrics, "commonbattle_rpc_resilience_retries_total", snapshot.rpcResilience().retries());
+        gauge(metrics, "commonbattle_rpc_resilience_short_circuited_total", snapshot.rpcResilience().shortCircuited());
+        gauge(metrics, "commonbattle_rpc_resilience_opened_circuits_total", snapshot.rpcResilience().openedCircuits());
+        gauge(metrics, "commonbattle_rpc_resilience_rejected_after_close_total", snapshot.rpcResilience().rejectedAfterClose());
+        gauge(metrics, "commonbattle_rpc_resilience_circuits", snapshot.rpcResilience().circuits());
+        gauge(metrics, "commonbattle_rpc_resilience_open_circuits", snapshot.rpcResilience().openCircuits());
+    }
+
+    private static void actorRpc(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_actor_rpc_clients", snapshot.actorRpc().clientCount());
+        gauge(metrics, "commonbattle_actor_rpc_calls_total", snapshot.actorRpc().calls());
+        gauge(metrics, "commonbattle_actor_rpc_succeeded_responses_total", snapshot.actorRpc().succeededResponses());
+        gauge(metrics, "commonbattle_actor_rpc_failed_responses_total", snapshot.actorRpc().failedResponses());
+        gauge(metrics, "commonbattle_actor_rpc_callback_delivery_failures_total",
+                snapshot.actorRpc().callbackDeliveryFailures());
+        labeledEnum(metrics, "commonbattle_actor_rpc_failed_responses_by_status_total", "status",
+                snapshot.actorRpc().failedResponsesByStatus(), AgentDeliveryStatus.values());
     }
 
     private static void commands(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -161,6 +197,7 @@ public final class RuntimeMetricsFormatter {
     private static void profileInterests(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         gauge(metrics, "commonbattle_profile_interest_subscriptions", snapshot.profileInterests().subscriptionCount());
         gauge(metrics, "commonbattle_profile_interest_watched_owners", snapshot.profileInterests().watchedOwners());
+        gauge(metrics, "commonbattle_profile_interest_watch_references", snapshot.profileInterests().watchReferences());
         gauge(metrics, "commonbattle_profile_interest_watch_requests_total", snapshot.profileInterests().watchRequests());
         gauge(metrics, "commonbattle_profile_interest_unwatch_requests_total", snapshot.profileInterests().unwatchRequests());
         gauge(metrics, "commonbattle_profile_interest_replay_attempts_total", snapshot.profileInterests().replayAttempts());

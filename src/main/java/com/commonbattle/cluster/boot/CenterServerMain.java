@@ -30,40 +30,50 @@ public final class CenterServerMain {
     private CenterServerMain() {
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/center.properties");
-        config.validate(ServiceKind.CENTER).throwIfInvalid();
-        ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
-        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults())
-        );
-        Clock clock = Clock.systemUTC();
-        InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock);
-        ClusterDirectory directory = new ClusterDirectory(registry);
-        for (ServiceKind kind : ServiceKind.values()) {
-            directory.watch(kind);
+    public static void main(String[] args) throws Exception {
+        BootRuntime runtime = new BootRuntime().installShutdownHook();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/center.properties");
+            config.validate(ServiceKind.CENTER).throwIfInvalid();
+            ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
+                    RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults())
+            );
+            Clock clock = Clock.systemUTC();
+            InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock);
+            ClusterDirectory directory = runtime.add("directory", new ClusterDirectory(registry));
+            for (ServiceKind kind : ServiceKind.values()) {
+                directory.watch(kind);
+            }
+            NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
+                    new DirectoryEndpointView(directory, center, center),
+                    codecs
+            ));
+            registry.register(center);
+            ClusterRpcGateway gateway = runtime.add("rpcGateway",
+                    new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport));
+            runtime.add("centerRegistryEndpoint", new CenterRegistryEndpoint(center, registry, transport, gateway));
+            RegistryLeaseReaper leaseReaper = runtime.add(
+                    "leaseReaper",
+                    new RegistryLeaseReaper(registry, clock, config.registryLeaseScanInterval())
+            );
+            leaseReaper.start();
+            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            ClusterEventCenter eventCenter = new ClusterEventCenter(center, transport, gateway, config.eventHistoryPolicy());
+            runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, gateway, transport,
+                    java.util.List.of(leaseReaper), java.util.List.of(eventCenter)));
+            GameConfigCenterPublisher configPublisher = new GameConfigCenterPublisher(
+                    new InMemoryGameConfigRegistry(new GameConfigValidator(), clock),
+                    eventCenter::publishLocal
+            );
+            configPublisher.publish(ExampleGameConfigs.basic(1, clock.instant()));
+            new GameConfigCenterEndpoint(configPublisher).bind(gateway);
+            System.out.println("Center server started: " + center.id().wireName()
+                    + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
+            new CountDownLatch(1).await();
+        } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
         }
-        NettyClusterTransport transport = new NettyClusterTransport(
-                new DirectoryEndpointView(directory, center, center),
-                codecs
-        );
-        registry.register(center);
-        ClusterRpcGateway gateway = new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport);
-        new CenterRegistryEndpoint(center, registry, transport, gateway);
-        RegistryLeaseReaper leaseReaper = new RegistryLeaseReaper(registry, clock, config.registryLeaseScanInterval());
-        leaseReaper.start();
-        ActorSystem actors = new ActorSystem(config.actorWorkers());
-        ClusterEventCenter eventCenter = new ClusterEventCenter(center, transport, gateway, config.eventHistoryPolicy());
-        BootOpsHttp.start(config, center, actors, directory, gateway, transport,
-                java.util.List.of(leaseReaper), java.util.List.of(eventCenter));
-        GameConfigCenterPublisher configPublisher = new GameConfigCenterPublisher(
-                new InMemoryGameConfigRegistry(new GameConfigValidator(), clock),
-                eventCenter::publishLocal
-        );
-        configPublisher.publish(ExampleGameConfigs.basic(1, clock.instant()));
-        new GameConfigCenterEndpoint(configPublisher).bind(gateway);
-        System.out.println("Center server started: " + center.id().wireName()
-                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
-        new CountDownLatch(1).await();
     }
 }

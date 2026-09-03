@@ -1,5 +1,7 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.ActorOverflowStrategy;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.cluster.ServiceKind;
 import org.junit.jupiter.api.Test;
 
@@ -71,6 +73,50 @@ class ClusterNodeConfigTest {
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
 
         org.junit.jupiter.api.Assertions.assertEquals(2500, config.configWarmupTimeout().toMillis());
+    }
+
+    @Test
+    void actorSystemConfigCanBeConfiguredWithCategoryCapacities() {
+        Properties properties = base();
+        properties.setProperty("cluster.actor.batch.size", "32");
+        properties.setProperty("cluster.actor.mailbox.capacity", "100");
+        properties.setProperty("cluster.actor.overflow.strategy", "DROP_OLDEST");
+        properties.setProperty("cluster.actor.shutdown.timeout.millis", "1500");
+        properties.setProperty("cluster.actor.category.PLAYER_COMMAND.capacity", "60");
+        properties.setProperty("cluster.actor.category.RPC_CALLBACK.capacity", "30");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        org.junit.jupiter.api.Assertions.assertEquals(4, config.actorSystemConfig().workerThreads());
+        org.junit.jupiter.api.Assertions.assertEquals(32, config.actorSystemConfig().batchSize());
+        org.junit.jupiter.api.Assertions.assertEquals(100, config.actorSystemConfig().mailboxCapacity());
+        org.junit.jupiter.api.Assertions.assertEquals(ActorOverflowStrategy.DROP_OLDEST,
+                config.actorSystemConfig().overflowStrategy());
+        org.junit.jupiter.api.Assertions.assertEquals(1500, config.actorSystemConfig().shutdownTimeout().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(60,
+                config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.PLAYER_COMMAND));
+        org.junit.jupiter.api.Assertions.assertEquals(30,
+                config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.RPC_CALLBACK));
+    }
+
+    @Test
+    void validationRejectsInvalidActorConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.actor.batch.size", "0");
+        properties.setProperty("cluster.actor.mailbox.capacity", "-1");
+        properties.setProperty("cluster.actor.overflow.strategy", "UNKNOWN");
+        properties.setProperty("cluster.actor.category.BAD.capacity", "10");
+        properties.setProperty("cluster.actor.category.TIMER.capacity", "bad");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.actor.batch.size"));
+        assertTrue(keys.contains("cluster.actor.mailbox.capacity"));
+        assertTrue(keys.contains("cluster.actor.overflow.strategy"));
+        assertTrue(keys.contains("cluster.actor.category.BAD.capacity"));
+        assertTrue(keys.contains("cluster.actor.category.TIMER.capacity"));
     }
 
     @Test

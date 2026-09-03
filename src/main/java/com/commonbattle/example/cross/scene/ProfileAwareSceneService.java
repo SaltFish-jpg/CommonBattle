@@ -31,7 +31,7 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     @Override
     public ScenePlacement enter(long playerId, String sceneId, int chunkX, int chunkY) {
         ScenePlacement placement = delegate.enter(playerId, sceneId, chunkX, chunkY);
-        profiles.enter(playerId);
+        profiles.enter(playerId, placement.sceneId());
         return placement;
     }
 
@@ -39,7 +39,7 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     public boolean leave(long playerId, String sceneId) {
         boolean left = delegate.leave(playerId, sceneId);
         if (left) {
-            profiles.leave(playerId);
+            profiles.leave(playerId, sceneId);
         }
         return left;
     }

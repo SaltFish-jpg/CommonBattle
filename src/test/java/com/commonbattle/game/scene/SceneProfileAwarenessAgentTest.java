@@ -85,6 +85,33 @@ class SceneProfileAwarenessAgentTest {
         assertEquals(List.of(10001L), interests.unwatched);
     }
 
+    @Test
+    void samePlayerCanHoldMultipleSceneProfileInterests() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingInterestControl interests = new RecordingInterestControl();
+        SceneProfileAwarenessAgent scene = createScene(executor, interests);
+
+        scene.enter(10001L, "room-1");
+        executor.runNext();
+        scene.enter(10001L, "room-2");
+        executor.runNext();
+        scene.enter(10001L, "room-2");
+        executor.runNext();
+        scene.leave(10001L, "room-1");
+        executor.runNext();
+        scene.onProfileChanged(event(10001L, 1, "hero", "avatar_2"));
+        executor.runNext();
+        scene.leave(10001L, "room-2");
+        executor.runNext();
+        scene.onProfileChanged(event(10001L, 2, "hero", "avatar_3"));
+        executor.runNext();
+
+        assertEquals(List.of(10001L, 10001L), interests.watched);
+        assertEquals(List.of(10001L, 10001L), interests.unwatched);
+        assertEquals("avatar_2", scene.profileOf(10001L).orElseThrow().snapshot().appearance().avatar());
+        assertEquals(1, scene.profileOf(10001L).orElseThrow().snapshot().revision());
+    }
+
     private static SceneProfileAwarenessAgent createScene(Executor executor) {
         return createScene(executor, ProfileInterestControl.noop());
     }

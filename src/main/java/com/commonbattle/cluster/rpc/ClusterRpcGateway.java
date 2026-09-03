@@ -13,7 +13,6 @@ import com.commonbattle.cluster.network.ClusterTransport;
 
 import java.io.Serializable;
 import java.time.Duration;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -45,7 +44,7 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
     private final AtomicLong nextRequestId = new AtomicLong(1);
     private final Map<Long, PendingRpcCall<?>> callbacks = new ConcurrentHashMap<>();
     private final Map<String, RpcEndpointHandler> handlers = new ConcurrentHashMap<>();
-    private final Map<IdempotencyKey, CachedRpcResult> idempotencyCache;
+    private final RpcIdempotencyStore idempotencyStore;
 
     public ClusterRpcGateway(
             ServiceDescriptor local,
@@ -85,9 +84,35 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
             ClusterTransport transport,
             boolean bindTransport,
             RpcGovernanceConfig governance,
+            RpcIdempotencyStore idempotencyStore
+    ) {
+        this(local, directory, topology, transport, bindTransport, governance,
+                Executors.newSingleThreadScheduledExecutor(new RpcTimeoutThreadFactory()), true, idempotencyStore);
+    }
+
+    public ClusterRpcGateway(
+            ServiceDescriptor local,
+            ClusterDirectory directory,
+            ClusterTopology topology,
+            ClusterTransport transport,
+            boolean bindTransport,
+            RpcGovernanceConfig governance,
             ScheduledExecutorService timeoutScheduler
     ) {
         this(local, directory, topology, transport, bindTransport, governance, timeoutScheduler, false);
+    }
+
+    public ClusterRpcGateway(
+            ServiceDescriptor local,
+            ClusterDirectory directory,
+            ClusterTopology topology,
+            ClusterTransport transport,
+            boolean bindTransport,
+            RpcGovernanceConfig governance,
+            ScheduledExecutorService timeoutScheduler,
+            RpcIdempotencyStore idempotencyStore
+    ) {
+        this(local, directory, topology, transport, bindTransport, governance, timeoutScheduler, false, idempotencyStore);
     }
 
     private ClusterRpcGateway(
@@ -100,6 +125,21 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
             ScheduledExecutorService timeoutScheduler,
             boolean ownsTimeoutScheduler
     ) {
+        this(local, directory, topology, transport, bindTransport, governance, timeoutScheduler, ownsTimeoutScheduler,
+                new InMemoryRpcIdempotencyStore(governance.idempotencyCacheCapacity()));
+    }
+
+    private ClusterRpcGateway(
+            ServiceDescriptor local,
+            ClusterDirectory directory,
+            ClusterTopology topology,
+            ClusterTransport transport,
+            boolean bindTransport,
+            RpcGovernanceConfig governance,
+            ScheduledExecutorService timeoutScheduler,
+            boolean ownsTimeoutScheduler,
+            RpcIdempotencyStore idempotencyStore
+    ) {
         this.local = Objects.requireNonNull(local, "local");
         this.directory = Objects.requireNonNull(directory, "directory");
         this.topology = Objects.requireNonNull(topology, "topology");
@@ -107,7 +147,7 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
         this.governance = Objects.requireNonNull(governance, "governance");
         this.timeoutScheduler = Objects.requireNonNull(timeoutScheduler, "timeoutScheduler");
         this.ownsTimeoutScheduler = ownsTimeoutScheduler;
-        this.idempotencyCache = createIdempotencyCache(governance.idempotencyCacheCapacity());
+        this.idempotencyStore = Objects.requireNonNull(idempotencyStore, "idempotencyStore");
         if (bindTransport) {
             this.transport.bind(local, this::onMessage);
         }
@@ -161,9 +201,7 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
     }
 
     public RpcGatewayStats stats() {
-        synchronized (idempotencyCache) {
-            return metrics.snapshot(idempotencyCache.size());
-        }
+        return metrics.snapshot(idempotencyStore.size());
     }
 
     private ServiceDescriptor resolveTarget(RpcRequest<?> request) {
@@ -192,9 +230,9 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
             replyFailure(envelope, new IllegalStateException("No handler for " + envelope.operation()));
             return;
         }
-        IdempotencyKey idempotencyKey = idempotencyKey(envelope);
+        RpcIdempotencyKey idempotencyKey = idempotencyKey(envelope);
         if (idempotencyKey != null) {
-            CachedRpcResult cached = cached(idempotencyKey);
+            RpcIdempotencyResult cached = cached(idempotencyKey);
             if (cached != null) {
                 replyCached(envelope, cached);
                 return;
@@ -203,13 +241,13 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
         handler.handle(envelope, new RpcResponder() {
             @Override
             public void success(Object payload) {
-                cache(idempotencyKey, CachedRpcResult.success(payload));
+                cache(idempotencyKey, RpcIdempotencyResult.success(payload));
                 replySuccess(envelope, payload);
             }
 
             @Override
             public void failure(Throwable error) {
-                cache(idempotencyKey, CachedRpcResult.failure(new RpcError(error.getMessage())));
+                cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(error.getMessage())));
                 replyFailure(envelope, error);
             }
         });
@@ -281,45 +319,32 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
         return Map.of(IDEMPOTENCY_KEY, options.idempotencyKey());
     }
 
-    private IdempotencyKey idempotencyKey(ClusterEnvelope envelope) {
+    private RpcIdempotencyKey idempotencyKey(ClusterEnvelope envelope) {
         String key = envelope.metadata().get(IDEMPOTENCY_KEY);
-        if (key == null || key.isBlank() || governance.idempotencyCacheCapacity() == 0) {
+        if (key == null || key.isBlank()) {
             return null;
         }
-        return new IdempotencyKey(envelope.source(), envelope.operation(), key);
+        return new RpcIdempotencyKey(envelope.source(), envelope.operation(), key);
     }
 
-    private CachedRpcResult cached(IdempotencyKey key) {
-        synchronized (idempotencyCache) {
-            return idempotencyCache.get(key);
-        }
+    private RpcIdempotencyResult cached(RpcIdempotencyKey key) {
+        return idempotencyStore.get(key);
     }
 
-    private void cache(IdempotencyKey key, CachedRpcResult result) {
+    private void cache(RpcIdempotencyKey key, RpcIdempotencyResult result) {
         if (key == null) {
             return;
         }
-        synchronized (idempotencyCache) {
-            idempotencyCache.put(key, result);
-        }
+        idempotencyStore.put(key, result);
     }
 
-    private void replyCached(ClusterEnvelope request, CachedRpcResult result) {
+    private void replyCached(ClusterEnvelope request, RpcIdempotencyResult result) {
         if (result.success()) {
             replySuccess(request, result.payload());
         } else {
             sendReply(request.source(), new ClusterEnvelope(request.requestId(), local.id(), request.source(),
                     RPC_FAILURE, result.payload()));
         }
-    }
-
-    private static Map<IdempotencyKey, CachedRpcResult> createIdempotencyCache(int capacity) {
-        return java.util.Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<IdempotencyKey, CachedRpcResult> eldest) {
-                return size() > capacity;
-            }
-        });
     }
 
     @Override
@@ -348,19 +373,6 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
             if (future != null) {
                 future.cancel(false);
             }
-        }
-    }
-
-    private record IdempotencyKey(ServiceId source, String operation, String key) {
-    }
-
-    private record CachedRpcResult(boolean success, Object payload) {
-        static CachedRpcResult success(Object payload) {
-            return new CachedRpcResult(true, payload);
-        }
-
-        static CachedRpcResult failure(Object payload) {
-            return new CachedRpcResult(false, payload);
         }
     }
 

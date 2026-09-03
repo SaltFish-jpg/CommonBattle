@@ -5,6 +5,7 @@ package com.commonbattle.game.profile;
  */
 public record ProfileInterestStats(
         int watchedOwners,
+        int watchReferences,
         long watchRequests,
         long unwatchRequests,
         long replayAttempts,

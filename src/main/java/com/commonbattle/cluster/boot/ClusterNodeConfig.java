@@ -1,5 +1,8 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.ActorOverflowStrategy;
+import com.commonbattle.actor.ActorSystemConfig;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
@@ -73,6 +76,11 @@ public final class ClusterNodeConfig {
         validatePort(issues, "cluster.port");
         validateOptionalPort(issues, "cluster.ops.port");
         validatePositiveInteger(issues, "cluster.actor.workers");
+        validatePositiveInteger(issues, "cluster.actor.batch.size");
+        validatePositiveInteger(issues, "cluster.actor.mailbox.capacity");
+        validatePositiveInteger(issues, "cluster.actor.shutdown.timeout.millis");
+        validateActorOverflowStrategy(issues);
+        validateActorCategoryCapacities(issues);
         validatePositiveInteger(issues, "cluster.config.warmup.timeout.millis");
         validatePositiveInteger(issues, "cluster.registry.lease.ttl.millis");
         validatePositiveInteger(issues, "cluster.registry.heartbeat.interval.millis");
@@ -124,6 +132,25 @@ public final class ClusterNodeConfig {
 
     public int actorWorkers() {
         return integer("cluster.actor.workers", Runtime.getRuntime().availableProcessors());
+    }
+
+    public ActorSystemConfig actorSystemConfig() {
+        ActorSystemConfig config = new ActorSystemConfig(
+                actorWorkers(),
+                integer("cluster.actor.batch.size", ActorSystemConfig.DEFAULT_BATCH_SIZE),
+                integer("cluster.actor.mailbox.capacity", ActorSystemConfig.DEFAULT_MAILBOX_CAPACITY),
+                ActorOverflowStrategy.valueOf(property("cluster.actor.overflow.strategy", ActorOverflowStrategy.REJECT.name())),
+                Duration.ofMillis(integer("cluster.actor.shutdown.timeout.millis", 3_000))
+        );
+        String prefix = "cluster.actor.category.";
+        String suffix = ".capacity";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix) && key.endsWith(suffix)) {
+                String category = key.substring(prefix.length(), key.length() - suffix.length());
+                config = config.withCategoryCapacity(ActorTaskCategory.valueOf(category), integer(key, 0));
+            }
+        }
+        return config;
     }
 
     public Duration configWarmupTimeout() {
@@ -260,6 +287,34 @@ public final class ClusterNodeConfig {
             }
         } catch (NumberFormatException e) {
             issues.add(new ClusterConfigIssue(key, "must be an integer"));
+        }
+    }
+
+    private void validateActorOverflowStrategy(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.actor.overflow.strategy");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            ActorOverflowStrategy.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.actor.overflow.strategy", "unknown overflow strategy " + value));
+        }
+    }
+
+    private void validateActorCategoryCapacities(List<ClusterConfigIssue> issues) {
+        String prefix = "cluster.actor.category.";
+        String suffix = ".capacity";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix) && key.endsWith(suffix)) {
+                String category = key.substring(prefix.length(), key.length() - suffix.length());
+                try {
+                    ActorTaskCategory.valueOf(category);
+                } catch (IllegalArgumentException e) {
+                    issues.add(new ClusterConfigIssue(key, "unknown actor task category " + category));
+                }
+                validatePositiveInteger(issues, key);
+            }
         }
     }
 

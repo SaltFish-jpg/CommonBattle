@@ -26,38 +26,47 @@ public final class ProxyServerMain {
     private ProxyServerMain() {
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/proxy.properties");
-        config.validate(ServiceKind.PROXY).throwIfInvalid();
-        ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
-        ServiceDescriptor center = ClusterDescriptors.center(config);
-        ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
-        directory.seed(center);
-        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
-        NettyClusterTransport transport = new NettyClusterTransport(
-                new DirectoryEndpointView(directory, local, center),
-                codecs
-        );
-        ForwardingProxy forwarder = new ForwardingProxy(transport);
-        ClusterRpcGateway gateway = new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport, false);
-        transport.bind(local, envelope -> {
-            if (envelope.target().equals(local.id())) {
-                gateway.onMessage(envelope);
-            } else {
-                forwarder.onMessage(envelope);
-            }
-        });
-        RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
-        ClusterNode node = new ClusterNode(registry, local, directory);
-        ActorSystem actors = new ActorSystem(config.actorWorkers());
-        node.start(
-                List.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.REGION),
-                config.registryLeaseTtl(),
-                config.registryHeartbeatInterval()
-        );
-        BootOpsHttp.start(config, local, actors, directory, gateway, transport, node);
-        System.out.println("Proxy server started: " + local.id().wireName()
-                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
-        new CountDownLatch(1).await();
+    public static void main(String[] args) throws Exception {
+        BootRuntime runtime = new BootRuntime().installShutdownHook();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/proxy.properties");
+            config.validate(ServiceKind.PROXY).throwIfInvalid();
+            ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+            ServiceDescriptor center = ClusterDescriptors.center(config);
+            ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
+            directory.seed(center);
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
+                    new DirectoryEndpointView(directory, local, center),
+                    codecs
+            ));
+            ForwardingProxy forwarder = new ForwardingProxy(transport);
+            ClusterRpcGateway gateway = runtime.add(
+                    "rpcGateway",
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport, false)
+            );
+            transport.bind(local, envelope -> {
+                if (envelope.target().equals(local.id())) {
+                    gateway.onMessage(envelope);
+                } else {
+                    forwarder.onMessage(envelope);
+                }
+            });
+            RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
+            ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
+            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            node.start(
+                    List.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.REGION),
+                    config.registryLeaseTtl(),
+                    config.registryHeartbeatInterval()
+            );
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node));
+            System.out.println("Proxy server started: " + local.id().wireName()
+                    + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
+            new CountDownLatch(1).await();
+        } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        }
     }
 }

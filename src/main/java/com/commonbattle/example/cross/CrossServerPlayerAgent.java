@@ -2,10 +2,14 @@ package com.commonbattle.example.cross;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.message.AgentDeliveryResult;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
+import com.commonbattle.actor.rpc.ActorRpcHandler;
 import com.commonbattle.actor.rpc.ActorRpcClient;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 
 /**
  * 跨服玩家 Agent 示例。
@@ -19,11 +23,12 @@ public final class CrossServerPlayerAgent {
     private volatile AgentStatus status = AgentStatus.LOCAL;
     private volatile String sceneId;
     private volatile String lastError;
+    private volatile AgentDeliveryStatus lastDeliveryStatus;
 
     public CrossServerPlayerAgent(ActorSystem system, RpcGateway gateway, long playerId) {
         this.system = system;
         this.self = system.actor("player-agent-" + playerId);
-        this.rpc = new ActorRpcClient(system, self, gateway);
+        this.rpc = new ActorRpcClient(system, self, gateway, new ClusterRpcDeliveryFailureMapper());
         this.playerId = playerId;
     }
 
@@ -43,18 +48,33 @@ public final class CrossServerPlayerAgent {
         return lastError;
     }
 
+    public AgentDeliveryStatus lastDeliveryStatus() {
+        return lastDeliveryStatus;
+    }
+
     public void enterScene(String targetSceneId) {
         system.send(self, context -> {
             status = AgentStatus.ENTERING_SCENE;
             sceneId = targetSceneId;
             lastError = null;
+            lastDeliveryStatus = null;
             RpcRequest<EnterSceneResult> request = new RpcRequest<>(
                     ServiceKind.SCENE.name(),
                     SceneOperations.ENTER,
                     new EnterSceneRequest(playerId, targetSceneId),
                     EnterSceneResult.class
             );
-            rpc.call(request, this::onEnterSceneSuccess, this::onEnterSceneFailure);
+            rpc.call(request, new ActorRpcHandler<>() {
+                @Override
+                public void success(com.commonbattle.actor.ActorContext ignored, EnterSceneResult result) {
+                    onEnterSceneSuccess(ignored, result);
+                }
+
+                @Override
+                public void failure(com.commonbattle.actor.ActorContext ignored, AgentDeliveryResult delivery, Throwable error) {
+                    onEnterSceneFailure(ignored, delivery, error);
+                }
+            });
         });
     }
 
@@ -66,13 +86,24 @@ public final class CrossServerPlayerAgent {
             }
             status = AgentStatus.LEAVING_SCENE;
             lastError = null;
+            lastDeliveryStatus = null;
             RpcRequest<LeaveSceneResult> request = new RpcRequest<>(
                     ServiceKind.SCENE.name(),
                     SceneOperations.LEAVE,
                     new LeaveSceneRequest(playerId, sceneId),
                     LeaveSceneResult.class
             );
-            rpc.call(request, this::onLeaveSceneSuccess, this::onLeaveSceneFailure);
+            rpc.call(request, new ActorRpcHandler<>() {
+                @Override
+                public void success(com.commonbattle.actor.ActorContext ignored, LeaveSceneResult result) {
+                    onLeaveSceneSuccess(ignored, result);
+                }
+
+                @Override
+                public void failure(com.commonbattle.actor.ActorContext ignored, AgentDeliveryResult delivery, Throwable error) {
+                    onLeaveSceneFailure(ignored, delivery, error);
+                }
+            });
         });
     }
 
@@ -81,9 +112,10 @@ public final class CrossServerPlayerAgent {
         sceneId = result.sceneId();
     }
 
-    private void onEnterSceneFailure(Object ignored, Throwable error) {
+    private void onEnterSceneFailure(Object ignored, AgentDeliveryResult delivery, Throwable error) {
         status = AgentStatus.FAILED;
-        lastError = error.getMessage();
+        lastDeliveryStatus = delivery.status();
+        lastError = delivery.reason();
     }
 
     private void onLeaveSceneSuccess(Object ignored, LeaveSceneResult result) {
@@ -96,8 +128,9 @@ public final class CrossServerPlayerAgent {
         sceneId = null;
     }
 
-    private void onLeaveSceneFailure(Object ignored, Throwable error) {
+    private void onLeaveSceneFailure(Object ignored, AgentDeliveryResult delivery, Throwable error) {
         status = AgentStatus.FAILED;
-        lastError = error.getMessage();
+        lastDeliveryStatus = delivery.status();
+        lastError = delivery.reason();
     }
 }

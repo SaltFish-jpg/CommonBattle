@@ -7,6 +7,9 @@ import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
+import com.commonbattle.actor.message.AgentDeliveryResult;
+import com.commonbattle.actor.rpc.ActorRpcClient;
+import com.commonbattle.actor.rpc.ActorRpcHandler;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
@@ -26,9 +29,13 @@ import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcCircuitBreakerConfig;
 import com.commonbattle.cluster.rpc.RpcGovernanceConfig;
+import com.commonbattle.cluster.rpc.ResilientRpcGateway;
+import com.commonbattle.cluster.rpc.RpcRetryPolicy;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.example.config.ExampleGameConfigs;
+import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigApplyResult;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
@@ -101,6 +108,12 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.outbox().failedAttempts());
         assertEquals(1, snapshot.cluster().count(ServiceKind.CENTER));
         assertEquals(1, snapshot.cluster().count(ServiceKind.GAME));
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+        assertTrue(json.contains("\"largestMailboxQueuedTasks\":0"));
+        assertTrue(json.contains("\"queuedTasksByCategory\""));
+        assertTrue(metrics.contains("commonbattle_actor_largest_mailbox_queued_tasks 0"));
+        assertTrue(metrics.contains("commonbattle_actor_queued_tasks_by_category{category=\"DEFAULT\"} 0"));
     }
 
     @Test
@@ -174,6 +187,135 @@ class RuntimeHealthProbeTest {
 
         assertEquals(1, snapshot.rpc().pendingRequests());
         assertEquals(1, snapshot.rpc().sentRequests());
+    }
+
+    @Test
+    void snapshotAggregatesRpcResilienceStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ResilientRpcGateway resilient = new ResilientRpcGateway(
+                new com.commonbattle.actor.rpc.RpcGateway() {
+                    @Override
+                    public <T> void call(com.commonbattle.actor.rpc.RpcRequest<T> request, com.commonbattle.actor.rpc.RpcCallback<T> callback) {
+                        callback.failure(new IllegalStateException("down"));
+                    }
+                },
+                RpcRetryPolicy.noRetry(),
+                new RpcCircuitBreakerConfig(1, Duration.ofSeconds(5))
+        );
+        resilient.call(new com.commonbattle.actor.rpc.RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                "one",
+                String.class
+        ), new NoopCallback());
+        resilient.call(new com.commonbattle.actor.rpc.RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                "two",
+                String.class
+        ), new NoopCallback());
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(resilient),
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.rpcResilience().attempts());
+        assertEquals(1, snapshot.rpcResilience().shortCircuited());
+        assertEquals(1, snapshot.rpcResilience().openCircuits());
+        assertTrue(json.contains("\"rpcResilience\""));
+        assertTrue(metrics.contains("commonbattle_rpc_resilience_open_circuits 1"));
+    }
+
+    @Test
+    void snapshotAggregatesActorRpcTemplateStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ActorRpcClient actorRpc = new ActorRpcClient(
+                actors,
+                actors.actor("player-10001"),
+                new com.commonbattle.actor.rpc.RpcGateway() {
+                    @Override
+                    public <T> void call(com.commonbattle.actor.rpc.RpcRequest<T> request, com.commonbattle.actor.rpc.RpcCallback<T> callback) {
+                        callback.failure(new IllegalStateException("remote down"));
+                    }
+                },
+                error -> AgentDeliveryResult.remoteUnavailable("mapped_remote_down")
+        );
+        actorRpc.call(new com.commonbattle.actor.rpc.RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                "payload",
+                String.class
+        ), new ActorRpcHandler<>() {
+            @Override
+            public void success(com.commonbattle.actor.ActorContext context, String response) {
+            }
+
+            @Override
+            public void failure(com.commonbattle.actor.ActorContext context, AgentDeliveryResult delivery, Throwable error) {
+            }
+        });
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(),
+                java.util.List.of(actorRpc),
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.actorRpc().clientCount());
+        assertEquals(1, snapshot.actorRpc().calls());
+        assertEquals(1, snapshot.actorRpc().failedResponses());
+        assertTrue(json.contains("\"actorRpc\""));
+        assertTrue(metrics.contains("commonbattle_actor_rpc_failed_responses_total 1"));
+        assertTrue(metrics.contains("commonbattle_actor_rpc_failed_responses_by_status_total{status=\"REMOTE_UNAVAILABLE\"} 1"));
     }
 
     @Test
@@ -513,7 +655,7 @@ class RuntimeHealthProbeTest {
         ServiceDescriptor scene = new ServiceDescriptor(
                 ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
                 new ServiceEndpoint("127.0.0.1", freePort()),
-                Set.of("scene.enter"),
+                Set.of(SceneOperations.ENTER),
                 Map.of()
         );
         NettyClusterTransport transport = new NettyClusterTransport(
@@ -525,7 +667,7 @@ class RuntimeHealthProbeTest {
                     1,
                     game.id(),
                     scene.id(),
-                    "scene.enter",
+                    SceneOperations.ENTER,
                     "payload"
             )));
             RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -654,7 +796,7 @@ class RuntimeHealthProbeTest {
     @Test
     void snapshotAggregatesProfileInterestStats() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
-        ProfileInterestView interest = () -> new ProfileInterestStats(2, 3, 1, 4, 1, 2, 1);
+        ProfileInterestView interest = () -> new ProfileInterestStats(2, 5, 3, 1, 4, 1, 2, 1);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
                 actors,
@@ -687,8 +829,10 @@ class RuntimeHealthProbeTest {
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(1, snapshot.profileInterests().subscriptionCount());
         assertEquals(2, snapshot.profileInterests().watchedOwners());
+        assertEquals(5, snapshot.profileInterests().watchReferences());
         assertTrue(json.contains("\"profileInterests\""));
         assertTrue(metrics.contains("commonbattle_profile_interest_watched_owners 2"));
+        assertTrue(metrics.contains("commonbattle_profile_interest_watch_references 5"));
         assertTrue(metrics.contains("commonbattle_profile_interest_repair_failures_total 1"));
     }
 

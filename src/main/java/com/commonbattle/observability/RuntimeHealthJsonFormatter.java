@@ -1,6 +1,8 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
+import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
@@ -23,6 +25,8 @@ public final class RuntimeHealthJsonFormatter {
         field(json, "status", snapshot.status().name()).append(',');
         object(json, "actorSystem", actorSystem(snapshot)).append(',');
         object(json, "rpc", rpc(snapshot)).append(',');
+        object(json, "rpcResilience", rpcResilience(snapshot)).append(',');
+        object(json, "actorRpc", actorRpc(snapshot)).append(',');
         object(json, "commands", commands(snapshot)).append(',');
         object(json, "agents", agents(snapshot)).append(',');
         object(json, "outbox", outbox(snapshot)).append(',');
@@ -46,8 +50,20 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "completedTasks", snapshot.actorSystem().completedTasks()).append(',');
         number(json, "failedTasks", snapshot.actorSystem().failedTasks()).append(',');
         number(json, "rejectedTasks", snapshot.actorSystem().rejectedTasks()).append(',');
+        number(json, "droppedTasks", snapshot.actorSystem().droppedTasks()).append(',');
         number(json, "queuedTasks", snapshot.actorSystem().queuedTasks()).append(',');
-        number(json, "runningMailboxes", snapshot.actorSystem().runningMailboxes());
+        number(json, "runningMailboxes", snapshot.actorSystem().runningMailboxes()).append(',');
+        number(json, "activeMailboxes", snapshot.actorSystem().activeMailboxes()).append(',');
+        number(json, "largestMailboxQueuedTasks", snapshot.actorSystem().largestMailboxQueuedTasks()).append(',');
+        field(json, "largestMailboxActorId", snapshot.actorSystem().largestMailboxActorId()).append(',');
+        number(json, "peakQueuedTasks", snapshot.actorSystem().peakQueuedTasks()).append(',');
+        number(json, "peakRunningMailboxes", snapshot.actorSystem().peakRunningMailboxes()).append(',');
+        object(json, "queuedTasksByCategory", enumMap(snapshot.actorSystem().queuedTasksByCategory(),
+                ActorTaskCategory.values())).append(',');
+        object(json, "rejectedTasksByCategory", enumMap(snapshot.actorSystem().rejectedTasksByCategory(),
+                ActorTaskCategory.values())).append(',');
+        object(json, "droppedTasksByCategory", enumMap(snapshot.actorSystem().droppedTasksByCategory(),
+                ActorTaskCategory.values()));
         json.append('}');
         return json;
     }
@@ -66,6 +82,35 @@ public final class RuntimeHealthJsonFormatter {
         json.append('}');
         return json;
     }
+
+    private static StringBuilder rpcResilience(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "attempts", snapshot.rpcResilience().attempts()).append(',');
+        number(json, "retries", snapshot.rpcResilience().retries()).append(',');
+        number(json, "shortCircuited", snapshot.rpcResilience().shortCircuited()).append(',');
+        number(json, "openedCircuits", snapshot.rpcResilience().openedCircuits()).append(',');
+        number(json, "rejectedAfterClose", snapshot.rpcResilience().rejectedAfterClose()).append(',');
+        number(json, "circuits", snapshot.rpcResilience().circuits()).append(',');
+        number(json, "openCircuits", snapshot.rpcResilience().openCircuits());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder actorRpc(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "clientCount", snapshot.actorRpc().clientCount()).append(',');
+        number(json, "calls", snapshot.actorRpc().calls()).append(',');
+        number(json, "succeededResponses", snapshot.actorRpc().succeededResponses()).append(',');
+        number(json, "failedResponses", snapshot.actorRpc().failedResponses()).append(',');
+        number(json, "callbackDeliveryFailures", snapshot.actorRpc().callbackDeliveryFailures()).append(',');
+        object(json, "failedResponsesByStatus", enumMap(snapshot.actorRpc().failedResponsesByStatus(),
+                AgentDeliveryStatus.values()));
+        json.append('}');
+        return json;
+    }
+
 
     private static StringBuilder commands(RuntimeHealthSnapshot snapshot) {
         return enumMap(snapshot.commands().counts(), PlayerCommandStatus.values());
@@ -213,6 +258,7 @@ public final class RuntimeHealthJsonFormatter {
         json.append('{');
         number(json, "subscriptionCount", snapshot.profileInterests().subscriptionCount()).append(',');
         number(json, "watchedOwners", snapshot.profileInterests().watchedOwners()).append(',');
+        number(json, "watchReferences", snapshot.profileInterests().watchReferences()).append(',');
         number(json, "watchRequests", snapshot.profileInterests().watchRequests()).append(',');
         number(json, "unwatchRequests", snapshot.profileInterests().unwatchRequests()).append(',');
         number(json, "replayAttempts", snapshot.profileInterests().replayAttempts()).append(',');

@@ -36,8 +36,9 @@ public final class ActorTimerService implements AutoCloseable {
     public ActorTimerHandle scheduleOnce(ActorRef target, Duration delay, ActorTask task) {
         Objects.requireNonNull(delay, "delay");
         validate(target, task);
+        ActorTask timerTask = ActorTask.withDefaultCategory(ActorTaskCategory.TIMER, task);
         ScheduledFuture<?> future = scheduler.schedule(
-                () -> system.trySend(target, task),
+                () -> system.trySend(target, timerTask),
                 delay.toMillis(),
                 TimeUnit.MILLISECONDS
         );
@@ -48,10 +49,11 @@ public final class ActorTimerService implements AutoCloseable {
         Objects.requireNonNull(initialDelay, "initialDelay");
         Objects.requireNonNull(period, "period");
         validate(target, task);
+        ActorTask timerTask = ActorTask.withDefaultCategory(ActorTaskCategory.TIMER, task);
         AtomicReference<ScheduledFuture<?>> holder = new AtomicReference<>();
         ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(
                 () -> {
-                    boolean accepted = system.trySend(target, task);
+                    boolean accepted = system.trySend(target, timerTask);
                     if (!accepted && !system.isAccepting()) {
                         ScheduledFuture<?> scheduled = holder.get();
                         if (scheduled != null) {

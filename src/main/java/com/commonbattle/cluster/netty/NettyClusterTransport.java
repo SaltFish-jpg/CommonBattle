@@ -27,6 +27,8 @@ import io.netty.handler.codec.LengthFieldPrepender;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -35,6 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class NettyClusterTransport implements ClusterTransport {
     private static final int MAX_FRAME_SIZE = 1024 * 1024;
+    private static final long CLOSE_TIMEOUT_MILLIS = 1_000;
 
     private final ServiceRegistryView endpoints;
     private final ProtoClusterCodec codec;
@@ -47,6 +50,7 @@ public final class NettyClusterTransport implements ClusterTransport {
     private final AtomicLong failedWrites = new AtomicLong();
     private final AtomicLong receivedEnvelopes = new AtomicLong();
     private final AtomicLong inboundFailures = new AtomicLong();
+    private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Channel serverChannel;
 
     public NettyClusterTransport(ServiceRegistryView endpoints) {
@@ -73,6 +77,7 @@ public final class NettyClusterTransport implements ClusterTransport {
     public void bind(ServiceDescriptor local, ClusterMessageHandler handler) {
         Objects.requireNonNull(local, "local");
         Objects.requireNonNull(handler, "handler");
+        ensureOpen();
         try {
             ServerBootstrap bootstrap = new ServerBootstrap()
                     .group(bossGroup, workerGroup)
@@ -90,6 +95,10 @@ public final class NettyClusterTransport implements ClusterTransport {
     public void send(ServiceId nextHop, ClusterEnvelope envelope) {
         Objects.requireNonNull(nextHop, "nextHop");
         Objects.requireNonNull(envelope, "envelope");
+        if (closed.get()) {
+            failedWrites.incrementAndGet();
+            throw new IllegalStateException("Netty transport is closed");
+        }
         Channel channel = channels.compute(nextHop, (serviceId, existing) ->
                 existing != null && existing.isActive() ? existing : connect(serviceId));
         try {
@@ -123,6 +132,7 @@ public final class NettyClusterTransport implements ClusterTransport {
     }
 
     private Channel connect(ServiceId serviceId) {
+        ensureOpen();
         ServiceEndpoint endpoint = endpoints.endpointOf(serviceId);
         connectionAttempts.incrementAndGet();
         try {
@@ -148,12 +158,27 @@ public final class NettyClusterTransport implements ClusterTransport {
 
     @Override
     public void close() {
-        channels.values().forEach(Channel::close);
-        if (serverChannel != null) {
-            serverChannel.close();
+        if (!closed.compareAndSet(false, true)) {
+            return;
         }
-        bossGroup.shutdownGracefully();
-        workerGroup.shutdownGracefully();
+        channels.values().forEach(NettyClusterTransport::closeChannel);
+        if (serverChannel != null) {
+            closeChannel(serverChannel);
+        }
+        bossGroup.shutdownGracefully(0, CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                .awaitUninterruptibly(CLOSE_TIMEOUT_MILLIS);
+        workerGroup.shutdownGracefully(0, CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                .awaitUninterruptibly(CLOSE_TIMEOUT_MILLIS);
+    }
+
+    private void ensureOpen() {
+        if (closed.get()) {
+            throw new IllegalStateException("Netty transport is closed");
+        }
+    }
+
+    private static void closeChannel(Channel channel) {
+        channel.close().awaitUninterruptibly(CLOSE_TIMEOUT_MILLIS);
     }
 
     /**

@@ -25,6 +25,7 @@ class ActorTimerServiceTest {
 
             assertTrue(awaitQueued(executor, 1));
             assertEquals(0, runs.get());
+            assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.TIMER));
 
             executor.runNext();
 
@@ -61,6 +62,8 @@ class ActorTimerServiceTest {
             timers.scheduleOnce(player, Duration.ofMillis(1), ignored -> result.add("timer"));
 
             assertTrue(awaitQueuedTasks(system, 2));
+            assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));
+            assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.TIMER));
             executor.runNext();
 
             assertEquals(List.of("normal", "timer"), result);

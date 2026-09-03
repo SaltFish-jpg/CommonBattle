@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class PlayerCommandSequencer {
     private final Map<Key, Long> lastSequences = new ConcurrentHashMap<>();
 
-    public PlayerCommandStatus inspect(PlayerCommand command) {
+    public synchronized PlayerCommandStatus inspect(PlayerCommand command) {
         Objects.requireNonNull(command, "command");
         Key key = new Key(command.playerId(), command.sessionId(), command.sessionEpoch());
         long current = lastSequences.getOrDefault(key, 0L);
@@ -21,8 +21,13 @@ public final class PlayerCommandSequencer {
         if (command.sequence() != current + 1) {
             return PlayerCommandStatus.GAP;
         }
-        lastSequences.put(key, command.sequence());
         return PlayerCommandStatus.ACCEPTED;
+    }
+
+    public synchronized void commit(PlayerCommand command) {
+        Objects.requireNonNull(command, "command");
+        Key key = new Key(command.playerId(), command.sessionId(), command.sessionEpoch());
+        lastSequences.put(key, command.sequence());
     }
 
     private record Key(long playerId, String sessionId, long epoch) {

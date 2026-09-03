@@ -5,6 +5,7 @@ import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentRoute;
 import com.commonbattle.actor.agent.AgentRouteType;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
+import com.commonbattle.actor.message.AgentDeliveryResult;
 
 import java.util.Objects;
 
@@ -46,11 +47,12 @@ public final class AdmissionControlledAgentRouter {
         return new AdmissionRouteResult(decision, route);
     }
 
-    public void deliverLocal(AdmissionRouteResult routed, ActorTask task) {
+    public AgentDeliveryResult deliverLocal(AdmissionRouteResult routed, ActorTask task) {
         Objects.requireNonNull(routed, "routed");
         Objects.requireNonNull(task, "task");
         if (routed.admission().accepted()) {
-            router.tellResolvedLocal(routed.route(), task);
+            return router.tellResolvedLocal(routed.route(), task);
         }
+        return AgentDeliveryResult.rejected(routed.admission().reason(), routed.admission().retryAfter());
     }
 }

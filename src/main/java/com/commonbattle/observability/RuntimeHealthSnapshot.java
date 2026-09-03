@@ -14,6 +14,8 @@ public record RuntimeHealthSnapshot(
         RuntimeHealthStatus status,
         ActorSystemStats actorSystem,
         RpcGatewayStats rpc,
+        RpcResilienceHealthStats rpcResilience,
+        ActorRpcHealthStats actorRpc,
         PlayerCommandStats commands,
         AgentLifecycleStats agents,
         EventOutboxStats outbox,

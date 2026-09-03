@@ -3,6 +3,7 @@ package com.commonbattle.cluster.rpc;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -42,7 +43,7 @@ class ResilientRpcGatewayTest {
         )) {
             RecordingCallback<String> callback = new RecordingCallback<>();
 
-            gateway.call(new RpcRequest<>("SCENE", "scene.enter", "hello", String.class), callback);
+            gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "hello", String.class), callback);
 
             assertTrue(callback.awaitSuccess());
             assertEquals("ok", callback.success.get());
@@ -68,14 +69,42 @@ class ResilientRpcGatewayTest {
         RecordingCallback<String> second = new RecordingCallback<>();
         RecordingCallback<String> third = new RecordingCallback<>();
 
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "one", String.class), first);
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "two", String.class), second);
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "three", String.class), third);
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "one", String.class), first);
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "two", String.class), second);
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "three", String.class), third);
 
-        assertEquals(RpcCircuitState.OPEN, gateway.state("SCENE", "scene.enter"));
+        assertEquals(RpcCircuitState.OPEN, gateway.state("SCENE", SceneOperations.ENTER));
         assertInstanceOf(RpcCircuitOpenException.class, third.failure.get());
         assertEquals(1, gateway.stats().shortCircuited());
         assertEquals(1, gateway.stats().openedCircuits());
+        assertEquals(1, gateway.stats().circuits());
+        assertEquals(1, gateway.stats().openCircuits());
+    }
+
+    @Test
+    void closedGatewayRejectsNewCallsWithoutDelegateAttempt() {
+        AtomicInteger calls = new AtomicInteger();
+        RpcGateway delegate = new RpcGateway() {
+            @Override
+            public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+                calls.incrementAndGet();
+                callback.failure(new IllegalStateException("should not call"));
+            }
+        };
+        ResilientRpcGateway gateway = new ResilientRpcGateway(
+                delegate,
+                RpcRetryPolicy.noRetry(),
+                new RpcCircuitBreakerConfig(2, Duration.ofSeconds(5))
+        );
+        RecordingCallback<String> callback = new RecordingCallback<>();
+
+        gateway.close();
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "closed", String.class), callback);
+
+        assertEquals(0, calls.get());
+        assertInstanceOf(IllegalStateException.class, callback.failure.get());
+        assertEquals(1, gateway.stats().rejectedAfterClose());
+        assertEquals(0, gateway.stats().attempts());
     }
 
     @Test
@@ -101,16 +130,16 @@ class ResilientRpcGatewayTest {
                 clock,
                 Executors.newSingleThreadScheduledExecutor()
         );
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "one", String.class), new RecordingCallback<>());
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "two", String.class), new RecordingCallback<>());
-        assertEquals(RpcCircuitState.OPEN, gateway.state("SCENE", "scene.enter"));
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "one", String.class), new RecordingCallback<>());
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "two", String.class), new RecordingCallback<>());
+        assertEquals(RpcCircuitState.OPEN, gateway.state("SCENE", SceneOperations.ENTER));
 
         clock.advance(Duration.ofSeconds(5));
         RecordingCallback<String> probe = new RecordingCallback<>();
-        gateway.call(new RpcRequest<>("SCENE", "scene.enter", "probe", String.class), probe);
+        gateway.call(new RpcRequest<>("SCENE", SceneOperations.ENTER, "probe", String.class), probe);
 
         assertEquals("recovered", probe.success.get());
-        assertEquals(RpcCircuitState.CLOSED, gateway.state("SCENE", "scene.enter"));
+        assertEquals(RpcCircuitState.CLOSED, gateway.state("SCENE", SceneOperations.ENTER));
     }
 
     private static final class RecordingCallback<T> implements RpcCallback<T> {

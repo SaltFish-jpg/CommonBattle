@@ -10,6 +10,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -36,7 +37,7 @@ class CenterRegistryEndpointTest {
                 RegistryOperations.SUBSCRIBE
         ));
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
         centerStorage.register(center);
 
         ClusterDirectory centerDirectory = new ClusterDirectory(centerStorage);
@@ -79,7 +80,7 @@ class CenterRegistryEndpointTest {
                 RegistryOperations.SUBSCRIBE
         ));
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
         centerStorage.register(center);
         ClusterDirectory centerDirectory = new ClusterDirectory(centerStorage);
         for (ServiceKind kind : ServiceKind.values()) {

@@ -21,6 +21,7 @@ import com.commonbattle.observability.DrainConfig;
 import com.commonbattle.observability.OpsHttpServer;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
+import com.commonbattle.observability.RuntimeHealthRegistry;
 import com.commonbattle.observability.ServerDrainController;
 
 import java.net.InetSocketAddress;
@@ -34,6 +35,26 @@ import java.util.List;
  */
 final class BootOpsHttp {
     private BootOpsHttp() {
+    }
+
+    static OpsHttpServer start(
+            ClusterNodeConfig config,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            ClusterDirectory directory,
+            RuntimeHealthRegistry registry
+    ) {
+        Clock clock = Clock.systemUTC();
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                clock,
+                actors,
+                new AgentLifecycleManager(local.id(), actors, new InMemoryAgentDirectory(), clock),
+                new InMemoryVersionedEventOutbox(clock),
+                directory,
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+        return startServer(config, probe, clock);
     }
 
     static OpsHttpServer start(
@@ -144,6 +165,11 @@ final class BootOpsHttp {
                 profileInterests,
                 RuntimeHealthPolicy.defaults()
         );
+        ServiceEndpoint endpoint = config.opsEndpoint();
+        return startServer(config, probe, clock);
+    }
+
+    private static OpsHttpServer startServer(ClusterNodeConfig config, RuntimeHealthProbe probe, Clock clock) {
         ServiceEndpoint endpoint = config.opsEndpoint();
         OpsHttpServer server = new OpsHttpServer(
                 new InetSocketAddress(endpoint.host(), endpoint.port()),

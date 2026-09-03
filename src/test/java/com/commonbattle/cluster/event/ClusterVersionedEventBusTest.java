@@ -10,6 +10,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.profile.AllianceBrief;
 import com.commonbattle.game.profile.AppearanceSummary;
 import com.commonbattle.game.profile.FriendBrief;
@@ -171,7 +172,7 @@ class ClusterVersionedEventBusTest {
                         ClusterEventOperations.REPLAY
                 ));
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
         registry.register(center);
         registry.register(game);
         registry.register(scene);

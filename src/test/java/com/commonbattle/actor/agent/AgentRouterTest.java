@@ -1,8 +1,11 @@
 package com.commonbattle.actor.agent;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorSystemConfig;
 import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -56,6 +59,32 @@ class AgentRouterTest {
         assertEquals(AgentRouteType.REMOTE, route.type());
         assertEquals(remote, route.location().orElseThrow().serviceId());
         assertEquals(0, executor.queued());
+    }
+
+    @Test
+    void deliverLocalOrRouteReportsMailboxFull() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 1, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                ignored -> {
+                },
+                ignored -> {
+                }
+        );
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        ActorRef ref = actors.actor("player-10001");
+        InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+        directory.claim(AgentIdentity.player(10001L), new AgentLocation(local, ref));
+        AgentRouter router = new AgentRouter(local, directory, new DefaultAgentMessagePort(actors, new NoopRpcGateway()));
+
+        actors.send(ref, ignored -> {
+        });
+        AgentRouteDeliveryResult result = router.deliverLocalOrRoute(AgentIdentity.player(10001L), ignored -> {
+        });
+
+        assertEquals(AgentRouteType.LOCAL, result.route().type());
+        assertEquals(AgentDeliveryStatus.MAILBOX_FULL, result.delivery().status());
     }
 
     private static final class RecordingExecutor implements Executor {

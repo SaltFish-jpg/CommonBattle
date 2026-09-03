@@ -1,5 +1,6 @@
 package com.commonbattle.actor;
 
+import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -101,9 +102,13 @@ public final class ActorSystem implements AutoCloseable {
             return false;
         }
         ActorMailbox mailbox = mailboxes.computeIfAbsent(target, ActorMailbox::new);
-        if (!mailbox.enqueue(task, config.mailboxCapacity())) {
-            reject(target, task, DeadLetterReason.MAILBOX_FULL);
+        ActorMailboxEnqueueResult enqueue = mailbox.enqueue(task, config);
+        if (!enqueue.accepted()) {
+            reject(target, task, enqueue.rejectionReason());
             return false;
+        }
+        if (enqueue.droppedTask() != null) {
+            drop(target, enqueue.droppedTask());
         }
         metrics.taskSubmitted();
         schedule(mailbox);
@@ -111,7 +116,27 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     public ActorSystemStats stats() {
-        return metrics.snapshot();
+        int activeMailboxes = 0;
+        int largestMailboxQueuedTasks = 0;
+        String largestMailboxActorId = "";
+        EnumMap<ActorTaskCategory, Integer> queuedByCategory = new EnumMap<>(ActorTaskCategory.class);
+        for (ActorTaskCategory category : ActorTaskCategory.values()) {
+            queuedByCategory.put(category, 0);
+        }
+        for (ActorMailbox mailbox : mailboxes.values()) {
+            int queued = mailbox.size();
+            if (queued > 0) {
+                activeMailboxes++;
+            }
+            if (queued > largestMailboxQueuedTasks) {
+                largestMailboxQueuedTasks = queued;
+                largestMailboxActorId = mailbox.ref().id();
+            }
+            for (Map.Entry<ActorTaskCategory, Integer> entry : mailbox.categorySizes().entrySet()) {
+                queuedByCategory.merge(entry.getKey(), entry.getValue(), Integer::sum);
+            }
+        }
+        return metrics.snapshot(activeMailboxes, largestMailboxQueuedTasks, largestMailboxActorId, queuedByCategory);
     }
 
     public boolean isAccepting() {
@@ -165,11 +190,24 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     private void reject(ActorRef target, ActorTask task, DeadLetterReason reason) {
-        metrics.taskRejected();
+        metrics.taskRejected(categoryOf(task));
         try {
             deadLetters.accept(new DeadLetter(target, task, reason));
         } catch (Throwable ignored) {
         }
+    }
+
+    private void drop(ActorRef target, ActorTask task) {
+        metrics.taskDropped(categoryOf(task));
+        try {
+            deadLetters.accept(new DeadLetter(target, task, DeadLetterReason.DROPPED_BY_OVERFLOW));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static ActorTaskCategory categoryOf(ActorTask task) {
+        ActorTaskCategory category = task.category();
+        return category == null ? ActorTaskCategory.DEFAULT : category;
     }
 
     @Override

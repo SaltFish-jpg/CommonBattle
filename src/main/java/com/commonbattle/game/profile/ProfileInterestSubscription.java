@@ -5,11 +5,15 @@ import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.event.EventReplayResult;
 import com.commonbattle.game.event.VersionedEvent;
 
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -21,7 +25,7 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
     private final LocalProfileCache cache;
     private final ProfileSnapshotRepairer repairer;
     private final Executor repairExecutor;
-    private final Set<String> ownerKeys = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Integer> ownerReferences = new ConcurrentHashMap<>();
     private final AutoCloseable localSubscription;
     private final AtomicLong watchRequests = new AtomicLong();
     private final AtomicLong unwatchRequests = new AtomicLong();
@@ -52,31 +56,67 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
     }
 
     public void watch(long playerId) {
-        String ownerKey = ProfileChangedEvent.ownerKey(playerId);
-        if (!ownerKeys.add(ownerKey)) {
-            return;
-        }
-        watchRequests.incrementAndGet();
-        bus.subscribeRemote(ProfileChangedEvent.TOPIC, Set.of(ownerKey));
-        replay(playerId, ownerKey);
+        watchAll(Set.of(playerId));
     }
 
     public void unwatch(long playerId) {
-        String ownerKey = ProfileChangedEvent.ownerKey(playerId);
-        if (!ownerKeys.remove(ownerKey)) {
+        unwatchAll(Set.of(playerId));
+    }
+
+    @Override
+    public void watchAll(Collection<Long> playerIds) {
+        Objects.requireNonNull(playerIds, "playerIds");
+        if (playerIds.isEmpty()) {
             return;
         }
-        unwatchRequests.incrementAndGet();
-        bus.unsubscribeRemote(ProfileChangedEvent.TOPIC, Set.of(ownerKey));
+        watchRequests.addAndGet(playerIds.size());
+        Map<String, Long> firstOwners = new HashMap<>();
+        for (long playerId : playerIds) {
+            String ownerKey = ProfileChangedEvent.ownerKey(playerId);
+            if (addReference(ownerKey)) {
+                firstOwners.put(ownerKey, cache.revisionOf(playerId));
+            }
+        }
+        if (firstOwners.isEmpty()) {
+            return;
+        }
+        Set<String> ownerKeys = Set.copyOf(firstOwners.keySet());
+        bus.subscribeRemote(ProfileChangedEvent.TOPIC, ownerKeys);
+        replay(firstOwners, ownerKeys);
+    }
+
+    @Override
+    public void unwatchAll(Collection<Long> playerIds) {
+        Objects.requireNonNull(playerIds, "playerIds");
+        if (playerIds.isEmpty()) {
+            return;
+        }
+        Set<String> removedOwners = new HashSet<>();
+        long removedReferences = 0;
+        for (long playerId : playerIds) {
+            String ownerKey = ProfileChangedEvent.ownerKey(playerId);
+            UnwatchResult result = removeReference(ownerKey);
+            if (result.counted()) {
+                removedReferences++;
+            }
+            if (result.unsubscribe()) {
+                removedOwners.add(ownerKey);
+            }
+        }
+        unwatchRequests.addAndGet(removedReferences);
+        if (!removedOwners.isEmpty()) {
+            bus.unsubscribeRemote(ProfileChangedEvent.TOPIC, removedOwners);
+        }
     }
 
     public boolean watching(long playerId) {
-        return ownerKeys.contains(ProfileChangedEvent.ownerKey(playerId));
+        return ownerReferences.containsKey(ProfileChangedEvent.ownerKey(playerId));
     }
 
     public ProfileInterestStats stats() {
         return new ProfileInterestStats(
-                ownerKeys.size(),
+                ownerReferences.size(),
+                ownerReferences.values().stream().mapToInt(Integer::intValue).sum(),
                 watchRequests.get(),
                 unwatchRequests.get(),
                 replayAttempts.get(),
@@ -88,8 +128,8 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
 
     @Override
     public void close() throws Exception {
-        Set<String> closingOwners = Set.copyOf(ownerKeys);
-        ownerKeys.clear();
+        Set<String> closingOwners = Set.copyOf(ownerReferences.keySet());
+        ownerReferences.clear();
         try {
             localSubscription.close();
         } finally {
@@ -99,12 +139,12 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
         }
     }
 
-    private void replay(long playerId, String ownerKey) {
+    private void replay(Map<String, Long> knownRevisions, Set<String> ownerKeys) {
         replayAttempts.incrementAndGet();
         bus.replay(
                 ProfileChangedEvent.TOPIC,
-                Map.of(ownerKey, cache.revisionOf(playerId)),
-                Set.of(ownerKey),
+                knownRevisions,
+                ownerKeys,
                 new RpcCallback<>() {
                     @Override
                     public void success(EventReplayResult response) {
@@ -117,6 +157,32 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
                     }
                 }
         );
+    }
+
+    private boolean addReference(String ownerKey) {
+        AtomicBoolean first = new AtomicBoolean();
+        ownerReferences.compute(ownerKey, (ignored, current) -> {
+            if (current == null) {
+                first.set(true);
+                return 1;
+            }
+            return current + 1;
+        });
+        return first.get();
+    }
+
+    private UnwatchResult removeReference(String ownerKey) {
+        AtomicBoolean counted = new AtomicBoolean();
+        AtomicBoolean unsubscribe = new AtomicBoolean();
+        ownerReferences.computeIfPresent(ownerKey, (ignored, current) -> {
+            counted.set(true);
+            if (current <= 1) {
+                unsubscribe.set(true);
+                return null;
+            }
+            return current - 1;
+        });
+        return new UnwatchResult(counted.get(), unsubscribe.get());
     }
 
     private void repair(EventReplayResult response) {
@@ -140,12 +206,15 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
     }
 
     private void onEvent(VersionedEvent event) {
-        if (!ownerKeys.contains(event.ownerKey())) {
+        if (!ownerReferences.containsKey(event.ownerKey())) {
             return;
         }
         if (!(event instanceof ProfileChangedEvent profileChanged)) {
             throw new IllegalArgumentException("event must be ProfileChangedEvent");
         }
         cache.apply(profileChanged);
+    }
+
+    private record UnwatchResult(boolean counted, boolean unsubscribe) {
     }
 }

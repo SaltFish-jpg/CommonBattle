@@ -10,6 +10,7 @@ public enum PlayerCommandStatus {
     STALE_SESSION,
     RATE_LIMITED,
     AGENT_MISSING,
+    MAILBOX_FULL,
     ROUTED_REMOTE,
     UNKNOWN_OPERATION
 }

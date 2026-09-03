@@ -14,6 +14,7 @@ import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -111,7 +112,7 @@ class ProfileCacheSubscriptionTest {
                     "game.resume",
                     ProfileSnapshotOperations.GET
             ));
-            ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+            ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
             ServiceDescriptor proxy = descriptor(ServiceKind.PROXY, "proxy-1", 9003, Set.of("proxy.forward"));
             registry.register(center);
             registry.register(game);

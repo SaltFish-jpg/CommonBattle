@@ -1,7 +1,10 @@
 package com.commonbattle.game.session;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorSystemConfig;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.AgentRouteType;
@@ -43,6 +46,7 @@ class PlayerCommandDispatcherTest {
 
         assertEquals(PlayerCommandStatus.ACCEPTED, result.status());
         assertEquals(0, handled.get());
+        assertEquals(1, fixture.actors.stats().queuedTasksByCategory().get(ActorTaskCategory.PLAYER_COMMAND));
         fixture.executor.runNext();
         assertEquals(1, handled.get());
     }
@@ -94,6 +98,30 @@ class PlayerCommandDispatcherTest {
         assertEquals(PlayerCommandStatus.RATE_LIMITED, rejected.status());
         assertEquals(PlayerCommandStatus.ACCEPTED, retry.status());
         assertEquals(1, handled.get());
+    }
+
+    @Test
+    void mailboxFullDoesNotConsumeCommandSequence() {
+        Fixture fixture = Fixture.local(
+                (target, operation) -> AdmissionDecision.accept(),
+                PlayerCommandAuditSink.NOOP,
+                () -> 0,
+                new ActorSystemConfig(1, 64, 1, ActorOverflowStrategy.REJECT, Duration.ZERO)
+        );
+        AtomicInteger handled = new AtomicInteger();
+        fixture.dispatcher.handle("bag.use", (context, command) -> handled.incrementAndGet());
+        fixture.actors.send(new ActorRef("player-10001"), ignored -> {
+        });
+
+        PlayerCommandResult rejected = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+        PlayerCommandResult retry = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+
+        assertEquals(PlayerCommandStatus.MAILBOX_FULL, rejected.status());
+        assertEquals(PlayerCommandStatus.ACCEPTED, retry.status());
+        assertEquals(1, handled.get());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.MAILBOX_FULL));
     }
 
     @Test
@@ -210,15 +238,18 @@ class PlayerCommandDispatcherTest {
 
     private static final class Fixture {
         private final RecordingExecutor executor;
+        private final ActorSystem actors;
         private final InMemoryPlayerSessionRegistry sessions;
         private final PlayerCommandDispatcher dispatcher;
 
         private Fixture(
                 RecordingExecutor executor,
+                ActorSystem actors,
                 InMemoryPlayerSessionRegistry sessions,
                 PlayerCommandDispatcher dispatcher
         ) {
             this.executor = executor;
+            this.actors = actors;
             this.sessions = sessions;
             this.dispatcher = dispatcher;
         }
@@ -236,8 +267,24 @@ class PlayerCommandDispatcherTest {
                 PlayerCommandAuditSink auditSink,
                 ConfigVersionSupplier configVersion
         ) {
+            return local(admissions, auditSink, configVersion, ActorSystemConfig.defaults(1).withBatchSize(64));
+        }
+
+        private static Fixture local(
+                com.commonbattle.actor.backpressure.InboundAdmissionController admissions,
+                PlayerCommandAuditSink auditSink,
+                ConfigVersionSupplier configVersion,
+                ActorSystemConfig actorConfig
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
-            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorSystem actors = new ActorSystem(
+                    executor,
+                    actorConfig,
+                    ignored -> {
+                    },
+                    ignored -> {
+                    }
+            );
             InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
             ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
             AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
@@ -256,7 +303,7 @@ class PlayerCommandDispatcherTest {
                     ignored -> configVersion.getAsLong(),
                     CLOCK
             );
-            return new Fixture(executor, sessions, dispatcher);
+            return new Fixture(executor, actors, sessions, dispatcher);
         }
 
         private static Fixture remote() {
@@ -277,7 +324,7 @@ class PlayerCommandDispatcherTest {
                             new LifecycleAwareAgentRouter(lifecycles, new DefaultAgentMessagePort(actors, new NoopRpcGateway()))
                     )
             );
-            return new Fixture(executor, sessions, dispatcher);
+            return new Fixture(executor, actors, sessions, dispatcher);
         }
     }
 

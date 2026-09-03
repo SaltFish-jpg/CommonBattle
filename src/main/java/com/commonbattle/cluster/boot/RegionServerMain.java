@@ -25,30 +25,37 @@ public final class RegionServerMain {
     private RegionServerMain() {
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/region.properties");
-        config.validate(ServiceKind.REGION).throwIfInvalid();
-        ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
-        ServiceDescriptor center = ClusterDescriptors.center(config);
-        ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
-        directory.seed(center);
-        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
-        NettyClusterTransport transport = new NettyClusterTransport(
-                new DirectoryEndpointView(directory, local, center),
-                codecs
-        );
-        ClusterRpcGateway gateway = new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport);
-        RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
-        ClusterNode node = new ClusterNode(registry, local, directory);
-        ActorSystem actors = new ActorSystem(config.actorWorkers());
-        node.start(
-                List.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY),
-                config.registryLeaseTtl(),
-                config.registryHeartbeatInterval()
-        );
-        BootOpsHttp.start(config, local, actors, directory, gateway, transport, node);
-        System.out.println("Region server started: " + local.id().wireName()
-                + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
-        new CountDownLatch(1).await();
+    public static void main(String[] args) throws Exception {
+        BootRuntime runtime = new BootRuntime().installShutdownHook();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/region.properties");
+            config.validate(ServiceKind.REGION).throwIfInvalid();
+            ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+            ServiceDescriptor center = ClusterDescriptors.center(config);
+            ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
+            directory.seed(center);
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
+                    new DirectoryEndpointView(directory, local, center),
+                    codecs
+            ));
+            ClusterRpcGateway gateway = runtime.add("rpcGateway",
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+            RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
+            ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
+            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            node.start(
+                    List.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY),
+                    config.registryLeaseTtl(),
+                    config.registryHeartbeatInterval()
+            );
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node));
+            System.out.println("Region server started: " + local.id().wireName()
+                    + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
+            new CountDownLatch(1).await();
+        } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        }
     }
 }

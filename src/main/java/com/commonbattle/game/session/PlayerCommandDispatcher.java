@@ -1,9 +1,13 @@
 package com.commonbattle.game.session;
 
+import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentRouteType;
 import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionRouteResult;
+import com.commonbattle.actor.message.AgentDeliveryResult;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -94,7 +98,7 @@ public final class PlayerCommandDispatcher {
             return result(command, PlayerCommandResult.routedRemote(routed.route()),
                     PlayerCommandAuditOutcome.ROUTED_REMOTE, 0, Duration.ZERO, "");
         }
-        router.deliverLocal(routed, context -> {
+        AgentDeliveryResult delivery = router.deliverLocal(routed, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, context -> {
             long configVersion = configVersionResolver.applyAsLong(command.playerId());
             Instant startedAt = clock.instant();
             try {
@@ -106,7 +110,15 @@ public final class PlayerCommandDispatcher {
                         configVersion, elapsed(startedAt), e.getMessage());
                 throw e;
             }
-        });
+        }));
+        if (!delivery.accepted()) {
+            PlayerCommandStatus status = delivery.status() == AgentDeliveryStatus.MAILBOX_FULL
+                    ? PlayerCommandStatus.MAILBOX_FULL
+                    : PlayerCommandStatus.AGENT_MISSING;
+            return result(command, PlayerCommandResult.reject(status, delivery.reason()),
+                    PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, delivery.reason());
+        }
+        sequencer.commit(command);
         return result(PlayerCommandResult.accepted());
     }
 

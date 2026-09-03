@@ -5,5 +5,7 @@ package com.commonbattle.actor;
  */
 public enum DeadLetterReason {
     MAILBOX_FULL,
+    MAILBOX_CATEGORY_FULL,
+    DROPPED_BY_OVERFLOW,
     SYSTEM_CLOSED
 }

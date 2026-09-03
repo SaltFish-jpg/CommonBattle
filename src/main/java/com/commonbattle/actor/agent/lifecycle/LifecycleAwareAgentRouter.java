@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentRoute;
 import com.commonbattle.actor.agent.AgentRouteType;
+import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
 
 import java.util.Objects;
@@ -32,11 +33,12 @@ public final class LifecycleAwareAgentRouter {
         return route;
     }
 
-    public void tellResolvedLocal(AgentRoute route, ActorTask task) {
+    public AgentDeliveryResult tellResolvedLocal(AgentRoute route, ActorTask task) {
         Objects.requireNonNull(route, "route");
         Objects.requireNonNull(task, "task");
         if (route.type() == AgentRouteType.LOCAL) {
-            messages.tellLocal(route.location().orElseThrow().actorRef(), task);
+            return messages.tryTellLocal(route.location().orElseThrow().actorRef(), task);
         }
+        return AgentDeliveryResult.routeMissing();
     }
 }

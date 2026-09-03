@@ -13,11 +13,13 @@ import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,6 +69,107 @@ class ProfileInterestSubscriptionTest {
                 assertEquals(0, sceneCache.revisionOf(10001L));
                 assertFalse(interests.watching(10001L));
                 assertEquals(1, interests.stats().unwatchRequests());
+            }
+        }
+    }
+
+    @Test
+    void duplicateWatchUsesReferenceCountingBeforeRemoteUnsubscribe() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            LocalProfileCache sceneCache = new LocalProfileCache();
+            try (ProfileInterestSubscription interests = new ProfileInterestSubscription(
+                    fixture.sceneEvents(),
+                    sceneCache,
+                    new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1))
+            )) {
+                interests.watch(10001L);
+                interests.watch(10001L);
+
+                assertEquals(1, interests.stats().watchedOwners());
+                assertEquals(2, interests.stats().watchReferences());
+                assertEquals(2, interests.stats().watchRequests());
+                assertEquals(Set.of(fixture.sceneId()), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+
+                interests.unwatch(10001L);
+                fixture.gameEvents().publish(profileEvent(10001L, 1, "avatar_1"));
+
+                assertTrue(interests.watching(10001L));
+                assertEquals(1, interests.stats().watchedOwners());
+                assertEquals(1, interests.stats().watchReferences());
+                assertEquals(Set.of(fixture.sceneId()), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+                assertEquals("avatar_1", sceneCache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+
+                interests.unwatch(10001L);
+
+                assertFalse(interests.watching(10001L));
+                assertEquals(0, interests.stats().watchedOwners());
+                assertEquals(0, interests.stats().watchReferences());
+                assertEquals(2, interests.stats().unwatchRequests());
+                assertEquals(Set.of(), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+            }
+        }
+    }
+
+    @Test
+    void batchWatchAndUnwatchMultipleOwners() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            LocalProfileCache sceneCache = new LocalProfileCache();
+            try (ProfileInterestSubscription interests = new ProfileInterestSubscription(
+                    fixture.sceneEvents(),
+                    sceneCache,
+                    new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1))
+            )) {
+                interests.watchAll(List.of(10001L, 20002L));
+
+                assertEquals(2, interests.stats().watchedOwners());
+                assertEquals(2, interests.stats().watchReferences());
+                assertEquals(2, interests.stats().watchRequests());
+                assertEquals(1, interests.stats().replayAttempts());
+
+                fixture.gameEvents().publish(profileEvent(10001L, 1, "avatar_1"));
+                fixture.gameEvents().publish(profileEvent(20002L, 1, "avatar_2"));
+                fixture.gameEvents().publish(profileEvent(30003L, 1, "avatar_3"));
+
+                assertEquals("avatar_1", sceneCache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+                assertEquals("avatar_2", sceneCache.get(20002L).orElseThrow().snapshot().appearance().avatar());
+                assertEquals(0, sceneCache.revisionOf(30003L));
+
+                interests.unwatchAll(List.of(10001L, 20002L));
+
+                assertEquals(0, interests.stats().watchedOwners());
+                assertEquals(0, interests.stats().watchReferences());
+                assertEquals(2, interests.stats().unwatchRequests());
+                assertEquals(Set.of(), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+            }
+        }
+    }
+
+    @Test
+    void batchWatchKeepsReferenceCountForDuplicatePlayers() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            LocalProfileCache sceneCache = new LocalProfileCache();
+            try (ProfileInterestSubscription interests = new ProfileInterestSubscription(
+                    fixture.sceneEvents(),
+                    sceneCache,
+                    new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1))
+            )) {
+                interests.watchAll(Arrays.asList(10001L, 10001L));
+
+                assertEquals(1, interests.stats().watchedOwners());
+                assertEquals(2, interests.stats().watchReferences());
+                assertEquals(2, interests.stats().watchRequests());
+                assertEquals(1, interests.stats().replayAttempts());
+
+                interests.unwatch(10001L);
+
+                assertTrue(interests.watching(10001L));
+                assertEquals(1, interests.stats().watchReferences());
+                assertEquals(Set.of(fixture.sceneId()), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+
+                interests.unwatch(10001L);
+
+                assertFalse(interests.watching(10001L));
+                assertEquals(Set.of(), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
             }
         }
     }
@@ -164,7 +267,9 @@ class ProfileInterestSubscriptionTest {
             ClusterRpcGateway sceneGateway,
             InMemoryProfileSnapshotRepository repository,
             ClusterVersionedEventBus gameEvents,
-            ClusterVersionedEventBus sceneEvents
+            ClusterVersionedEventBus sceneEvents,
+            ClusterEventCenter center,
+            ServiceId sceneId
     ) implements AutoCloseable {
         private static Fixture create(int historyLimit) {
             LocalClusterTransport transport = new LocalClusterTransport();
@@ -180,7 +285,7 @@ class ProfileInterestSubscriptionTest {
                     "game.resume",
                     ProfileSnapshotOperations.GET
             ));
-            ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+            ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
             ServiceDescriptor proxy = descriptor(ServiceKind.PROXY, "proxy-1", 9003, Set.of("proxy.forward"));
             registry.register(center);
             registry.register(game);
@@ -189,7 +294,7 @@ class ProfileInterestSubscriptionTest {
             new ForwardingProxy(transport).bind(proxy);
 
             ClusterRpcGateway centerGateway = new ClusterRpcGateway(center, directory(registry), topology, transport);
-            new ClusterEventCenter(center, transport, centerGateway, historyLimit);
+            ClusterEventCenter eventCenter = new ClusterEventCenter(center, transport, centerGateway, historyLimit);
             ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, directory(registry), topology, transport);
             InMemoryProfileSnapshotRepository repository = new InMemoryProfileSnapshotRepository();
             new ProfileSnapshotEndpoint(repository).bind(gameGateway);
@@ -201,7 +306,9 @@ class ProfileInterestSubscriptionTest {
                     sceneGateway,
                     repository,
                     new ClusterVersionedEventBus(game.id(), gameGateway),
-                    new ClusterVersionedEventBus(scene.id(), sceneGateway)
+                    new ClusterVersionedEventBus(scene.id(), sceneGateway),
+                    eventCenter,
+                    scene.id()
             );
         }
 

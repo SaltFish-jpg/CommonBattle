@@ -1,6 +1,8 @@
 package com.commonbattle.actor;
 
 import java.time.Duration;
+import java.util.EnumMap;
+import java.util.Map;
 
 /**
  * ActorSystem 运行时配置。
@@ -11,10 +13,21 @@ public record ActorSystemConfig(
         int batchSize,
         int mailboxCapacity,
         ActorOverflowStrategy overflowStrategy,
-        Duration shutdownTimeout
+        Duration shutdownTimeout,
+        Map<ActorTaskCategory, Integer> categoryCapacities
 ) {
     public static final int DEFAULT_BATCH_SIZE = 64;
     public static final int DEFAULT_MAILBOX_CAPACITY = 4096;
+
+    public ActorSystemConfig(
+            int workerThreads,
+            int batchSize,
+            int mailboxCapacity,
+            ActorOverflowStrategy overflowStrategy,
+            Duration shutdownTimeout
+    ) {
+        this(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, Map.of());
+    }
 
     public ActorSystemConfig {
         if (workerThreads <= 0) {
@@ -32,6 +45,20 @@ public record ActorSystemConfig(
         if (shutdownTimeout == null || shutdownTimeout.isNegative()) {
             throw new IllegalArgumentException("shutdownTimeout must not be negative");
         }
+        if (categoryCapacities == null) {
+            throw new IllegalArgumentException("categoryCapacities must not be null");
+        }
+        EnumMap<ActorTaskCategory, Integer> normalized = new EnumMap<>(ActorTaskCategory.class);
+        for (Map.Entry<ActorTaskCategory, Integer> entry : categoryCapacities.entrySet()) {
+            if (entry.getKey() == null) {
+                throw new IllegalArgumentException("categoryCapacities key must not be null");
+            }
+            if (entry.getValue() == null || entry.getValue() <= 0) {
+                throw new IllegalArgumentException("category capacity must be positive");
+            }
+            normalized.put(entry.getKey(), entry.getValue());
+        }
+        categoryCapacities = Map.copyOf(normalized);
     }
 
     public static ActorSystemConfig defaults(int workerThreads) {
@@ -45,10 +72,31 @@ public record ActorSystemConfig(
     }
 
     public ActorSystemConfig withBatchSize(int value) {
-        return new ActorSystemConfig(workerThreads, value, mailboxCapacity, overflowStrategy, shutdownTimeout);
+        return new ActorSystemConfig(workerThreads, value, mailboxCapacity, overflowStrategy, shutdownTimeout,
+                categoryCapacities);
     }
 
     public ActorSystemConfig withMailboxCapacity(int value) {
-        return new ActorSystemConfig(workerThreads, batchSize, value, overflowStrategy, shutdownTimeout);
+        return new ActorSystemConfig(workerThreads, batchSize, value, overflowStrategy, shutdownTimeout,
+                categoryCapacities);
+    }
+
+    public ActorSystemConfig withOverflowStrategy(ActorOverflowStrategy value) {
+        return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, value, shutdownTimeout,
+                categoryCapacities);
+    }
+
+    public ActorSystemConfig withCategoryCapacity(ActorTaskCategory category, int capacity) {
+        if (category == null) {
+            throw new IllegalArgumentException("category must not be null");
+        }
+        EnumMap<ActorTaskCategory, Integer> next = new EnumMap<>(ActorTaskCategory.class);
+        next.putAll(categoryCapacities);
+        next.put(category, capacity);
+        return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, next);
+    }
+
+    int capacityFor(ActorTaskCategory category) {
+        return categoryCapacities.getOrDefault(category, mailboxCapacity);
     }
 }

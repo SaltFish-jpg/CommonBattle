@@ -1,10 +1,13 @@
 package com.commonbattle.example.cross;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.rpc.RpcCircuitOpenException;
+import com.commonbattle.cluster.rpc.RpcTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -27,7 +30,7 @@ class CrossServerPlayerAgentTest {
 
         assertEquals(AgentStatus.ENTERING_SCENE, agent.status());
         assertEquals(ServiceKind.SCENE.name(), gateway.request.target());
-        assertEquals("scene.enter", gateway.request.operation());
+        assertEquals(SceneOperations.ENTER, gateway.request.operation());
         EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, gateway.request.payload());
         assertEquals(10001L, payload.playerId());
         assertEquals("scene-9", payload.sceneId());
@@ -55,7 +58,40 @@ class CrossServerPlayerAgentTest {
         executor.runNext();
 
         assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, agent.lastDeliveryStatus());
         assertEquals("scene unavailable", agent.lastError());
+    }
+
+    @Test
+    void rpcTimeoutFailureIsClassifiedForBusinessDegrade() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+
+        agent.enterScene("scene-9");
+        executor.runNext();
+        gateway.failure(new RpcTimeoutException(gateway.request, java.time.Duration.ofMillis(1)));
+        executor.runNext();
+
+        assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals(AgentDeliveryStatus.TIMEOUT, agent.lastDeliveryStatus());
+    }
+
+    @Test
+    void rpcCircuitOpenFailureIsClassifiedForBusinessDegrade() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+
+        agent.enterScene("scene-9");
+        executor.runNext();
+        gateway.failure(new RpcCircuitOpenException(gateway.request));
+        executor.runNext();
+
+        assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals(AgentDeliveryStatus.CIRCUIT_OPEN, agent.lastDeliveryStatus());
     }
 
     @Test
@@ -70,7 +106,7 @@ class CrossServerPlayerAgentTest {
         executor.runNext();
 
         assertEquals(AgentStatus.LEAVING_SCENE, agent.status());
-        assertEquals("scene.leave", gateway.request.operation());
+        assertEquals(SceneOperations.LEAVE, gateway.request.operation());
         LeaveSceneRequest payload = assertInstanceOf(LeaveSceneRequest.class, gateway.request.payload());
         assertEquals(10001L, payload.playerId());
         assertEquals("scene-9", payload.sceneId());
@@ -99,6 +135,7 @@ class CrossServerPlayerAgentTest {
         executor.runNext();
 
         assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, agent.lastDeliveryStatus());
         assertEquals("leave timeout", agent.lastError());
         assertEquals("scene-9", agent.sceneId());
     }

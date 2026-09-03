@@ -10,6 +10,7 @@ import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -77,11 +78,11 @@ class ClusterRpcGovernanceTest {
     void sendFailureCleansPendingCallback() {
         LocalClusterTransport transport = new LocalClusterTransport();
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
         ClusterRpcGateway gameGateway = gateway(game, transport, false, game, scene);
         RecordingCallback<String> callback = new RecordingCallback<>();
 
-        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.enter", "hello", String.class), callback);
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), SceneOperations.ENTER, "hello", String.class), callback);
 
         assertTrue(callback.failure.get() instanceof IllegalStateException);
         assertEquals(0, gameGateway.stats().pendingRequests());
@@ -109,6 +110,39 @@ class ClusterRpcGovernanceTest {
         assertEquals("seat-1", second.success.get());
         assertEquals(1, handlerRuns.get());
         assertEquals(1, sceneGateway.stats().idempotencyCacheSize());
+    }
+
+    @Test
+    void sharedIdempotencyStoreReusesResponseAcrossGatewayInstances() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        RpcGovernanceConfig config = new RpcGovernanceConfig(
+                Duration.ofSeconds(1),
+                100,
+                Duration.ofMillis(200),
+                100
+        );
+        RpcIdempotencyStore sharedStore = new InMemoryRpcIdempotencyStore(100);
+        ClusterRpcGateway sceneGateway = gateway(scene, transport, config, sharedStore, game, scene);
+        AtomicInteger handlerRuns = new AtomicInteger();
+        sceneGateway.handle("scene.reserve", (request, responder) ->
+                responder.success("seat-" + handlerRuns.incrementAndGet()));
+        ClusterRpcGateway gameGateway = gateway(game, transport, game, scene);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1)).withIdempotencyKey("player-10001-enter-room-9");
+        RecordingCallback<String> first = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class), first, options);
+        ClusterRpcGateway restartedSceneGateway = gateway(scene, transport, config, sharedStore, game, scene);
+        restartedSceneGateway.handle("scene.reserve", (request, responder) ->
+                responder.success("seat-" + handlerRuns.incrementAndGet()));
+        RecordingCallback<String> second = new RecordingCallback<>();
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class), second, options);
+
+        assertEquals("seat-1", first.success.get());
+        assertEquals("seat-1", second.success.get());
+        assertEquals(1, handlerRuns.get());
+        assertEquals(1, restartedSceneGateway.stats().idempotencyCacheSize());
     }
 
     @Test
@@ -188,6 +222,29 @@ class ClusterRpcGovernanceTest {
                 .allow(ServiceKind.GAME, ServiceKind.GAME)
                 .allow(ServiceKind.SCENE, ServiceKind.SCENE);
         return new ClusterRpcGateway(local, directory, direct, transport, bindTransport, config);
+    }
+
+    private static ClusterRpcGateway gateway(
+            ServiceDescriptor local,
+            LocalClusterTransport transport,
+            RpcGovernanceConfig config,
+            RpcIdempotencyStore idempotencyStore,
+            ServiceDescriptor... services
+    ) {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        for (ServiceDescriptor service : services) {
+            registry.register(service);
+        }
+        ClusterDirectory directory = new ClusterDirectory(registry);
+        for (ServiceKind kind : ServiceKind.values()) {
+            directory.watch(kind);
+        }
+        ClusterTopology direct = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME)
+                .allow(ServiceKind.GAME, ServiceKind.GAME)
+                .allow(ServiceKind.SCENE, ServiceKind.SCENE);
+        return new ClusterRpcGateway(local, directory, direct, transport, true, config, idempotencyStore);
     }
 
     private static ServiceDescriptor descriptor(ServiceKind kind, String node, int port, Set<String> topics) {

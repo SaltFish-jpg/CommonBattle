@@ -7,7 +7,9 @@ import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileInterestControl;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -21,7 +23,7 @@ public final class SceneProfileAwarenessAgent {
     private final ActorRef self;
     private final ProfileInterestControl interests;
     private final LocalProfileCache cache;
-    private final Set<Long> onlinePlayers = new HashSet<>();
+    private final Map<Long, Set<String>> onlineInterests = new HashMap<>();
 
     public SceneProfileAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, ProfileInterestControl.noop());
@@ -44,24 +46,46 @@ public final class SceneProfileAwarenessAgent {
     }
 
     public void enter(long playerId) {
+        enter(playerId, "default");
+    }
+
+    public void enter(long playerId, String interestKey) {
+        Objects.requireNonNull(interestKey, "interestKey");
+        if (interestKey.isBlank()) {
+            throw new IllegalArgumentException("interestKey must not be blank");
+        }
         messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.add(playerId)) {
+            Set<String> keys = onlineInterests.computeIfAbsent(playerId, ignoredPlayer -> new HashSet<>());
+            if (keys.add(interestKey)) {
                 interests.watch(playerId);
             }
         });
     }
 
     public void leave(long playerId) {
+        leave(playerId, "default");
+    }
+
+    public void leave(long playerId, String interestKey) {
+        Objects.requireNonNull(interestKey, "interestKey");
+        if (interestKey.isBlank()) {
+            throw new IllegalArgumentException("interestKey must not be blank");
+        }
         messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.remove(playerId)) {
-                interests.unwatch(playerId);
+            Set<String> keys = onlineInterests.get(playerId);
+            if (keys == null || !keys.remove(interestKey)) {
+                return;
             }
+            if (keys.isEmpty()) {
+                onlineInterests.remove(playerId);
+            }
+            interests.unwatch(playerId);
         });
     }
 
     public void onProfileChanged(ProfileChangedEvent event) {
         messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.contains(event.playerId())) {
+            if (onlineInterests.containsKey(event.playerId())) {
                 cache.apply(event);
             }
         });

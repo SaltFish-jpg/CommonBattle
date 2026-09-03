@@ -3,6 +3,7 @@ package com.commonbattle.observability;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
+import com.commonbattle.actor.rpc.ActorRpcClient;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventCenter;
@@ -14,6 +15,7 @@ import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewalStats;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
+import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionStats;
 import com.commonbattle.cluster.event.ClusterEventTopicStats;
@@ -51,6 +53,8 @@ public final class RuntimeHealthProbe {
     private final VersionedEventOutbox outbox;
     private final ClusterDirectory directory;
     private final Collection<ClusterRpcGateway> rpcGateways;
+    private final Collection<ResilientRpcGateway> resilientRpcGateways;
+    private final Collection<ActorRpcClient> actorRpcClients;
     private final Collection<PlayerCommandDispatcher> commandDispatchers;
     private final Collection<NettyClusterTransport> networkTransports;
     private final Collection<RegistryLeaseRenewer> leaseRenewers;
@@ -72,6 +76,32 @@ public final class RuntimeHealthProbe {
             RuntimeHealthPolicy policy
     ) {
         this(clock, actors, lifecycles, outbox, directory, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            RuntimeHealthRegistry registry,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory,
+                registry.rpcGateways(),
+                registry.commandDispatchers(),
+                registry.networkTransports(),
+                registry.leaseRenewers(),
+                registry.leaseReapers(),
+                registry.configCaches(),
+                registry.configRecoveries(),
+                registry.commandAudits(),
+                registry.eventCenters(),
+                registry.eventSubscriptions(),
+                registry.profileInterests(),
+                registry.resilientRpcGateways(),
+                registry.actorRpcClients(),
+                policy);
     }
 
     public RuntimeHealthProbe(
@@ -251,12 +281,64 @@ public final class RuntimeHealthProbe {
             Collection<ProfileInterestView> profileInterests,
             RuntimeHealthPolicy policy
     ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, eventCenters,
+                eventSubscriptions, profileInterests, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventCenter> eventCenters,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            Collection<ProfileInterestView> profileInterests,
+            Collection<ResilientRpcGateway> resilientRpcGateways,
+            RuntimeHealthPolicy policy
+    ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, eventCenters,
+                eventSubscriptions, profileInterests, resilientRpcGateways, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventCenter> eventCenters,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            Collection<ProfileInterestView> profileInterests,
+            Collection<ResilientRpcGateway> resilientRpcGateways,
+            Collection<ActorRpcClient> actorRpcClients,
+            RuntimeHealthPolicy policy
+    ) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.actors = Objects.requireNonNull(actors, "actors");
         this.lifecycles = Objects.requireNonNull(lifecycles, "lifecycles");
         this.outbox = Objects.requireNonNull(outbox, "outbox");
         this.directory = Objects.requireNonNull(directory, "directory");
         this.rpcGateways = List.copyOf(Objects.requireNonNull(rpcGateways, "rpcGateways"));
+        this.resilientRpcGateways = List.copyOf(Objects.requireNonNull(resilientRpcGateways, "resilientRpcGateways"));
         this.commandDispatchers = List.copyOf(Objects.requireNonNull(commandDispatchers, "commandDispatchers"));
         this.networkTransports = List.copyOf(Objects.requireNonNull(networkTransports, "networkTransports"));
         this.leaseRenewers = List.copyOf(Objects.requireNonNull(leaseRenewers, "leaseRenewers"));
@@ -267,12 +349,15 @@ public final class RuntimeHealthProbe {
         this.eventCenters = List.copyOf(Objects.requireNonNull(eventCenters, "eventCenters"));
         this.eventSubscriptions = List.copyOf(Objects.requireNonNull(eventSubscriptions, "eventSubscriptions"));
         this.profileInterests = List.copyOf(Objects.requireNonNull(profileInterests, "profileInterests"));
+        this.actorRpcClients = List.copyOf(Objects.requireNonNull(actorRpcClients, "actorRpcClients"));
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     public RuntimeHealthSnapshot snapshot() {
         var actorStats = actors.stats();
         RpcGatewayStats rpcStats = rpcStats();
+        RpcResilienceHealthStats rpcResilienceStats = rpcResilienceStats();
+        ActorRpcHealthStats actorRpcStats = actorRpcStats();
         PlayerCommandStats commandStats = commandStats();
         AgentLifecycleStats agentStats = agentStats();
         EventOutboxStats outboxStats = outboxStats();
@@ -294,7 +379,7 @@ public final class RuntimeHealthProbe {
                 eventSubscriptionStats,
                 profileInterestStats
         );
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, commandStats, agentStats,
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, rpcResilienceStats, actorRpcStats, commandStats, agentStats,
                 outboxStats, clusterStats, leaseStats, networkStats, configStats, recoveryStats,
                 eventCenterStats, eventSubscriptionStats, profileInterestStats, auditStats);
     }
@@ -303,6 +388,18 @@ public final class RuntimeHealthProbe {
         return rpcGateways.stream()
                 .map(ClusterRpcGateway::stats)
                 .reduce(RpcGatewayStats.empty(), RpcGatewayStats::plus);
+    }
+
+    private RpcResilienceHealthStats rpcResilienceStats() {
+        return resilientRpcGateways.stream()
+                .map(gateway -> RpcResilienceHealthStats.from(gateway.stats()))
+                .reduce(RpcResilienceHealthStats.empty(), RpcResilienceHealthStats::plus);
+    }
+
+    private ActorRpcHealthStats actorRpcStats() {
+        return actorRpcClients.stream()
+                .map(client -> ActorRpcHealthStats.from(client.stats()))
+                .reduce(ActorRpcHealthStats.empty(), ActorRpcHealthStats::plus);
     }
 
     private PlayerCommandStats commandStats() {
@@ -548,6 +645,7 @@ public final class RuntimeHealthProbe {
             return ProfileInterestHealthStats.empty();
         }
         int watchedOwners = 0;
+        int watchReferences = 0;
         long watchRequests = 0;
         long unwatchRequests = 0;
         long replayAttempts = 0;
@@ -557,6 +655,7 @@ public final class RuntimeHealthProbe {
         for (ProfileInterestView interest : profileInterests) {
             ProfileInterestStats stats = interest.stats();
             watchedOwners += stats.watchedOwners();
+            watchReferences += stats.watchReferences();
             watchRequests += stats.watchRequests();
             unwatchRequests += stats.unwatchRequests();
             replayAttempts += stats.replayAttempts();
@@ -564,7 +663,7 @@ public final class RuntimeHealthProbe {
             repairRequests += stats.repairRequests();
             repairFailures += stats.repairFailures();
         }
-        return new ProfileInterestHealthStats(profileInterests.size(), watchedOwners, watchRequests, unwatchRequests,
+        return new ProfileInterestHealthStats(profileInterests.size(), watchedOwners, watchReferences, watchRequests, unwatchRequests,
                 replayAttempts, replayFailures, repairRequests, repairFailures);
     }
 

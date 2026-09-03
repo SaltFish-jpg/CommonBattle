@@ -7,6 +7,7 @@ import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneResult;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -22,7 +23,7 @@ class ProtoClusterCodecTest {
                 7,
                 ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
                 ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
-                "scene.enter",
+                SceneOperations.ENTER,
                 new EnterSceneRequest(10001L, "room-1")
         );
 
@@ -69,7 +70,7 @@ class ProtoClusterCodecTest {
                 9,
                 ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
                 ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
-                "scene.enter",
+                SceneOperations.ENTER,
                 new EnterSceneRequest(10001L, "room-1"),
                 Map.of("rpc.idempotency_key", "player-10001-enter-room-1")
         );
@@ -86,7 +87,7 @@ class ProtoClusterCodecTest {
                 10,
                 ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
                 ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
-                "scene.leave",
+                SceneOperations.LEAVE,
                 new LeaveSceneRequest(10001L, "room-1")
         );
         ClusterEnvelope response = new ClusterEnvelope(

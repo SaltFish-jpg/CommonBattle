@@ -9,6 +9,7 @@ import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
+import com.commonbattle.example.cross.SceneOperations;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -30,7 +31,7 @@ class NettyClusterTransportTest {
         int gamePort = freePort();
         int scenePort = freePort();
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", gamePort, Set.of("game.resume"));
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", scenePort, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", scenePort, Set.of(SceneOperations.ENTER));
         Map<ServiceId, ServiceEndpoint> endpoints = Map.of(
                 game.id(), game.endpoint(),
                 scene.id(), scene.endpoint()
@@ -52,13 +53,13 @@ class NettyClusterTransportTest {
                     1,
                     game.id(),
                     scene.id(),
-                    "scene.enter",
+                    SceneOperations.ENTER,
                     new EnterSceneRequest(10001L, "room-1")
             ));
 
             assertTrue(received.await(3, TimeUnit.SECONDS));
             ClusterEnvelope envelope = envelopeRef.get();
-            assertEquals("scene.enter", envelope.operation());
+            assertEquals(SceneOperations.ENTER, envelope.operation());
             EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, envelope.payload());
             assertEquals("room-1", payload.sceneId());
             assertEventually(() -> gameTransport.stats().sentEnvelopes() == 1);
@@ -74,7 +75,7 @@ class NettyClusterTransportTest {
         int gamePort = freePort();
         int missingScenePort = freePort();
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", gamePort, Set.of("game.resume"));
-        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", missingScenePort, Set.of("scene.enter"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", missingScenePort, Set.of(SceneOperations.ENTER));
         Map<ServiceId, ServiceEndpoint> endpoints = Map.of(
                 game.id(), game.endpoint(),
                 scene.id(), scene.endpoint()
@@ -89,7 +90,7 @@ class NettyClusterTransportTest {
                     1,
                     game.id(),
                     scene.id(),
-                    "scene.enter",
+                    SceneOperations.ENTER,
                     new EnterSceneRequest(10001L, "room-1")
             )));
 
@@ -98,6 +99,35 @@ class NettyClusterTransportTest {
             assertEquals(0, gameTransport.stats().activeConnections());
             assertEquals(0, gameTransport.stats().sentEnvelopes());
         }
+    }
+
+    @Test
+    void sendAfterCloseIsRejectedAndRecordedAsFailedWrite() throws Exception {
+        int gamePort = freePort();
+        int scenePort = freePort();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", gamePort, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", scenePort, Set.of(SceneOperations.ENTER));
+        Map<ServiceId, ServiceEndpoint> endpoints = Map.of(
+                game.id(), game.endpoint(),
+                scene.id(), scene.endpoint()
+        );
+        PayloadCodecRegistry codecs = RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create());
+        NettyClusterTransport transport = new NettyClusterTransport(endpoints::get, codecs);
+
+        transport.close();
+        transport.close();
+
+        assertThrows(IllegalStateException.class, () -> transport.send(scene.id(), new ClusterEnvelope(
+                1,
+                game.id(),
+                scene.id(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "room-1")
+        )));
+        assertThrows(IllegalStateException.class, () -> transport.bind(game, ignored -> {
+        }));
+        assertEquals(1, transport.stats().failedWrites());
+        assertEquals(0, transport.stats().connectionAttempts());
     }
 
     private static ServiceDescriptor descriptor(ServiceKind kind, String node, int port, Set<String> topics) {

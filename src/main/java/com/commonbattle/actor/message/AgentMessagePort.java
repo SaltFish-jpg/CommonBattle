@@ -2,6 +2,7 @@ package com.commonbattle.actor.message;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcRequest;
 
@@ -14,6 +15,25 @@ import java.time.Duration;
 public interface AgentMessagePort {
     void tellLocal(ActorRef target, ActorTask task);
 
+    default AgentDeliveryResult tryTellLocal(ActorRef target, ActorTask task) {
+        try {
+            tellLocal(target, task);
+            return AgentDeliveryResult.acceptedResult();
+        } catch (com.commonbattle.actor.ActorSystemClosedException e) {
+            return AgentDeliveryResult.systemClosed();
+        } catch (com.commonbattle.actor.MailboxFullException e) {
+            return AgentDeliveryResult.mailboxFull();
+        }
+    }
+
+    default void tellLocal(ActorRef target, ActorTaskCategory category, ActorTask task) {
+        tellLocal(target, ActorTask.categorized(category, task));
+    }
+
+    default AgentDeliveryResult tryTellLocal(ActorRef target, ActorTaskCategory category, ActorTask task) {
+        return tryTellLocal(target, ActorTask.categorized(category, task));
+    }
+
     <T> void askLocal(
             ActorRef requester,
             ActorRef target,
@@ -22,5 +42,31 @@ public interface AgentMessagePort {
             LocalAskCallback<T> callback
     );
 
+    default <T> void askLocal(
+            ActorRef requester,
+            ActorRef target,
+            Duration timeout,
+            ActorTaskCategory requestCategory,
+            ActorTaskCategory callbackCategory,
+            LocalAsk<T> ask,
+            LocalAskCallback<T> callback
+    ) {
+        askLocal(requester, target, timeout, ask, callback);
+    }
+
     <T> void callRemote(RpcRequest<T> request, RpcCallback<T> callback);
+
+    default <T> void callRemote(RpcRequest<T> request, RemoteAgentCallback<T> callback) {
+        callRemote(request, new RpcCallback<>() {
+            @Override
+            public void success(T response) {
+                callback.success(response);
+            }
+
+            @Override
+            public void failure(Throwable error) {
+                callback.failure(RemoteCallFailureMapper.defaults().map(error), error);
+            }
+        });
+    }
 }

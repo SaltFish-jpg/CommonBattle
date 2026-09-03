@@ -1,6 +1,7 @@
 package com.commonbattle.actor.agent;
 
 import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.cluster.ServiceId;
 
@@ -30,11 +31,21 @@ public final class AgentRouter {
     }
 
     public AgentRoute tellLocalOrRoute(AgentIdentity identity, ActorTask task) {
+        return deliverLocalOrRoute(identity, task).route();
+    }
+
+    public AgentRouteDeliveryResult deliverLocalOrRoute(AgentIdentity identity, ActorTask task) {
         Objects.requireNonNull(task, "task");
         AgentRoute route = resolve(identity);
         if (route.type() == AgentRouteType.LOCAL) {
-            messages.tellLocal(route.location().orElseThrow().actorRef(), task);
+            return new AgentRouteDeliveryResult(
+                    route,
+                    messages.tryTellLocal(route.location().orElseThrow().actorRef(), task)
+            );
         }
-        return route;
+        if (route.type() == AgentRouteType.REMOTE) {
+            return new AgentRouteDeliveryResult(route, AgentDeliveryResult.routedRemote());
+        }
+        return new AgentRouteDeliveryResult(route, AgentDeliveryResult.routeMissing());
     }
 }

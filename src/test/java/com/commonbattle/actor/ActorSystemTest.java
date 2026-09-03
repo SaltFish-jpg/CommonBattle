@@ -142,6 +142,68 @@ class ActorSystemTest {
         assertEquals(DeadLetterReason.MAILBOX_FULL, deadLetters.getFirst().reason());
         assertEquals(1, system.stats().submittedTasks());
         assertEquals(1, system.stats().rejectedTasks());
+        assertEquals(0, system.stats().droppedTasks());
+    }
+
+    @Test
+    void categoryCapacityOnlyRejectsThatTaskType() {
+        RecordingExecutor executor = new RecordingExecutor();
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                executor,
+                ActorSystemConfig.defaults(1)
+                        .withMailboxCapacity(4)
+                        .withCategoryCapacity(ActorTaskCategory.PLAYER_COMMAND, 1),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef player = system.actor("player-1");
+
+        system.send(player, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+        }));
+        assertFalse(system.trySend(player, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+        })));
+        assertTrue(system.trySend(player, ignored -> {
+        }));
+
+        ActorSystemStats stats = system.stats();
+        assertEquals(1, deadLetters.size());
+        assertEquals(DeadLetterReason.MAILBOX_CATEGORY_FULL, deadLetters.getFirst().reason());
+        assertEquals(2, stats.submittedTasks());
+        assertEquals(1, stats.rejectedTasks());
+        assertEquals(1, stats.rejectedTasksByCategory().get(ActorTaskCategory.PLAYER_COMMAND));
+        assertEquals(1, stats.queuedTasksByCategory().get(ActorTaskCategory.PLAYER_COMMAND));
+        assertEquals(1, stats.queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));
+    }
+
+    @Test
+    void dropOldestOverflowStrategyKeepsNewestMessages() {
+        RecordingExecutor executor = new RecordingExecutor();
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 2, ActorOverflowStrategy.DROP_OLDEST, java.time.Duration.ZERO),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef player = system.actor("player-1");
+        List<Integer> runs = new ArrayList<>();
+
+        system.send(player, ignored -> runs.add(1));
+        system.send(player, ignored -> runs.add(2));
+        assertTrue(system.trySend(player, ignored -> runs.add(3)));
+
+        assertEquals(1, deadLetters.size());
+        assertEquals(DeadLetterReason.DROPPED_BY_OVERFLOW, deadLetters.getFirst().reason());
+        assertEquals(3, system.stats().submittedTasks());
+        assertEquals(1, system.stats().droppedTasks());
+        assertEquals(2, system.stats().queuedTasks());
+        assertEquals(1, system.stats().droppedTasksByCategory().get(ActorTaskCategory.DEFAULT));
+
+        executor.runNext();
+
+        assertEquals(List.of(2, 3), runs);
+        assertEquals(0, system.stats().queuedTasks());
     }
 
     @Test
@@ -184,6 +246,42 @@ class ActorSystemTest {
         assertEquals(0, system.stats().queuedTasks());
         assertEquals(0, system.stats().runningMailboxes());
         assertEquals(1, system.stats().completedTasks());
+    }
+
+    @Test
+    void statsExposeLargestMailboxAndPeaks() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        ActorRef player = system.actor("player-1");
+        ActorRef scene = system.actor("scene-1");
+
+        system.send(player, ignored -> {
+        });
+        system.send(player, ignored -> {
+        });
+        system.send(scene, ignored -> {
+        });
+
+        ActorSystemStats queued = system.stats();
+        assertEquals(3, queued.queuedTasks());
+        assertEquals(2, queued.activeMailboxes());
+        assertEquals(2, queued.largestMailboxQueuedTasks());
+        assertEquals("player-1", queued.largestMailboxActorId());
+        assertEquals(3, queued.peakQueuedTasks());
+        assertEquals(2, queued.peakRunningMailboxes());
+        assertEquals(3, queued.queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));
+
+        executor.runNext();
+        executor.runNext();
+
+        ActorSystemStats drained = system.stats();
+        assertEquals(0, drained.queuedTasks());
+        assertEquals(0, drained.activeMailboxes());
+        assertEquals(0, drained.largestMailboxQueuedTasks());
+        assertEquals("", drained.largestMailboxActorId());
+        assertEquals(3, drained.peakQueuedTasks());
+        assertEquals(2, drained.peakRunningMailboxes());
+        assertEquals(0, drained.queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));
     }
 
     private static final class RecordingExecutor implements Executor {

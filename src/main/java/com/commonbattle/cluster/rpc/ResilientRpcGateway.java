@@ -12,6 +12,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -26,10 +27,12 @@ public final class ResilientRpcGateway implements RpcGateway, AutoCloseable {
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final Map<Key, Circuit> circuits = new ConcurrentHashMap<>();
+    private final AtomicBoolean accepting = new AtomicBoolean(true);
     private final LongAdder attempts = new LongAdder();
     private final LongAdder retries = new LongAdder();
     private final LongAdder shortCircuited = new LongAdder();
     private final LongAdder openedCircuits = new LongAdder();
+    private final LongAdder rejectedAfterClose = new LongAdder();
 
     public ResilientRpcGateway(RpcGateway delegate, RpcRetryPolicy retryPolicy, RpcCircuitBreakerConfig circuitConfig) {
         this(delegate, retryPolicy, circuitConfig, Clock.systemUTC(),
@@ -66,6 +69,11 @@ public final class ResilientRpcGateway implements RpcGateway, AutoCloseable {
     public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
+        if (!accepting.get()) {
+            rejectedAfterClose.increment();
+            callback.failure(new IllegalStateException("RPC resilience gateway is closed"));
+            return;
+        }
         Key key = new Key(request.target(), request.operation());
         Circuit circuit = circuits.computeIfAbsent(key, ignored -> new Circuit());
         if (!circuit.allow(clock.millis(), circuitConfig.openDuration().toMillis())) {
@@ -85,10 +93,27 @@ public final class ResilientRpcGateway implements RpcGateway, AutoCloseable {
     }
 
     public RpcResilienceStats stats() {
-        return new RpcResilienceStats(attempts.sum(), retries.sum(), shortCircuited.sum(), openedCircuits.sum());
+        long nowMillis = clock.millis();
+        int openCircuits = Math.toIntExact(circuits.values().stream()
+                .filter(circuit -> circuit.state(nowMillis, circuitConfig.openDuration().toMillis()) == RpcCircuitState.OPEN)
+                .count());
+        return new RpcResilienceStats(
+                attempts.sum(),
+                retries.sum(),
+                shortCircuited.sum(),
+                openedCircuits.sum(),
+                rejectedAfterClose.sum(),
+                circuits.size(),
+                openCircuits
+        );
     }
 
     private <T> void attempt(RpcRequest<T> request, RpcCallback<T> callback, Circuit circuit, int attempt) {
+        if (!accepting.get()) {
+            rejectedAfterClose.increment();
+            callback.failure(new IllegalStateException("RPC resilience gateway is closed"));
+            return;
+        }
         attempts.increment();
         delegate.call(request, new RpcCallback<>() {
             @Override
@@ -107,7 +132,9 @@ public final class ResilientRpcGateway implements RpcGateway, AutoCloseable {
                 if (opened) {
                     openedCircuits.increment();
                 }
-                if (attempt < retryPolicy.maxAttempts() && circuit.allow(clock.millis(), circuitConfig.openDuration().toMillis())) {
+                if (accepting.get()
+                        && attempt < retryPolicy.maxAttempts()
+                        && circuit.allow(clock.millis(), circuitConfig.openDuration().toMillis())) {
                     retries.increment();
                     scheduler.schedule(
                             () -> attempt(request, callback, circuit, attempt + 1),
@@ -123,6 +150,7 @@ public final class ResilientRpcGateway implements RpcGateway, AutoCloseable {
 
     @Override
     public void close() {
+        accepting.set(false);
         if (ownsScheduler) {
             scheduler.shutdownNow();
         }
