@@ -4,6 +4,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -31,6 +32,23 @@ public final class ClusterDirectory implements AutoCloseable {
         return List.copyOf(services.get(kind));
     }
 
+    public List<ServiceDescriptor> routable(ServiceKind kind) {
+        return services.get(kind).stream()
+                .filter(service -> !service.draining())
+                .toList();
+    }
+
+    public Optional<ServiceDescriptor> find(ServiceId serviceId) {
+        Objects.requireNonNull(serviceId, "serviceId");
+        return services.get(serviceId.kind()).stream()
+                .filter(service -> service.id().equals(serviceId))
+                .findFirst();
+    }
+
+    public Optional<ServiceDescriptor> routable(ServiceId serviceId) {
+        return find(serviceId).filter(service -> !service.draining());
+    }
+
     public void seed(ServiceDescriptor service) {
         accept(new RegistryEvent(RegistryEventType.REGISTERED, Objects.requireNonNull(service, "service")));
     }
@@ -40,7 +58,7 @@ public final class ClusterDirectory implements AutoCloseable {
     }
 
     public ServiceDescriptor first(ServiceKind kind) {
-        return services.get(kind).stream()
+        return routable(kind).stream()
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("No service registered for " + kind));
     }

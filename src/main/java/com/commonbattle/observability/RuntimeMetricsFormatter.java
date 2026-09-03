@@ -30,6 +30,7 @@ public final class RuntimeMetricsFormatter {
         outbox(metrics, snapshot);
         cluster(metrics, snapshot);
         registryLeases(metrics, snapshot);
+        serviceDescriptorPublishers(metrics, snapshot);
         networkTransports(metrics, snapshot);
         configCaches(metrics, snapshot);
         configRecoveries(metrics, snapshot);
@@ -103,6 +104,8 @@ public final class RuntimeMetricsFormatter {
     private static void commands(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         labeledEnum(metrics, "commonbattle_player_commands_total", "status", snapshot.commands().counts(),
                 PlayerCommandStatus.values());
+        gauge(metrics, "commonbattle_player_command_accepting_dispatchers", snapshot.commands().acceptingDispatchers());
+        gauge(metrics, "commonbattle_player_command_draining_dispatchers", snapshot.commands().drainingDispatchers());
     }
 
     private static void agents(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -118,6 +121,8 @@ public final class RuntimeMetricsFormatter {
 
     private static void cluster(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         labeledEnum(metrics, "commonbattle_cluster_services", "kind", snapshot.cluster().counts(), ServiceKind.values());
+        labeledEnum(metrics, "commonbattle_cluster_draining_services", "kind",
+                snapshot.cluster().drainingCounts(), ServiceKind.values());
     }
 
     private static void registryLeases(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -127,6 +132,14 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_registry_lease_failed_renewals_total", snapshot.registryLeases().failedRenewals());
         gauge(metrics, "commonbattle_registry_lease_reapers", snapshot.registryLeases().reapers());
         gauge(metrics, "commonbattle_registry_lease_expired_services_total", snapshot.registryLeases().expiredServices());
+    }
+
+    private static void serviceDescriptorPublishers(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_service_descriptor_publishers", snapshot.serviceDescriptorPublishers().publisherCount());
+        gauge(metrics, "commonbattle_service_descriptor_draining_publishers", snapshot.serviceDescriptorPublishers().drainingPublishers());
+        gauge(metrics, "commonbattle_service_descriptor_publish_attempts_total", snapshot.serviceDescriptorPublishers().attempts());
+        gauge(metrics, "commonbattle_service_descriptor_publish_succeeded_total", snapshot.serviceDescriptorPublishers().succeeded());
+        gauge(metrics, "commonbattle_service_descriptor_publish_failed_total", snapshot.serviceDescriptorPublishers().failed());
     }
 
     private static void networkTransports(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {

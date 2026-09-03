@@ -24,6 +24,19 @@ public record ServiceId(ServiceKind kind, String region, String node) implements
         return new ServiceId(kind, region, node);
     }
 
+    public static ServiceId parse(String value) {
+        Objects.requireNonNull(value, "value");
+        String[] parts = value.split(":", -1);
+        if (parts.length != 3) {
+            throw new IllegalArgumentException("Invalid service id: " + value);
+        }
+        return new ServiceId(ServiceKind.valueOf(parts[0].toUpperCase(java.util.Locale.ROOT)), parts[1], parts[2]);
+    }
+
+    public static boolean isWireName(String value) {
+        return value != null && value.chars().filter(ch -> ch == ':').count() == 2;
+    }
+
     public String wireName() {
         return kind.name().toLowerCase() + ":" + region + ":" + node;
     }

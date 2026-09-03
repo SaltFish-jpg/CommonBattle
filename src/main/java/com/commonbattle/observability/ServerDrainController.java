@@ -1,7 +1,11 @@
 package com.commonbattle.observability;
 
+import com.commonbattle.runtime.DrainableComponent;
+
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -12,19 +16,31 @@ public final class ServerDrainController {
     private final RuntimeHealthProbe probe;
     private final Clock clock;
     private final Sleeper sleeper;
+    private final Collection<DrainableComponent> drainableComponents;
 
     public ServerDrainController(RuntimeHealthProbe probe, Clock clock) {
         this(probe, clock, duration -> Thread.sleep(duration.toMillis()));
     }
 
     public ServerDrainController(RuntimeHealthProbe probe, Clock clock, Sleeper sleeper) {
+        this(probe, clock, sleeper, List.of());
+    }
+
+    public ServerDrainController(
+            RuntimeHealthProbe probe,
+            Clock clock,
+            Sleeper sleeper,
+            Collection<DrainableComponent> drainableComponents
+    ) {
         this.probe = Objects.requireNonNull(probe, "probe");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.sleeper = Objects.requireNonNull(sleeper, "sleeper");
+        this.drainableComponents = List.copyOf(Objects.requireNonNull(drainableComponents, "drainableComponents"));
     }
 
     public DrainResult awaitDrained(DrainConfig config) throws InterruptedException {
         Objects.requireNonNull(config, "config");
+        drainableComponents.forEach(DrainableComponent::beginDrain);
         long start = clock.millis();
         RuntimeHealthSnapshot snapshot = probe.snapshot();
         while (!drained(snapshot)) {

@@ -6,6 +6,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.example.cross.SceneOperations;
 
 import java.util.Map;
@@ -35,7 +36,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         for (int i = 0; i < shardCount; i++) {
             shards[i] = actors.actor("scene:" + serviceId.node() + ":" + sceneId + ":shard-" + i);
         }
-        this.descriptor = new ServiceDescriptor(
+        this.descriptor = ServiceMetadata.withProtocolVersion(ServiceMetadata.withLoad(new ServiceDescriptor(
                 serviceId,
                 endpoint,
                 Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE),
@@ -44,7 +45,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
                         "scene.id", sceneId,
                         "scene.shards", String.valueOf(shardCount)
                 )
-        );
+        ), 0, shardCount), 1);
     }
 
     public static LargeSceneShardService create(

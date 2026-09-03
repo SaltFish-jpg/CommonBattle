@@ -6,6 +6,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.example.cross.SceneOperations;
 
 import java.util.Map;
@@ -18,12 +19,14 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class MultiSmallSceneService implements SceneServiceStrategy {
     private final ActorSystem actors;
-    private final ServiceDescriptor descriptor;
+    private final ServiceDescriptor baseDescriptor;
+    private final int capacity;
     private final Map<String, ActorRef> scenes = new ConcurrentHashMap<>();
 
     public MultiSmallSceneService(ActorSystem actors, ServiceId serviceId, ServiceEndpoint endpoint, int capacity) {
         this.actors = actors;
-        this.descriptor = new ServiceDescriptor(
+        this.capacity = capacity;
+        this.baseDescriptor = ServiceMetadata.withProtocolVersion(ServiceMetadata.withLoad(new ServiceDescriptor(
                 serviceId,
                 endpoint,
                 Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE),
@@ -31,7 +34,7 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
                         "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
                         "scene.capacity", String.valueOf(capacity)
                 )
-        );
+        ), 0, capacity), 1);
     }
 
     public static MultiSmallSceneService create(
@@ -51,12 +54,12 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
 
     @Override
     public ServiceDescriptor descriptor() {
-        return descriptor;
+        return ServiceMetadata.withLoad(baseDescriptor, scenes.size(), capacity);
     }
 
     @Override
     public ScenePlacement place(String sceneId, int chunkX, int chunkY) {
-        ActorRef actor = scenes.computeIfAbsent(sceneId, id -> actors.actor("scene:" + descriptor.id().node() + ":" + id));
+        ActorRef actor = scenes.computeIfAbsent(sceneId, id -> actors.actor("scene:" + baseDescriptor.id().node() + ":" + id));
         return new ScenePlacement(sceneId, actor, 0, 1);
     }
 }

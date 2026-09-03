@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -42,6 +43,7 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
     private final boolean ownsTimeoutScheduler;
     private final RpcGatewayMetrics metrics = new RpcGatewayMetrics();
     private final AtomicLong nextRequestId = new AtomicLong(1);
+    private final AtomicLong routeCursor = new AtomicLong();
     private final Map<Long, PendingRpcCall<?>> callbacks = new ConcurrentHashMap<>();
     private final Map<String, RpcEndpointHandler> handlers = new ConcurrentHashMap<>();
     private final RpcIdempotencyStore idempotencyStore;
@@ -205,15 +207,56 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
     }
 
     private ServiceDescriptor resolveTarget(RpcRequest<?> request) {
+        if (ServiceId.isWireName(request.target())) {
+            ServiceId serviceId = ServiceId.parse(request.target());
+            return directory.routable(serviceId)
+                    .orElseThrow(() -> new RpcNoRoutableServiceException(serviceId.kind(), request.operation()));
+        }
         ServiceKind kind = ServiceKind.valueOf(request.target());
-        return directory.list(kind).stream()
+        List<ServiceDescriptor> supported = directory.routable(kind).stream()
                 .filter(service -> service.supports(request.operation()))
-                .findFirst()
-                .orElseGet(() -> directory.first(kind));
+                .toList();
+        if (!supported.isEmpty()) {
+            return select(supported);
+        }
+        return select(kind, request.operation(), directory.routable(kind));
     }
 
     private ServiceDescriptor nextHop(ServiceDescriptor target) {
-        return topology.nextHop(local.id(), target, directory.list(ServiceKind.PROXY));
+        return topology.nextHop(local.id(), target, directory.routable(ServiceKind.PROXY));
+    }
+
+    private ServiceDescriptor roundRobin(List<ServiceDescriptor> services) {
+        return roundRobin(null, "", services);
+    }
+
+    private ServiceDescriptor select(List<ServiceDescriptor> services) {
+        return select(null, "", services);
+    }
+
+    private ServiceDescriptor select(ServiceKind kind, String operation, List<ServiceDescriptor> services) {
+        if (services.isEmpty()) {
+            return roundRobin(kind, operation, services);
+        }
+        long bestLoad = services.stream()
+                .mapToLong(ServiceDescriptor::loadScore)
+                .min()
+                .orElse(com.commonbattle.cluster.ServiceMetadata.UNKNOWN_LOAD_SCORE);
+        List<ServiceDescriptor> candidates = services.stream()
+                .filter(service -> service.loadScore() == bestLoad)
+                .toList();
+        return roundRobin(kind, operation, candidates);
+    }
+
+    private ServiceDescriptor roundRobin(ServiceKind kind, String operation, List<ServiceDescriptor> services) {
+        if (services.isEmpty()) {
+            if (kind == null) {
+                throw new IllegalStateException("No routable service registered");
+            }
+            throw new RpcNoRoutableServiceException(kind, operation);
+        }
+        int index = Math.floorMod(routeCursor.getAndIncrement(), services.size());
+        return services.get(index);
     }
 
     public void onMessage(ClusterEnvelope envelope) {

@@ -6,6 +6,7 @@ import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceEndpoint;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,10 @@ class SceneServiceStrategyTest {
             assertEquals(first.actor(), same.actor());
             assertNotEquals(first.actor(), other.actor());
             assertEquals(SceneHostingMode.MULTI_SMALL_SCENE.name(), service.descriptor().metadata("scene.mode"));
+            assertEquals(1, service.descriptor().protocolVersion());
+            assertEquals("1", service.descriptor().metadata(ServiceMetadata.PROTOCOL_VERSION));
+            assertEquals("2", service.descriptor().metadata(ServiceMetadata.LOAD_USED));
+            assertEquals("200", service.descriptor().metadata(ServiceMetadata.LOAD_CAPACITY));
         }
     }
 
@@ -57,6 +62,9 @@ class SceneServiceStrategyTest {
             assertEquals(first, same);
             assertEquals(8, first.shardCount());
             assertEquals(SceneHostingMode.LARGE_SCENE_SHARD.name(), service.descriptor().metadata("scene.mode"));
+            assertEquals(1, service.descriptor().protocolVersion());
+            assertEquals("0", service.descriptor().metadata(ServiceMetadata.LOAD_USED));
+            assertEquals("8", service.descriptor().metadata(ServiceMetadata.LOAD_CAPACITY));
         }
     }
 

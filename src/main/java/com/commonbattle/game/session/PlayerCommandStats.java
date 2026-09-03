@@ -5,13 +5,21 @@ import java.util.Map;
 /**
  * 玩家命令入口统计快照。
  */
-public record PlayerCommandStats(Map<PlayerCommandStatus, Long> counts) {
+public record PlayerCommandStats(
+        Map<PlayerCommandStatus, Long> counts,
+        int acceptingDispatchers,
+        int drainingDispatchers
+) {
     public PlayerCommandStats {
         counts = Map.copyOf(counts);
     }
 
+    public PlayerCommandStats(Map<PlayerCommandStatus, Long> counts) {
+        this(counts, 0, 0);
+    }
+
     public static PlayerCommandStats empty() {
-        return new PlayerCommandStats(Map.of());
+        return new PlayerCommandStats(Map.of(), 0, 0);
     }
 
     public long count(PlayerCommandStatus status) {
@@ -22,6 +30,10 @@ public record PlayerCommandStats(Map<PlayerCommandStatus, Long> counts) {
         java.util.EnumMap<PlayerCommandStatus, Long> merged = new java.util.EnumMap<>(PlayerCommandStatus.class);
         counts.forEach(merged::put);
         other.counts.forEach((status, value) -> merged.merge(status, value, Long::sum));
-        return new PlayerCommandStats(merged);
+        return new PlayerCommandStats(
+                merged,
+                acceptingDispatchers + other.acceptingDispatchers,
+                drainingDispatchers + other.drainingDispatchers
+        );
     }
 }

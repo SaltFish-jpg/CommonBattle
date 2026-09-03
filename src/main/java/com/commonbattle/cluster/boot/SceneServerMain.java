@@ -3,6 +3,8 @@ package com.commonbattle.cluster.boot;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
+import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
+import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
@@ -16,6 +18,7 @@ import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
+import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
@@ -69,7 +72,11 @@ public final class SceneServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
+                    AgentMigrationPayloadCodecs.registerTo(
+                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                    )
+            );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs
@@ -121,6 +128,16 @@ public final class SceneServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
+            ServiceDescriptorPublisher descriptorPublisher = runtime.add(
+                    "descriptorPublisher",
+                    new ServiceDescriptorPublisher(
+                            registry,
+                            activeSceneService::descriptor,
+                            config.registryLeaseTtl(),
+                            config.registryHeartbeatInterval()
+                    )
+            );
+            descriptorPublisher.start();
             LocalGameConfigCache configCache = runtime.add("configCache", new LocalGameConfigCache(
                     new GameConfigValidator(),
                     Clock.systemUTC()
@@ -131,6 +148,7 @@ public final class SceneServerMain {
             );
             RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
             GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
+            runtime.observe("configAutoRecovery", configAutoRecovery);
             configCache.attachRecoveryTrigger(configAutoRecovery);
             eventSubscriptions.register(
                     GameConfigChangedEvent.TOPIC,
@@ -146,8 +164,7 @@ public final class SceneServerMain {
             if (!warmup.ready()) {
                 throw new IllegalStateException("Scene config warmup failed: " + warmup.message());
             }
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node,
-                    List.of(configCache), List.of(configAutoRecovery), List.of(eventSubscriptions), List.of(profileInterests)));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
             System.out.println("Scene server started: " + local.id().wireName()
                     + ", config=" + configCache.active().version()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());

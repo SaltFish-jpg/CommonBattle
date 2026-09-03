@@ -17,6 +17,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceRegistry;
 import com.commonbattle.cluster.event.ClusterEventCenter;
 import com.commonbattle.cluster.event.ClusterEventOperations;
@@ -27,6 +28,7 @@ import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
+import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcCircuitBreakerConfig;
@@ -90,7 +92,7 @@ class RuntimeHealthProbeTest {
         outbox.markAttemptFailed(1);
         ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
         directory.seed(descriptor(ServiceKind.CENTER, "center-1"));
-        directory.seed(descriptor(ServiceKind.GAME, "game-1"));
+        directory.seed(ServiceMetadata.withDraining(descriptor(ServiceKind.GAME, "game-1"), true));
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
                 actors,
@@ -108,12 +110,15 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.outbox().failedAttempts());
         assertEquals(1, snapshot.cluster().count(ServiceKind.CENTER));
         assertEquals(1, snapshot.cluster().count(ServiceKind.GAME));
+        assertEquals(1, snapshot.cluster().draining(ServiceKind.GAME));
         String json = RuntimeHealthJsonFormatter.format(snapshot);
         String metrics = RuntimeMetricsFormatter.format(snapshot);
         assertTrue(json.contains("\"largestMailboxQueuedTasks\":0"));
         assertTrue(json.contains("\"queuedTasksByCategory\""));
         assertTrue(metrics.contains("commonbattle_actor_largest_mailbox_queued_tasks 0"));
         assertTrue(metrics.contains("commonbattle_actor_queued_tasks_by_category{category=\"DEFAULT\"} 0"));
+        assertTrue(json.contains("\"draining\":{\"CENTER\":0,\"REGION\":0,\"GAME\":1"));
+        assertTrue(metrics.contains("commonbattle_cluster_draining_services{kind=\"GAME\"} 1"));
     }
 
     @Test
@@ -345,6 +350,7 @@ class RuntimeHealthProbeTest {
         dispatcher.handle("bag.use", (context, command) -> {
         });
         dispatcher.dispatch(new PlayerCommand(10001L, "session-1", 1, 1, "bag.use", ""));
+        dispatcher.beginDrain();
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
                 actors,
@@ -361,7 +367,16 @@ class RuntimeHealthProbeTest {
                 RuntimeHealthPolicy.defaults()
         );
 
-        assertEquals(1, probe.snapshot().commands().count(PlayerCommandStatus.RATE_LIMITED));
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.commands().count(PlayerCommandStatus.RATE_LIMITED));
+        assertEquals(0, snapshot.commands().acceptingDispatchers());
+        assertEquals(1, snapshot.commands().drainingDispatchers());
+        assertTrue(json.contains("\"drainingDispatchers\":1"));
+        assertTrue(metrics.contains("commonbattle_player_command_draining_dispatchers 1"));
     }
 
     @Test
@@ -700,6 +715,51 @@ class RuntimeHealthProbeTest {
     }
 
     @Test
+    void snapshotAggregatesServiceDescriptorPublisherStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        ServiceDescriptorPublisher publisher = new ServiceDescriptorPublisher(
+                new FailingRegisterRegistry(),
+                () -> descriptor(ServiceKind.SCENE, "scene-1"),
+                Duration.ofSeconds(5),
+                Duration.ofHours(1)
+        );
+        try {
+            assertThrows(IllegalStateException.class, publisher::publishOnce);
+            publisher.beginDrain();
+            registry.register(publisher);
+
+            RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                    CLOCK,
+                    actors,
+                    new AgentLifecycleManager(
+                            ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                            actors,
+                            new InMemoryAgentDirectory(),
+                            CLOCK
+                    ),
+                    new InMemoryVersionedEventOutbox(CLOCK),
+                    new ClusterDirectory(new InMemoryServiceRegistry()),
+                    registry,
+                    RuntimeHealthPolicy.defaults()
+            );
+
+            RuntimeHealthSnapshot snapshot = probe.snapshot();
+            String json = RuntimeHealthJsonFormatter.format(snapshot);
+            String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+            assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+            assertEquals(1, snapshot.serviceDescriptorPublishers().publisherCount());
+            assertEquals(1, snapshot.serviceDescriptorPublishers().drainingPublishers());
+            assertEquals(1, snapshot.serviceDescriptorPublishers().failed());
+            assertTrue(json.contains("\"serviceDescriptorPublishers\""));
+            assertTrue(metrics.contains("commonbattle_service_descriptor_publish_failed_total 1"));
+        } finally {
+            publisher.close();
+        }
+    }
+
+    @Test
     void snapshotAggregatesEventSubscriptionRecoveryStats() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         EventFixture fixture = eventFixture(1);
@@ -1006,6 +1066,33 @@ class RuntimeHealthProbeTest {
         @Override
         public boolean heartbeat(ServiceId serviceId, Duration leaseTtl) {
             throw new IllegalStateException("center unavailable");
+        }
+
+        @Override
+        public void unregister(ServiceId serviceId) {
+        }
+
+        @Override
+        public java.util.List<ServiceDescriptor> list(ServiceKind kind) {
+            return java.util.List.of();
+        }
+
+        @Override
+        public AutoCloseable subscribe(ServiceKind kind, com.commonbattle.cluster.RegistrySubscriber subscriber) {
+            return () -> {
+            };
+        }
+    }
+
+    private static final class FailingRegisterRegistry implements ServiceRegistry {
+        @Override
+        public void register(ServiceDescriptor service) {
+            throw new IllegalStateException("registry down");
+        }
+
+        @Override
+        public void register(ServiceDescriptor service, Duration leaseTtl) {
+            throw new IllegalStateException("registry down");
         }
 
         @Override

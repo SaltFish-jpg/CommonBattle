@@ -14,6 +14,7 @@ import com.commonbattle.game.profile.FriendBrief;
 import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
+import com.commonbattle.runtime.DrainableComponent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -23,6 +24,7 @@ import java.time.ZoneId;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,6 +41,25 @@ class ServerDrainControllerTest {
 
         assertTrue(result.drained());
         assertEquals(0, result.elapsed().toMillis());
+    }
+
+    @Test
+    void beginDrainClosesRegisteredIngressBeforeWaiting() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(clock);
+        RecordingDrainable drainable = new RecordingDrainable();
+        ServerDrainController controller = new ServerDrainController(
+                probe(clock, outbox),
+                clock,
+                duration -> {
+                },
+                java.util.List.of(drainable)
+        );
+
+        DrainResult result = controller.awaitDrained(new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10)));
+
+        assertTrue(result.drained());
+        assertTrue(drainable.isDraining());
     }
 
     @Test
@@ -133,6 +154,25 @@ class ServerDrainControllerTest {
 
         void advance(Duration duration) {
             now = now.plus(duration);
+        }
+    }
+
+    private static final class RecordingDrainable implements DrainableComponent {
+        private final AtomicBoolean draining = new AtomicBoolean();
+
+        @Override
+        public void beginDrain() {
+            draining.set(true);
+        }
+
+        @Override
+        public void resumeAccepting() {
+            draining.set(false);
+        }
+
+        @Override
+        public boolean isDraining() {
+            return draining.get();
         }
     }
 }

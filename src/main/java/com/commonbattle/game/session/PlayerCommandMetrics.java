@@ -17,9 +17,9 @@ final class PlayerCommandMetrics {
         counts.get(status).increment();
     }
 
-    PlayerCommandStats snapshot() {
+    PlayerCommandStats snapshot(boolean accepting) {
         EnumMap<PlayerCommandStatus, Long> snapshot = new EnumMap<>(PlayerCommandStatus.class);
         counts.forEach((status, count) -> snapshot.put(status, count.sum()));
-        return new PlayerCommandStats(snapshot);
+        return new PlayerCommandStats(snapshot, accepting ? 1 : 0, accepting ? 0 : 1);
     }
 }

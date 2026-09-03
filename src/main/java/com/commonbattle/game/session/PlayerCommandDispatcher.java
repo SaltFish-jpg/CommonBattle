@@ -8,6 +8,7 @@ import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionRouteResult;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
+import com.commonbattle.runtime.DrainableComponent;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -15,13 +16,14 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongUnaryOperator;
 
 /**
  * 玩家命令入口分发器。
  * 它负责 session 校验、序号保护、限流和生命周期路由，业务处理器只在玩家邮箱中运行。
  */
-public final class PlayerCommandDispatcher {
+public final class PlayerCommandDispatcher implements DrainableComponent {
     private final PlayerSessionRegistry sessions;
     private final PlayerCommandSequencer sequencer;
     private final AdmissionControlledAgentRouter router;
@@ -30,6 +32,7 @@ public final class PlayerCommandDispatcher {
     private final PlayerCommandAuditSink auditSink;
     private final LongUnaryOperator configVersionResolver;
     private final Clock clock;
+    private final AtomicBoolean accepting = new AtomicBoolean(true);
 
     public PlayerCommandDispatcher(
             PlayerSessionRegistry sessions,
@@ -60,11 +63,34 @@ public final class PlayerCommandDispatcher {
     }
 
     public PlayerCommandStats stats() {
-        return metrics.snapshot();
+        return metrics.snapshot(isAccepting());
+    }
+
+    public boolean isAccepting() {
+        return accepting.get();
+    }
+
+    @Override
+    public void beginDrain() {
+        accepting.set(false);
+    }
+
+    @Override
+    public void resumeAccepting() {
+        accepting.set(true);
+    }
+
+    @Override
+    public boolean isDraining() {
+        return !isAccepting();
     }
 
     public PlayerCommandResult dispatch(PlayerCommand command) {
         Objects.requireNonNull(command, "command");
+        if (!isAccepting()) {
+            return result(command, PlayerCommandResult.reject(PlayerCommandStatus.DRAINING, "server_draining"),
+                    PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, "server_draining");
+        }
         PlayerCommandHandler handler = handlers.get(command.operation());
         if (handler == null) {
             return result(command, PlayerCommandResult.reject(PlayerCommandStatus.UNKNOWN_OPERATION, "unknown_operation"),

@@ -54,7 +54,7 @@ final class BootOpsHttp {
                 registry,
                 RuntimeHealthPolicy.defaults()
         );
-        return startServer(config, probe, clock);
+        return startServer(config, probe, clock, registry);
     }
 
     static OpsHttpServer start(
@@ -166,15 +166,21 @@ final class BootOpsHttp {
                 RuntimeHealthPolicy.defaults()
         );
         ServiceEndpoint endpoint = config.opsEndpoint();
-        return startServer(config, probe, clock);
+        return startServer(config, probe, clock, new RuntimeHealthRegistry());
     }
 
-    private static OpsHttpServer startServer(ClusterNodeConfig config, RuntimeHealthProbe probe, Clock clock) {
+    private static OpsHttpServer startServer(
+            ClusterNodeConfig config,
+            RuntimeHealthProbe probe,
+            Clock clock,
+            RuntimeHealthRegistry registry
+    ) {
         ServiceEndpoint endpoint = config.opsEndpoint();
         OpsHttpServer server = new OpsHttpServer(
                 new InetSocketAddress(endpoint.host(), endpoint.port()),
                 probe,
-                new ServerDrainController(probe, clock),
+                new ServerDrainController(probe, clock, duration -> Thread.sleep(duration.toMillis()),
+                        registry.drainableComponents()),
                 DrainConfig.defaults()
         );
         server.start();

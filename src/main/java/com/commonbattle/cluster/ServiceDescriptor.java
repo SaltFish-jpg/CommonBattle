@@ -4,6 +4,7 @@ import java.io.Serializable;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.HashSet;
 
 /**
  * 注册中心保存的服务描述。
@@ -28,5 +29,31 @@ public record ServiceDescriptor(
 
     public String metadata(String key) {
         return metadata.get(key);
+    }
+
+    public ServiceDescriptor withMetadata(Map<String, String> metadata) {
+        return new ServiceDescriptor(id, endpoint, topics, metadata);
+    }
+
+    public ServiceDescriptor withTopics(Set<String> topics) {
+        return new ServiceDescriptor(id, endpoint, topics, metadata);
+    }
+
+    public ServiceDescriptor withAdditionalTopic(String topic) {
+        HashSet<String> next = new HashSet<>(topics);
+        next.add(Objects.requireNonNull(topic, "topic"));
+        return withTopics(next);
+    }
+
+    public boolean draining() {
+        return ServiceMetadata.draining(this);
+    }
+
+    public int protocolVersion() {
+        return ServiceMetadata.protocolVersion(this);
+    }
+
+    public long loadScore() {
+        return ServiceMetadata.loadScore(this);
     }
 }

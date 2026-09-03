@@ -13,6 +13,8 @@ import com.commonbattle.cluster.netty.NettyTransportStats;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewalStats;
+import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
+import com.commonbattle.cluster.registry.ServiceDescriptorPublisherStats;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
 import com.commonbattle.cluster.rpc.ResilientRpcGateway;
@@ -65,6 +67,7 @@ public final class RuntimeHealthProbe {
     private final Collection<ClusterEventCenter> eventCenters;
     private final Collection<ClusterEventSubscriptionManager> eventSubscriptions;
     private final Collection<ProfileInterestView> profileInterests;
+    private final Collection<ServiceDescriptorPublisher> serviceDescriptorPublishers;
     private final RuntimeHealthPolicy policy;
 
     public RuntimeHealthProbe(
@@ -101,6 +104,7 @@ public final class RuntimeHealthProbe {
                 registry.profileInterests(),
                 registry.resilientRpcGateways(),
                 registry.actorRpcClients(),
+                registry.serviceDescriptorPublishers(),
                 policy);
     }
 
@@ -332,6 +336,33 @@ public final class RuntimeHealthProbe {
             Collection<ActorRpcClient> actorRpcClients,
             RuntimeHealthPolicy policy
     ) {
+        this(clock, actors, lifecycles, outbox, directory, rpcGateways, commandDispatchers, networkTransports,
+                leaseRenewers, leaseReapers, configCaches, configRecoveries, commandAudits, eventCenters,
+                eventSubscriptions, profileInterests, resilientRpcGateways, actorRpcClients, List.of(), policy);
+    }
+
+    public RuntimeHealthProbe(
+            Clock clock,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
+            VersionedEventOutbox outbox,
+            ClusterDirectory directory,
+            Collection<ClusterRpcGateway> rpcGateways,
+            Collection<PlayerCommandDispatcher> commandDispatchers,
+            Collection<NettyClusterTransport> networkTransports,
+            Collection<RegistryLeaseRenewer> leaseRenewers,
+            Collection<RegistryLeaseReaper> leaseReapers,
+            Collection<LocalGameConfigCache> configCaches,
+            Collection<GameConfigAutoRecovery> configRecoveries,
+            Collection<PlayerCommandAuditView> commandAudits,
+            Collection<ClusterEventCenter> eventCenters,
+            Collection<ClusterEventSubscriptionManager> eventSubscriptions,
+            Collection<ProfileInterestView> profileInterests,
+            Collection<ResilientRpcGateway> resilientRpcGateways,
+            Collection<ActorRpcClient> actorRpcClients,
+            Collection<ServiceDescriptorPublisher> serviceDescriptorPublishers,
+            RuntimeHealthPolicy policy
+    ) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.actors = Objects.requireNonNull(actors, "actors");
         this.lifecycles = Objects.requireNonNull(lifecycles, "lifecycles");
@@ -350,6 +381,7 @@ public final class RuntimeHealthProbe {
         this.eventSubscriptions = List.copyOf(Objects.requireNonNull(eventSubscriptions, "eventSubscriptions"));
         this.profileInterests = List.copyOf(Objects.requireNonNull(profileInterests, "profileInterests"));
         this.actorRpcClients = List.copyOf(Objects.requireNonNull(actorRpcClients, "actorRpcClients"));
+        this.serviceDescriptorPublishers = List.copyOf(Objects.requireNonNull(serviceDescriptorPublishers, "serviceDescriptorPublishers"));
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
@@ -363,6 +395,7 @@ public final class RuntimeHealthProbe {
         EventOutboxStats outboxStats = outboxStats();
         ClusterServiceStats clusterStats = clusterStats();
         RegistryLeaseHealthStats leaseStats = leaseStats();
+        ServiceDescriptorPublisherHealthStats descriptorPublisherStats = serviceDescriptorPublisherStats();
         NetworkTransportHealthStats networkStats = networkStats();
         ConfigCacheHealthStats configStats = configStats();
         ConfigRecoveryHealthStats recoveryStats = configRecoveryStats();
@@ -373,14 +406,16 @@ public final class RuntimeHealthProbe {
         RuntimeHealthStatus status = status(
                 actorStats.queuedTasks(),
                 outboxStats.pendingEvents(),
+                commandStats,
                 configStats,
                 leaseStats,
+                descriptorPublisherStats,
                 networkStats,
                 eventSubscriptionStats,
                 profileInterestStats
         );
         return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, rpcResilienceStats, actorRpcStats, commandStats, agentStats,
-                outboxStats, clusterStats, leaseStats, networkStats, configStats, recoveryStats,
+                outboxStats, clusterStats, leaseStats, descriptorPublisherStats, networkStats, configStats, recoveryStats,
                 eventCenterStats, eventSubscriptionStats, profileInterestStats, auditStats);
     }
 
@@ -428,10 +463,13 @@ public final class RuntimeHealthProbe {
 
     private ClusterServiceStats clusterStats() {
         EnumMap<ServiceKind, Integer> counts = new EnumMap<>(ServiceKind.class);
+        EnumMap<ServiceKind, Integer> drainingCounts = new EnumMap<>(ServiceKind.class);
         for (ServiceKind kind : ServiceKind.values()) {
-            counts.put(kind, directory.list(kind).size());
+            List<com.commonbattle.cluster.ServiceDescriptor> services = directory.list(kind);
+            counts.put(kind, services.size());
+            drainingCounts.put(kind, (int) services.stream().filter(com.commonbattle.cluster.ServiceDescriptor::draining).count());
         }
-        return new ClusterServiceStats(counts);
+        return new ClusterServiceStats(counts, drainingCounts);
     }
 
     private RegistryLeaseHealthStats leaseStats() {
@@ -454,6 +492,32 @@ public final class RuntimeHealthProbe {
                 failedRenewals,
                 leaseReapers.size(),
                 expiredServices
+        );
+    }
+
+    private ServiceDescriptorPublisherHealthStats serviceDescriptorPublisherStats() {
+        if (serviceDescriptorPublishers.isEmpty()) {
+            return ServiceDescriptorPublisherHealthStats.empty();
+        }
+        int drainingPublishers = 0;
+        long attempts = 0;
+        long succeeded = 0;
+        long failed = 0;
+        for (ServiceDescriptorPublisher publisher : serviceDescriptorPublishers) {
+            ServiceDescriptorPublisherStats stats = publisher.stats();
+            if (stats.draining()) {
+                drainingPublishers++;
+            }
+            attempts += stats.attempts();
+            succeeded += stats.succeeded();
+            failed += stats.failed();
+        }
+        return new ServiceDescriptorPublisherHealthStats(
+                serviceDescriptorPublishers.size(),
+                drainingPublishers,
+                attempts,
+                succeeded,
+                failed
         );
     }
 
@@ -670,14 +734,19 @@ public final class RuntimeHealthProbe {
     private RuntimeHealthStatus status(
             int queuedTasks,
             int pendingEvents,
+            PlayerCommandStats commandStats,
             ConfigCacheHealthStats configStats,
             RegistryLeaseHealthStats leaseStats,
+            ServiceDescriptorPublisherHealthStats descriptorPublisherStats,
             NetworkTransportHealthStats networkStats,
             EventSubscriptionHealthStats eventSubscriptionStats,
             ProfileInterestHealthStats profileInterestStats
     ) {
         if (!actors.isAccepting()) {
             return RuntimeHealthStatus.DOWN;
+        }
+        if (commandStats.drainingDispatchers() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
         }
         if (configStats.cacheCount() > 0 && configStats.activeCaches() < configStats.cacheCount()) {
             return RuntimeHealthStatus.DOWN;
@@ -686,6 +755,9 @@ public final class RuntimeHealthProbe {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (leaseStats.failedRenewals() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (descriptorPublisherStats.failed() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (networkStats.connectionFailures() > 0 || networkStats.failedWrites() > 0 || networkStats.inboundFailures() > 0) {

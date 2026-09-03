@@ -21,6 +21,9 @@ public final class ClusterRpcDeliveryFailureMapper implements RemoteCallFailureM
         if (error instanceof RpcRejectedException) {
             return AgentDeliveryResult.rejected("rpc_rejected", java.time.Duration.ZERO);
         }
+        if (error instanceof RpcNoRoutableServiceException) {
+            return AgentDeliveryResult.remoteUnavailable(error.getMessage());
+        }
         String message = error == null ? "" : String.valueOf(error.getMessage());
         if (message.toLowerCase(Locale.ROOT).contains("closed")) {
             return AgentDeliveryResult.systemClosed();

@@ -22,6 +22,8 @@ class ClusterRpcDeliveryFailureMapperTest {
                 mapper.map(new RpcCircuitOpenException(request)).status());
         assertEquals(AgentDeliveryStatus.REJECTED,
                 mapper.map(new RpcRejectedException(1)).status());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE,
+                mapper.map(new RpcNoRoutableServiceException(request)).status());
     }
 
     @Test

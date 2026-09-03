@@ -83,6 +83,27 @@ class PlayerCommandDispatcherTest {
     }
 
     @Test
+    void drainingDispatcherRejectsBeforeSequenceAndCanResume() {
+        Fixture fixture = Fixture.local((target, operation) -> AdmissionDecision.accept());
+        AtomicInteger handled = new AtomicInteger();
+        fixture.dispatcher.handle("bag.use", (context, command) -> handled.incrementAndGet());
+
+        fixture.dispatcher.beginDrain();
+        PlayerCommandResult rejected = fixture.dispatch(command(1));
+        fixture.dispatcher.resumeAccepting();
+        PlayerCommandResult accepted = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+
+        assertEquals(PlayerCommandStatus.DRAINING, rejected.status());
+        assertEquals("server_draining", rejected.reason());
+        assertEquals(PlayerCommandStatus.ACCEPTED, accepted.status());
+        assertEquals(1, handled.get());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.DRAINING));
+        assertEquals(1, fixture.dispatcher.stats().acceptingDispatchers());
+        assertEquals(0, fixture.dispatcher.stats().drainingDispatchers());
+    }
+
+    @Test
     void rateLimitDoesNotConsumeCommandSequence() {
         AtomicInteger attempts = new AtomicInteger();
         Fixture fixture = Fixture.local((target, operation) -> attempts.incrementAndGet() == 1

@@ -1,5 +1,7 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.agent.migration.AgentMigrationOperations;
+import com.commonbattle.actor.agent.remote.AgentDirectoryOperations;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
@@ -36,13 +38,22 @@ final class ClusterDescriptors {
                     RegistryOperations.UNREGISTER,
                     RegistryOperations.LIST,
                     RegistryOperations.SUBSCRIBE,
+                    AgentDirectoryOperations.CLAIM,
+                    AgentDirectoryOperations.MOVE,
+                    AgentDirectoryOperations.UNBIND,
+                    AgentDirectoryOperations.LOCATE,
                     ClusterEventOperations.SUBSCRIBE,
                     ClusterEventOperations.UNSUBSCRIBE,
                     ClusterEventOperations.PUBLISH,
                     GameConfigOperations.SNAPSHOT
             );
             case REGION -> Set.of("region.route", "region.heartbeat");
-            case GAME -> Set.of("game.resume", "game.heartbeat", ProfileSnapshotOperations.GET);
+            case GAME -> Set.of(
+                    "game.resume",
+                    "game.heartbeat",
+                    ProfileSnapshotOperations.GET,
+                    AgentMigrationOperations.ACCEPT
+            );
             case SCENE -> Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE);
             case PROXY -> Set.of("proxy.forward", "proxy.heartbeat");
         };

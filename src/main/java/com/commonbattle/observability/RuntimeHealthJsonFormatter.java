@@ -32,6 +32,7 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "outbox", outbox(snapshot)).append(',');
         object(json, "cluster", cluster(snapshot)).append(',');
         object(json, "registryLeases", registryLeases(snapshot)).append(',');
+        object(json, "serviceDescriptorPublishers", serviceDescriptorPublishers(snapshot)).append(',');
         object(json, "networkTransports", networkTransports(snapshot)).append(',');
         object(json, "configCaches", configCaches(snapshot)).append(',');
         object(json, "configRecoveries", configRecoveries(snapshot)).append(',');
@@ -113,7 +114,12 @@ public final class RuntimeHealthJsonFormatter {
 
 
     private static StringBuilder commands(RuntimeHealthSnapshot snapshot) {
-        return enumMap(snapshot.commands().counts(), PlayerCommandStatus.values());
+        StringBuilder json = enumMap(snapshot.commands().counts(), PlayerCommandStatus.values());
+        json.deleteCharAt(json.length() - 1);
+        number(json.append(','), "acceptingDispatchers", snapshot.commands().acceptingDispatchers()).append(',');
+        number(json, "drainingDispatchers", snapshot.commands().drainingDispatchers());
+        json.append('}');
+        return json;
     }
 
     private static StringBuilder agents(RuntimeHealthSnapshot snapshot) {
@@ -131,7 +137,11 @@ public final class RuntimeHealthJsonFormatter {
     }
 
     private static StringBuilder cluster(RuntimeHealthSnapshot snapshot) {
-        return enumMap(snapshot.cluster().counts(), ServiceKind.values());
+        StringBuilder json = enumMap(snapshot.cluster().counts(), ServiceKind.values());
+        json.deleteCharAt(json.length() - 1);
+        object(json.append(','), "draining", enumMap(snapshot.cluster().drainingCounts(), ServiceKind.values()));
+        json.append('}');
+        return json;
     }
 
     private static StringBuilder registryLeases(RuntimeHealthSnapshot snapshot) {
@@ -143,6 +153,18 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "failedRenewals", snapshot.registryLeases().failedRenewals()).append(',');
         number(json, "reapers", snapshot.registryLeases().reapers()).append(',');
         number(json, "expiredServices", snapshot.registryLeases().expiredServices());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder serviceDescriptorPublishers(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "publisherCount", snapshot.serviceDescriptorPublishers().publisherCount()).append(',');
+        number(json, "drainingPublishers", snapshot.serviceDescriptorPublishers().drainingPublishers()).append(',');
+        number(json, "attempts", snapshot.serviceDescriptorPublishers().attempts()).append(',');
+        number(json, "succeeded", snapshot.serviceDescriptorPublishers().succeeded()).append(',');
+        number(json, "failed", snapshot.serviceDescriptorPublishers().failed());
         json.append('}');
         return json;
     }

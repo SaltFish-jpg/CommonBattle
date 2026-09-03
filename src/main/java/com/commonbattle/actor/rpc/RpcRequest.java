@@ -1,6 +1,7 @@
 package com.commonbattle.actor.rpc;
 
 import java.util.Objects;
+import com.commonbattle.cluster.ServiceId;
 
 /**
  * 一次异步 RPC 调用的描述。
@@ -17,5 +18,14 @@ public record RpcRequest<T>(String target, String operation, Object payload, Cla
         if (operation.isBlank()) {
             throw new IllegalArgumentException("RPC operation must not be blank");
         }
+    }
+
+    public static <T> RpcRequest<T> toService(
+            ServiceId target,
+            String operation,
+            Object payload,
+            Class<T> responseType
+    ) {
+        return new RpcRequest<>(Objects.requireNonNull(target, "target").wireName(), operation, payload, responseType);
     }
 }

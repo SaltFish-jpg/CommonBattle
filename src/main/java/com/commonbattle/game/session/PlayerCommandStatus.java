@@ -9,6 +9,7 @@ public enum PlayerCommandStatus {
     GAP,
     STALE_SESSION,
     RATE_LIMITED,
+    DRAINING,
     AGENT_MISSING,
     MAILBOX_FULL,
     ROUTED_REMOTE,

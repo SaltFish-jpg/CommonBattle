@@ -21,6 +21,7 @@ public record RuntimeHealthSnapshot(
         EventOutboxStats outbox,
         ClusterServiceStats cluster,
         RegistryLeaseHealthStats registryLeases,
+        ServiceDescriptorPublisherHealthStats serviceDescriptorPublishers,
         NetworkTransportHealthStats networkTransports,
         ConfigCacheHealthStats configCaches,
         ConfigRecoveryHealthStats configRecoveries,

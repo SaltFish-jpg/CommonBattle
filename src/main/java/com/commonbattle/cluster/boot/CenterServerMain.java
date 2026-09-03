@@ -6,6 +6,10 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.agent.InMemoryAgentDirectory;
+import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
+import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
+import com.commonbattle.actor.agent.remote.CenterAgentDirectoryEndpoint;
 import com.commonbattle.cluster.event.ClusterEventCenter;
 import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
@@ -37,7 +41,9 @@ public final class CenterServerMain {
             config.validate(ServiceKind.CENTER).throwIfInvalid();
             ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults())
+                    AgentMigrationPayloadCodecs.registerTo(
+                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults()))
+                    )
             );
             Clock clock = Clock.systemUTC();
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock);
@@ -53,6 +59,7 @@ public final class CenterServerMain {
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
                     new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport));
             runtime.add("centerRegistryEndpoint", new CenterRegistryEndpoint(center, registry, transport, gateway));
+            new CenterAgentDirectoryEndpoint(new InMemoryAgentDirectory()).bind(gateway);
             RegistryLeaseReaper leaseReaper = runtime.add(
                     "leaseReaper",
                     new RegistryLeaseReaper(registry, clock, config.registryLeaseScanInterval())
@@ -60,8 +67,8 @@ public final class CenterServerMain {
             leaseReaper.start();
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
             ClusterEventCenter eventCenter = new ClusterEventCenter(center, transport, gateway, config.eventHistoryPolicy());
-            runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, gateway, transport,
-                    java.util.List.of(leaseReaper), java.util.List.of(eventCenter)));
+            runtime.observe("eventCenter", eventCenter);
+            runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, runtime.healthRegistry()));
             GameConfigCenterPublisher configPublisher = new GameConfigCenterPublisher(
                     new InMemoryGameConfigRegistry(new GameConfigValidator(), clock),
                     eventCenter::publishLocal

@@ -1,7 +1,9 @@
 package com.commonbattle.cluster.registry;
 
 import com.commonbattle.cluster.ServiceDescriptor;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceRegistry;
+import com.commonbattle.runtime.DrainableComponent;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -16,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 服务注册租约续约器。
  * 节点启动时先带 TTL 注册自身，之后周期心跳；如果中心返回租约不存在，则立即重新注册。
  */
-public final class RegistryLeaseRenewer implements AutoCloseable {
+public final class RegistryLeaseRenewer implements AutoCloseable, DrainableComponent {
     private final ServiceRegistry registry;
     private final ServiceDescriptor local;
     private final Duration leaseTtl;
@@ -27,6 +29,7 @@ public final class RegistryLeaseRenewer implements AutoCloseable {
     private final AtomicLong successfulHeartbeats = new AtomicLong();
     private final AtomicLong reRegistrations = new AtomicLong();
     private final AtomicLong failedRenewals = new AtomicLong();
+    private volatile ServiceDescriptor registered;
     private volatile ScheduledFuture<?> task;
 
     public RegistryLeaseRenewer(
@@ -66,13 +69,14 @@ public final class RegistryLeaseRenewer implements AutoCloseable {
         this.heartbeatInterval = positive(heartbeatInterval, "heartbeatInterval");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.ownsScheduler = ownsScheduler;
+        this.registered = local;
     }
 
     public void start() {
         if (!started.compareAndSet(false, true)) {
             return;
         }
-        registry.register(local, leaseTtl);
+        registry.register(registered, leaseTtl);
         task = scheduler.scheduleAtFixedRate(
                 this::renewSafely,
                 heartbeatInterval.toMillis(),
@@ -84,7 +88,7 @@ public final class RegistryLeaseRenewer implements AutoCloseable {
     public void renewOnce() {
         try {
             if (!registry.heartbeat(local.id(), leaseTtl)) {
-                registry.register(local, leaseTtl);
+                registry.register(registered, leaseTtl);
                 reRegistrations.incrementAndGet();
                 return;
             }
@@ -101,6 +105,27 @@ public final class RegistryLeaseRenewer implements AutoCloseable {
                 reRegistrations.get(),
                 failedRenewals.get()
         );
+    }
+
+    @Override
+    public void beginDrain() {
+        registered = ServiceMetadata.withDraining(local, true);
+        if (started.get()) {
+            registry.register(registered, leaseTtl);
+        }
+    }
+
+    @Override
+    public void resumeAccepting() {
+        registered = local;
+        if (started.get()) {
+            registry.register(registered, leaseTtl);
+        }
+    }
+
+    @Override
+    public boolean isDraining() {
+        return registered.draining();
     }
 
     private void renewSafely() {

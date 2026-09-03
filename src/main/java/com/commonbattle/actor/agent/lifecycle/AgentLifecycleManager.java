@@ -50,6 +50,20 @@ public final class AgentLifecycleManager {
         return location;
     }
 
+    public AgentLocation acceptMigrated(AgentIdentity identity, String actorId, AgentLifecycleAction onActivate) {
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(actorId, "actorId");
+        Objects.requireNonNull(onActivate, "onActivate");
+        ActorRef actorRef = actors.actor(actorId);
+        AgentLocation location = new AgentLocation(localServiceId, actorRef);
+        if (directory.locate(identity).filter(location::equals).isEmpty()) {
+            throw new AgentMigrationTargetMismatchException(identity, location);
+        }
+        records.put(identity, new AgentLifecycleRecord(identity, location, AgentLifecycleState.ACTIVE, clock.instant()));
+        actors.send(actorRef, onActivate::run);
+        return location;
+    }
+
     public boolean passivate(AgentIdentity identity, AgentLifecycleAction onPassivate) {
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(onPassivate, "onPassivate");
@@ -65,21 +79,60 @@ public final class AgentLifecycleManager {
     }
 
     public boolean migrate(AgentIdentity identity, AgentLocation target, AgentLifecycleAction beforeMove) {
+        return migrate(identity, target, beforeMove, AgentMigrationCompletionListener.ignore());
+    }
+
+    public boolean migrate(
+            AgentIdentity identity,
+            AgentLocation target,
+            AgentLifecycleAction beforeMove,
+            AgentMigrationCompletionListener listener
+    ) {
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(beforeMove, "beforeMove");
+        Objects.requireNonNull(listener, "listener");
         AgentLifecycleRecord active = transitionFromActive(identity, AgentLifecycleState.MIGRATING);
         actors.send(active.location().actorRef(), context -> {
-            // 迁移边界：迁移打包在旧 owner 邮箱内完成，目录 CAS 成功后新 owner 才可被路由发现。
-            beforeMove.run(context);
-            if (directory.move(identity, active.location(), target)) {
-                records.put(identity, new AgentLifecycleRecord(identity, target, AgentLifecycleState.MIGRATED,
-                        clock.instant()));
-                return;
+            AgentMigrationCompletion completion;
+            try {
+                // 迁移边界：迁移打包在旧 owner 邮箱内完成，目录 CAS 成功后新 owner 才可被路由发现。
+                beforeMove.run(context);
+                if (directory.move(identity, active.location(), target)) {
+                    records.put(identity, new AgentLifecycleRecord(identity, target, AgentLifecycleState.MIGRATED,
+                            clock.instant()));
+                    completion = new AgentMigrationCompletion(identity, active.location(), target, true, null);
+                } else {
+                    AgentLifecycleState failedState = directory.locate(identity)
+                            .filter(active.location()::equals)
+                            .map(ignored -> AgentLifecycleState.ACTIVE)
+                            .orElse(AgentLifecycleState.CLOSED);
+                    records.put(identity, new AgentLifecycleRecord(identity, active.location(), failedState,
+                            clock.instant()));
+                    completion = new AgentMigrationCompletion(identity, active.location(), target, false, null);
+                }
+            } catch (RuntimeException e) {
+                records.put(identity, new AgentLifecycleRecord(identity, active.location(),
+                        AgentLifecycleState.ACTIVE, clock.instant()));
+                listener.completed(new AgentMigrationCompletion(identity, active.location(), target, false, e));
+                throw e;
             }
-            records.put(identity, new AgentLifecycleRecord(identity, active.location(), AgentLifecycleState.CLOSED,
-                    clock.instant()));
+            listener.completed(completion);
         });
+        return true;
+    }
+
+    public boolean resumeAfterMigrationRollback(AgentIdentity identity, AgentLocation sourceLocation) {
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(sourceLocation, "sourceLocation");
+        if (!sourceLocation.isLocal(localServiceId)) {
+            return false;
+        }
+        if (directory.locate(identity).filter(sourceLocation::equals).isEmpty()) {
+            return false;
+        }
+        records.put(identity, new AgentLifecycleRecord(identity, sourceLocation, AgentLifecycleState.ACTIVE,
+                clock.instant()));
         return true;
     }
 

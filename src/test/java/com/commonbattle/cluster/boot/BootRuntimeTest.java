@@ -1,9 +1,15 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.game.config.GameConfigAutoRecovery;
+import com.commonbattle.game.config.GameConfigValidator;
+import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.runtime.DrainableComponent;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -70,5 +76,50 @@ class BootRuntimeTest {
         runtime.close();
 
         assertEquals(List.of("only"), closed);
+    }
+
+    @Test
+    void addAndObserveRegisterHealthComponents() {
+        BootRuntime runtime = new BootRuntime();
+        LocalGameConfigCache cache = runtime.add("configCache",
+                new LocalGameConfigCache(new GameConfigValidator(), Clock.systemUTC()));
+        GameConfigAutoRecovery recovery = new GameConfigAutoRecovery(callback -> {
+        });
+
+        runtime.observe("configRecovery", recovery);
+
+        assertSame(cache, runtime.healthRegistry().configCaches().getFirst());
+        assertSame(recovery, runtime.healthRegistry().configRecoveries().getFirst());
+    }
+
+    @Test
+    void addRegistersDrainableComponents() {
+        BootRuntime runtime = new BootRuntime();
+        RecordingDrainable drainable = runtime.add("drainable", new RecordingDrainable());
+
+        assertSame(drainable, runtime.healthRegistry().drainableComponents().getFirst());
+    }
+
+    private static final class RecordingDrainable implements AutoCloseable, DrainableComponent {
+        private final AtomicBoolean draining = new AtomicBoolean();
+
+        @Override
+        public void beginDrain() {
+            draining.set(true);
+        }
+
+        @Override
+        public void resumeAccepting() {
+            draining.set(false);
+        }
+
+        @Override
+        public boolean isDraining() {
+            return draining.get();
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

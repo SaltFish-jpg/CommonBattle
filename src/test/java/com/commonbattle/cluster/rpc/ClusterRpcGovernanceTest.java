@@ -90,6 +90,24 @@ class ClusterRpcGovernanceTest {
     }
 
     @Test
+    void noRoutableTargetCleansPendingCallback() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor scene = com.commonbattle.cluster.ServiceMetadata.withDraining(
+                descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER)),
+                true
+        );
+        ClusterRpcGateway gameGateway = gateway(game, transport, false, game, scene);
+        RecordingCallback<String> callback = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), SceneOperations.ENTER, "hello", String.class), callback);
+
+        assertInstanceOf(RpcNoRoutableServiceException.class, callback.failure.get());
+        assertEquals(0, gameGateway.stats().pendingRequests());
+        assertEquals(1, gameGateway.stats().failedRequests());
+    }
+
+    @Test
     void idempotencyKeyReusesCachedServerResponse() {
         LocalClusterTransport transport = new LocalClusterTransport();
         ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());

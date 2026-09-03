@@ -14,6 +14,8 @@ import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
+import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -34,7 +36,11 @@ public final class RegionServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
+                    AgentMigrationPayloadCodecs.registerTo(
+                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                    )
+            );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs
@@ -49,7 +55,7 @@ public final class RegionServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
             System.out.println("Region server started: " + local.id().wireName()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
             new CountDownLatch(1).await();

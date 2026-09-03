@@ -7,6 +7,7 @@ import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
+import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
@@ -14,6 +15,7 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.game.session.PlayerCommandAuditView;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
+import com.commonbattle.runtime.DrainableComponent;
 
 import java.util.Collection;
 import java.util.List;
@@ -39,6 +41,8 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ClusterEventCenter> eventCenters = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterEventSubscriptionManager> eventSubscriptions = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<DrainableComponent> drainableComponents = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ServiceDescriptorPublisher> serviceDescriptorPublishers = new CopyOnWriteArrayList<>();
 
     public void register(Object component) {
         Objects.requireNonNull(component, "component");
@@ -60,6 +64,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, ClusterEventCenter.class, eventCenters);
         addIf(component, ClusterEventSubscriptionManager.class, eventSubscriptions);
         addIf(component, ProfileInterestView.class, profileInterests);
+        addIf(component, DrainableComponent.class, drainableComponents);
+        addIf(component, ServiceDescriptorPublisher.class, serviceDescriptorPublishers);
     }
 
     public List<ClusterRpcGateway> rpcGateways() {
@@ -120,6 +126,20 @@ public final class RuntimeHealthRegistry {
 
     public List<ProfileInterestView> profileInterests() {
         return List.copyOf(profileInterests);
+    }
+
+    public List<DrainableComponent> drainableComponents() {
+        List<DrainableComponent> fromNodes = clusterNodes.stream()
+                .flatMap(node -> node.leaseRenewer().stream())
+                .map(DrainableComponent.class::cast)
+                .toList();
+        CopyOnWriteArrayList<DrainableComponent> all = new CopyOnWriteArrayList<>(fromNodes);
+        all.addAll(drainableComponents);
+        return List.copyOf(all);
+    }
+
+    public List<ServiceDescriptorPublisher> serviceDescriptorPublishers() {
+        return List.copyOf(serviceDescriptorPublishers);
     }
 
     private static <T> void addIf(Object component, Class<T> type, CopyOnWriteArrayList<T> target) {

@@ -1,6 +1,8 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
+import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
@@ -48,7 +50,11 @@ public final class GameServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()));
+            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
+                    AgentMigrationPayloadCodecs.registerTo(
+                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                    )
+            );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs
@@ -76,6 +82,7 @@ public final class GameServerMain {
             );
             RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
             GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
+            runtime.observe("configAutoRecovery", configAutoRecovery);
             configCache.attachRecoveryTrigger(configAutoRecovery);
             eventSubscriptions.register(
                     GameConfigChangedEvent.TOPIC,
@@ -91,8 +98,7 @@ public final class GameServerMain {
             if (!warmup.ready()) {
                 throw new IllegalStateException("Game config warmup failed: " + warmup.message());
             }
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, gateway, transport, node,
-                    List.of(configCache), List.of(configAutoRecovery), List.of(eventSubscriptions)));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
             System.out.println("Game server started: " + local.id().wireName()
                     + ", config=" + configCache.active().version()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port()

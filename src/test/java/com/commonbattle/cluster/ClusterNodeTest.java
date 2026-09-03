@@ -43,6 +43,8 @@ class ClusterNodeTest {
 
             assertTrue(game.leaseRenewer().isPresent());
             assertEquals(1, registry.list(ServiceKind.GAME).size());
+            game.leaseRenewer().orElseThrow().beginDrain();
+            assertTrue(registry.list(ServiceKind.GAME).getFirst().draining());
             assertEquals(1, registry.expireLeases(clock.instant().plusSeconds(2)));
             assertEquals(0, registry.list(ServiceKind.GAME).size());
         } finally {
