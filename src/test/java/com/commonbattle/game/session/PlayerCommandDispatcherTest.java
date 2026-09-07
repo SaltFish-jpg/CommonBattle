@@ -122,6 +122,28 @@ class PlayerCommandDispatcherTest {
     }
 
     @Test
+    void migratingPlayerCommandIsRejectedWithExplicitStatus() {
+        Fixture fixture = Fixture.local((target, operation) -> AdmissionDecision.accept());
+        fixture.dispatcher.handle("bag.use", (context, command) -> {
+            throw new AssertionError("migrating player command must not enter mailbox");
+        });
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AgentLocation target = new AgentLocation(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                new ActorRef("player-10001")
+        );
+
+        fixture.lifecycles.migrate(player, target, ignored -> {
+        });
+        PlayerCommandResult result = fixture.dispatch(command(1));
+
+        assertEquals(PlayerCommandStatus.AGENT_MIGRATING, result.status());
+        assertEquals("agent_migrating", result.reason());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.AGENT_MIGRATING));
+        assertEquals(1, fixture.executor.queued());
+    }
+
+    @Test
     void mailboxFullDoesNotConsumeCommandSequence() {
         Fixture fixture = Fixture.local(
                 (target, operation) -> AdmissionDecision.accept(),
@@ -262,17 +284,20 @@ class PlayerCommandDispatcherTest {
         private final ActorSystem actors;
         private final InMemoryPlayerSessionRegistry sessions;
         private final PlayerCommandDispatcher dispatcher;
+        private final AgentLifecycleManager lifecycles;
 
         private Fixture(
                 RecordingExecutor executor,
                 ActorSystem actors,
                 InMemoryPlayerSessionRegistry sessions,
-                PlayerCommandDispatcher dispatcher
+                PlayerCommandDispatcher dispatcher,
+                AgentLifecycleManager lifecycles
         ) {
             this.executor = executor;
             this.actors = actors;
             this.sessions = sessions;
             this.dispatcher = dispatcher;
+            this.lifecycles = lifecycles;
         }
 
         private PlayerCommandResult dispatch(PlayerCommand command) {
@@ -324,7 +349,7 @@ class PlayerCommandDispatcherTest {
                     ignored -> configVersion.getAsLong(),
                     CLOCK
             );
-            return new Fixture(executor, actors, sessions, dispatcher);
+            return new Fixture(executor, actors, sessions, dispatcher, lifecycles);
         }
 
         private static Fixture remote() {
@@ -345,7 +370,7 @@ class PlayerCommandDispatcherTest {
                             new LifecycleAwareAgentRouter(lifecycles, new DefaultAgentMessagePort(actors, new NoopRpcGateway()))
                     )
             );
-            return new Fixture(executor, actors, sessions, dispatcher);
+            return new Fixture(executor, actors, sessions, dispatcher, lifecycles);
         }
     }
 

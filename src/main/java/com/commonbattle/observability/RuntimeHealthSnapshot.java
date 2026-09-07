@@ -1,6 +1,12 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.ActorSystemStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationCoordinatorStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationExecutorStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationRecoverySchedulerStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStoreStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionStats;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
 import com.commonbattle.game.session.PlayerCommandStats;
 
@@ -18,6 +24,13 @@ public record RuntimeHealthSnapshot(
         ActorRpcHealthStats actorRpc,
         PlayerCommandStats commands,
         AgentLifecycleStats agents,
+        PlayerAgentHealthStats playerAgents,
+        AgentMigrationCoordinatorStats agentMigrations,
+        AgentMigrationExecutorStats agentMigrationExecutors,
+        AgentMigrationRecoveryStats agentMigrationRecoveries,
+        AgentMigrationRecoverySchedulerStats agentMigrationRecoverySchedulers,
+        AgentMigrationTaskRetentionStats agentMigrationTaskRetentions,
+        AgentMigrationTaskStoreStats agentMigrationTaskStores,
         EventOutboxStats outbox,
         ClusterServiceStats cluster,
         RegistryLeaseHealthStats registryLeases,
@@ -28,6 +41,9 @@ public record RuntimeHealthSnapshot(
         EventCenterHealthStats eventCenters,
         EventSubscriptionHealthStats eventSubscriptions,
         ProfileInterestHealthStats profileInterests,
+        ProfileRuntimeHealthStats profileRuntimes,
+        SceneRuntimeHealthStats sceneRuntimes,
+        ShopRuntimeHealthStats shopRuntimes,
         PlayerCommandAuditHealthStats commandAudits
 ) {
 }

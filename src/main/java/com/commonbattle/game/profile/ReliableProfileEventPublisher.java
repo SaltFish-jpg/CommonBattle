@@ -1,7 +1,7 @@
 package com.commonbattle.game.profile;
 
 import com.commonbattle.game.event.EventPublisher;
-import com.commonbattle.game.event.PendingVersionedEvent;
+import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
 
@@ -13,8 +13,7 @@ import java.util.Objects;
  */
 public final class ReliableProfileEventPublisher implements EventPublisher {
     private final ProfileSnapshotRepository snapshots;
-    private final VersionedEventOutbox outbox;
-    private final EventPublisher delegate;
+    private final ReliableVersionedEventPublisher reliablePublisher;
 
     public ReliableProfileEventPublisher(
             ProfileSnapshotRepository snapshots,
@@ -22,8 +21,7 @@ public final class ReliableProfileEventPublisher implements EventPublisher {
             EventPublisher delegate
     ) {
         this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
-        this.outbox = Objects.requireNonNull(outbox, "outbox");
-        this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.reliablePublisher = new ReliableVersionedEventPublisher(outbox, delegate);
     }
 
     @Override
@@ -32,20 +30,10 @@ public final class ReliableProfileEventPublisher implements EventPublisher {
             throw new IllegalArgumentException("ReliableProfileEventPublisher only accepts ProfileChangedEvent");
         }
         snapshots.save(profileEvent.snapshot());
-        PendingVersionedEvent entry = outbox.append(profileEvent);
-        dispatch(entry);
+        reliablePublisher.publish(profileEvent);
     }
 
     public void replayPending() {
-        outbox.pending().forEach(this::dispatch);
-    }
-
-    private void dispatch(PendingVersionedEvent entry) {
-        try {
-            delegate.publish(entry.event());
-            outbox.markPublished(entry.id());
-        } catch (RuntimeException e) {
-            outbox.markAttemptFailed(entry.id());
-        }
+        reliablePublisher.replayPending();
     }
 }

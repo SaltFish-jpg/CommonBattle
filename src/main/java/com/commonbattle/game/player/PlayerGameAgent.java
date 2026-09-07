@@ -7,10 +7,22 @@ import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.activity.ActivityAccessContext;
 import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityService;
+import com.commonbattle.game.achievement.AchievementClaimResult;
+import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.battle.BattleService;
 import com.commonbattle.game.config.GameConfigRegistry;
 import com.commonbattle.game.config.GameConfigView;
+import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
+import com.commonbattle.game.player.event.BattleStageClearedEvent;
+import com.commonbattle.game.player.event.GrowthLevelChangedEvent;
+import com.commonbattle.game.player.event.PlayerDomainEvent;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.player.event.ShopItemPurchasedEvent;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopService;
+import com.commonbattle.game.task.TaskClaimResult;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -30,7 +42,10 @@ public final class PlayerGameAgent {
     private final LongFunction<PlayerGameRuntime> runtimeResolver;
     private final Clock clock;
     private final Instant serverOpenTime;
+    private final EventPublisher domainEventPublisher;
+    private final PlayerDomainEventListener domainEventListener;
     private long stateRevision;
+    private long domainEventRevision;
 
     public PlayerGameAgent(
             AgentMessagePort messages,
@@ -40,6 +55,30 @@ public final class PlayerGameAgent {
             GrowthService growthService
     ) {
         this(messages, self, profile, activityService, growthService, Clock.systemUTC(), Instant.EPOCH);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService
+    ) {
+        this(messages, self, profile, activityService, growthService, shopService, Clock.systemUTC(), Instant.EPOCH);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService,
+            BattleService battleService
+    ) {
+        this(messages, self, profile, activityService, growthService, shopService, battleService,
+                Clock.systemUTC(), Instant.EPOCH);
     }
 
     public PlayerGameAgent(
@@ -98,7 +137,104 @@ public final class PlayerGameAgent {
                 runtimeResolver(configView),
                 clock,
                 serverOpenTime,
-                0
+                null,
+                0,
+                0,
+                null
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigRegistry configRegistry,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision
+    ) {
+        this(messages, self, profile, (GameConfigView) configRegistry, clock, serverOpenTime,
+                domainEventPublisher, initialStateRevision, initialEventRevision);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision
+    ) {
+        this(messages, self, profile, configView, clock, serverOpenTime,
+                domainEventPublisher, initialStateRevision, initialEventRevision, null);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                runtimeResolver(configView),
+                clock,
+                serverOpenTime,
+                domainEventPublisher,
+                initialStateRevision,
+                initialEventRevision,
+                domainEventListener
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService,
+            Clock clock,
+            Instant serverOpenTime
+    ) {
+        this(messages, self, profile, activityService, growthService, shopService, null, clock, serverOpenTime);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService,
+            BattleService battleService,
+            Clock clock,
+            Instant serverOpenTime
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                fixedRuntimeResolver(activityService, growthService, shopService, battleService),
+                clock,
+                serverOpenTime,
+                null,
+                0,
+                0,
+                null
         );
     }
 
@@ -119,7 +255,10 @@ public final class PlayerGameAgent {
                 fixedRuntimeResolver(activityService, growthService),
                 clock,
                 serverOpenTime,
-                initialStateRevision
+                null,
+                initialStateRevision,
+                0,
+                null
         );
     }
 
@@ -130,7 +269,10 @@ public final class PlayerGameAgent {
             LongFunction<PlayerGameRuntime> runtimeResolver,
             Clock clock,
             Instant serverOpenTime,
-            long initialStateRevision
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener
     ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
@@ -138,7 +280,10 @@ public final class PlayerGameAgent {
         this.runtimeResolver = Objects.requireNonNull(runtimeResolver, "runtimeResolver");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.serverOpenTime = Objects.requireNonNull(serverOpenTime, "serverOpenTime");
+        this.domainEventPublisher = domainEventPublisher;
+        this.domainEventListener = domainEventListener;
         loadRevision(initialStateRevision);
+        loadDomainEventRevision(initialEventRevision);
     }
 
     public PlayerProfile profile() {
@@ -165,8 +310,76 @@ public final class PlayerGameAgent {
     }
 
     public void useExpItems(int count, Consumer<GrowthResult> callback) {
-        execute(execution ->
-                callback.accept(execution.runtime().growthService().useExpItems(profile.bag(), profile.growth(), count)));
+        execute(execution -> {
+            GrowthResult result = execution.runtime().growthService().useExpItems(profile.bag(), profile.growth(), count);
+            if (result.afterLevel() > result.beforeLevel()) {
+                execution.publish(new GrowthLevelChangedEvent(profile.playerId(), result.beforeLevel(), result.afterLevel()));
+            }
+            callback.accept(result);
+        });
+    }
+
+    public void buyShopItem(String sku, int quantity, Consumer<ShopPurchaseResult> callback) {
+        buyShopItem("", sku, quantity, callback);
+    }
+
+    public void buyShopItem(String orderId, String sku, int quantity, Consumer<ShopPurchaseResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> {
+            ShopPurchaseResult result = execution.runtime().requireShopService()
+                    .purchaseAt(profile.bag(), profile.shop(), orderId, sku, quantity, clock.instant());
+            if (result.success()) {
+                execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+            }
+            callback.accept(result);
+        });
+    }
+
+    public void clearBattleStage(String stageId, Consumer<BattleSettlementResult> callback) {
+        clearBattleStage("", stageId, callback);
+    }
+
+    public void clearBattleStage(String settlementId, String stageId, Consumer<BattleSettlementResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> {
+            BattleSettlementResult result = execution.runtime().requireBattleService()
+                    .clear(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
+            if (result.victory()) {
+                execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+            }
+            callback.accept(result);
+        });
+    }
+
+    public void sweepBattleStage(String stageId, Consumer<BattleSettlementResult> callback) {
+        sweepBattleStage("", stageId, callback);
+    }
+
+    public void sweepBattleStage(String settlementId, String stageId, Consumer<BattleSettlementResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> {
+            BattleSettlementResult result = execution.runtime().requireBattleService()
+                    .sweep(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
+            execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+            callback.accept(result);
+        });
+    }
+
+    public void claimTask(String taskId, Consumer<TaskClaimResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> callback.accept(execution.runtime().requireTaskService()
+                .claim(profile.tasks(), profile.bag(), taskId)));
+    }
+
+    public void claimAchievement(String achievementId, Consumer<AchievementClaimResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> callback.accept(execution.runtime().requireAchievementService()
+                .claim(profile.achievements(), profile.bag(), achievementId)));
+    }
+
+    public <R> R executeBusiness(PlayerBusinessCommand<R> command) {
+        Objects.requireNonNull(command, "command");
+        return command.execute(execution());
     }
 
     /**
@@ -178,13 +391,29 @@ public final class PlayerGameAgent {
     }
 
     public void save(PlayerStateRepository repository, Consumer<PlayerStateSnapshot> callback) {
+        save(repository, PlayerStateSaveCallback.onSaved(callback));
+    }
+
+    public void save(PlayerStateRepository repository, PlayerStateSaveCallback callback) {
         Objects.requireNonNull(repository, "repository");
         Objects.requireNonNull(callback, "callback");
         messages.tellLocal(self, ignored -> {
-            PlayerStateSnapshot snapshot = nextSnapshot();
-            repository.save(profile.playerId(), snapshot);
-            callback.accept(snapshot);
+            try {
+                PlayerStateSnapshot snapshot = nextSnapshot();
+                repository.save(profile.playerId(), snapshot);
+                callback.saved(snapshot);
+            } catch (RuntimeException e) {
+                callback.failed(profile.playerId(), e);
+                throw e;
+            }
         });
+    }
+
+    PlayerStateSnapshot saveInCurrentMailbox(PlayerStateRepository repository) {
+        Objects.requireNonNull(repository, "repository");
+        PlayerStateSnapshot snapshot = nextSnapshot();
+        repository.save(profile.playerId(), snapshot);
+        return snapshot;
     }
 
     public void exportForMigration(Consumer<PlayerStateSnapshot> callback) {
@@ -216,13 +445,38 @@ public final class PlayerGameAgent {
         stateRevision = revision;
     }
 
+    public void loadDomainEventRevision(long revision) {
+        if (revision < 0) {
+            throw new IllegalArgumentException("revision must not be negative");
+        }
+        domainEventRevision = revision;
+    }
+
     private ActivityAccessContext activityAccess() {
         return new ActivityAccessContext(clock.instant(), serverOpenTime, profile);
     }
 
     private PlayerGameExecution execution() {
         PlayerGameRuntime runtime = runtimeResolver.apply(profile.playerId());
-        return new PlayerGameExecution(profile, runtime, activityAccess());
+        return new PlayerGameExecution(profile, runtime, activityAccess(), this::publishDomainEvent);
+    }
+
+    private void publishDomainEvent(PlayerDomainEvent event) {
+        if (event.replayed() || (domainEventPublisher == null && domainEventListener == null)) {
+            return;
+        }
+        domainEventRevision++;
+        if (domainEventPublisher != null) {
+            domainEventPublisher.publish(PlayerDomainVersionedEvent.from(
+                    profile.playerId(),
+                    domainEventRevision,
+                    clock.instant(),
+                    event
+            ));
+        }
+        if (domainEventListener != null) {
+            domainEventListener.onEvent(profile, domainEventRevision, event);
+        }
     }
 
     private static LongFunction<PlayerGameRuntime> fixedRuntimeResolver(
@@ -230,6 +484,24 @@ public final class PlayerGameAgent {
             GrowthService growthService
     ) {
         PlayerGameRuntime runtime = PlayerGameRuntime.fixed(activityService, growthService);
+        return ignored -> runtime;
+    }
+
+    private static LongFunction<PlayerGameRuntime> fixedRuntimeResolver(
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService
+    ) {
+        return fixedRuntimeResolver(activityService, growthService, shopService, null);
+    }
+
+    private static LongFunction<PlayerGameRuntime> fixedRuntimeResolver(
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService,
+            BattleService battleService
+    ) {
+        PlayerGameRuntime runtime = PlayerGameRuntime.fixed(activityService, growthService, shopService, battleService);
         return ignored -> runtime;
     }
 
@@ -241,6 +513,6 @@ public final class PlayerGameAgent {
     private PlayerStateSnapshot nextSnapshot() {
         // 存盘边界：在玩家邮箱内生成完整状态快照并递增 revision，避免跨模块状态被拆成不一致切片。
         stateRevision++;
-        return profile.snapshot(stateRevision, clock.instant());
+        return profile.snapshot(stateRevision, domainEventRevision, clock.instant());
     }
 }

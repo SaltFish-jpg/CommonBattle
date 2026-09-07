@@ -6,6 +6,8 @@ import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.PlayerBag;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.player.event.BattleStageClearedEvent;
+import com.commonbattle.game.player.event.EventProgressRule;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -114,6 +116,39 @@ class ActivityServiceTest {
         service.increase(playerActivities, eligible, "open-day-2", 1);
 
         assertEquals(1, playerActivities.progress("open-day-2").value());
+    }
+
+    @Test
+    void counterActivityCanProgressFromPlayerDomainEventRule() {
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "battle-win-1",
+                ActivityType.COUNTER,
+                1,
+                Reward.of(new ItemStack("gem", 1)),
+                ActivitySchedule.alwaysOpen(),
+                ParticipationCondition.always(),
+                EventProgressRule.of(BattleStageClearedEvent.TYPE, "forest-1")
+        ));
+        ActivityService service = new ActivityService(activities, new BagService(items));
+        PlayerActivities playerActivities = new PlayerActivities();
+
+        int matched = service.onEvent(playerActivities, ActivityAccessContext.alwaysAllowed(), new BattleStageClearedEvent(
+                10001L,
+                "forest-1",
+                3,
+                true,
+                1,
+                false,
+                false,
+                "",
+                1
+        ));
+
+        assertEquals(1, matched);
+        assertEquals(1, playerActivities.progress("battle-win-1").value());
     }
 
     private static ActivityParticipant participant(int level) {

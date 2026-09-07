@@ -145,9 +145,17 @@ public final class AgentLifecycleManager {
         if (!location.isLocal(localServiceId)) {
             return AgentRoute.remote(location);
         }
-        return records.getOrDefault(identity, inactiveRecord(identity, location)).state() == AgentLifecycleState.ACTIVE
-                ? AgentRoute.local(location)
-                : AgentRoute.missing();
+        AgentLifecycleState state = records.getOrDefault(identity, inactiveRecord(identity, location)).state();
+        if (state == AgentLifecycleState.ACTIVE) {
+            return AgentRoute.local(location);
+        }
+        if (state == AgentLifecycleState.MIGRATING) {
+            return AgentRoute.missing("agent_migrating");
+        }
+        if (state == AgentLifecycleState.PASSIVATING) {
+            return AgentRoute.missing("agent_passivating");
+        }
+        return AgentRoute.missing("agent_inactive");
     }
 
     public Optional<AgentLifecycleRecord> record(AgentIdentity identity) {

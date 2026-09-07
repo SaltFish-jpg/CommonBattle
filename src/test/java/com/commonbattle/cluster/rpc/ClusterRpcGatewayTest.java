@@ -22,7 +22,10 @@ import com.commonbattle.example.cross.LeaveSceneResult;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.example.cross.scene.ProfileAwareSceneService;
 import com.commonbattle.example.cross.scene.MultiSmallSceneService;
+import com.commonbattle.example.cross.scene.SceneEnterTargetSelector;
+import com.commonbattle.example.cross.scene.SceneHostingMode;
 import com.commonbattle.example.cross.scene.ScenePlacement;
+import com.commonbattle.example.cross.scene.SceneRuntimeMetadata;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
@@ -36,6 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClusterRpcGatewayTest {
     @Test
@@ -193,6 +197,291 @@ class ClusterRpcGatewayTest {
     }
 
     @Test
+    void rpcGatewayRejectsInboundRequestAfterLocalDrainStarted() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+        registry.register(scene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+        sceneDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway sceneGateway = new ClusterRpcGateway(scene, sceneDirectory, topology, transport);
+        sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("accepted"));
+        sceneGateway.beginDrain();
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        FailureCallback callback = new FailureCallback();
+
+        gameGateway.call(request(), callback);
+
+        assertTrue(sceneGateway.isDraining());
+        assertTrue(callback.error.get().getMessage().contains("is draining"));
+        assertEquals(1, sceneGateway.stats().rejectedRequests());
+        assertEquals(0, gameGateway.stats().pendingRequests());
+    }
+
+    @Test
+    void rpcGatewayTurnsHandlerExceptionIntoFailureResponse() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+        registry.register(scene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+        sceneDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway sceneGateway = new ClusterRpcGateway(scene, sceneDirectory, topology, transport);
+        sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> {
+            throw new IllegalStateException("scene is full");
+        });
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        FailureCallback callback = new FailureCallback();
+
+        gameGateway.call(request(), callback);
+
+        assertTrue(callback.error.get().getMessage().contains("scene is full"));
+        assertEquals(0, gameGateway.stats().pendingRequests());
+        assertEquals(1, gameGateway.stats().failedRequests());
+    }
+
+    @Test
+    void sceneEnterSelectorRoutesLargeSceneBySceneId() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor worldOne = sceneDescriptor("scene-world-1", 9002, Map.of(
+                "scene.mode", SceneHostingMode.LARGE_SCENE_SHARD.name(),
+                "scene.id", "world-1",
+                SceneRuntimeMetadata.MAX_SHARD_PLAYERS, "7",
+                ServiceMetadata.LOAD_USED, "80",
+                ServiceMetadata.LOAD_CAPACITY, "100"
+        ));
+        ServiceDescriptor worldTwo = sceneDescriptor("scene-world-2", 9003, Map.of(
+                "scene.mode", SceneHostingMode.LARGE_SCENE_SHARD.name(),
+                "scene.id", "world-2",
+                SceneRuntimeMetadata.MAX_SHARD_PLAYERS, "1",
+                ServiceMetadata.LOAD_USED, "10",
+                ServiceMetadata.LOAD_CAPACITY, "100"
+        ));
+        registry.register(worldOne);
+        registry.register(worldTwo);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory worldOneDirectory = new ClusterDirectory(registry);
+        worldOneDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory worldTwoDirectory = new ClusterDirectory(registry);
+        worldTwoDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway worldOneGateway = new ClusterRpcGateway(worldOne, worldOneDirectory, topology, transport);
+        worldOneGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("world-1"));
+        ClusterRpcGateway worldTwoGateway = new ClusterRpcGateway(worldTwo, worldTwoDirectory, topology, transport);
+        worldTwoGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("world-2"));
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport)
+                .addTargetSelector(new SceneEnterTargetSelector());
+        RecordingCallback callback = new RecordingCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "world-1"),
+                String.class
+        ), callback);
+
+        assertEquals("world-1", callback.response.get());
+    }
+
+    @Test
+    void sceneEnterSelectorSkipsFullSmallSceneService() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor fullSmall = sceneDescriptor("scene-full", 9002, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "2",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "2",
+                SceneRuntimeMetadata.ACTIVE_PLAYERS, "20",
+                ServiceMetadata.LOAD_USED, "2",
+                ServiceMetadata.LOAD_CAPACITY, "2"
+        ));
+        ServiceDescriptor availableSmall = sceneDescriptor("scene-available", 9003, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "10",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "3",
+                SceneRuntimeMetadata.ACTIVE_PLAYERS, "30",
+                ServiceMetadata.LOAD_USED, "3",
+                ServiceMetadata.LOAD_CAPACITY, "10"
+        ));
+        registry.register(fullSmall);
+        registry.register(availableSmall);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory fullDirectory = new ClusterDirectory(registry);
+        fullDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory availableDirectory = new ClusterDirectory(registry);
+        availableDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway fullGateway = new ClusterRpcGateway(fullSmall, fullDirectory, topology, transport);
+        fullGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("full"));
+        ClusterRpcGateway availableGateway = new ClusterRpcGateway(availableSmall, availableDirectory, topology, transport);
+        availableGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("available"));
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport)
+                .addTargetSelector(new SceneEnterTargetSelector());
+        RecordingCallback callback = new RecordingCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "room-9"),
+                String.class
+        ), callback);
+
+        assertEquals("available", callback.response.get());
+    }
+
+    @Test
+    void sceneEnterSelectorSkipsCapacityDegradedSmallSceneService() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor degradedSmall = sceneDescriptor("scene-hot", 9002, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "10",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "5",
+                SceneRuntimeMetadata.ACTIVE_PLAYERS, "200",
+                SceneRuntimeMetadata.CAPACITY_STATUS, SceneRuntimeMetadata.CAPACITY_DEGRADED,
+                SceneRuntimeMetadata.CAPACITY_REASON, SceneRuntimeMetadata.ACTIVE_PLAYERS,
+                ServiceMetadata.LOAD_USED, "5",
+                ServiceMetadata.LOAD_CAPACITY, "10"
+        ));
+        ServiceDescriptor availableSmall = sceneDescriptor("scene-available", 9003, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "10",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "6",
+                SceneRuntimeMetadata.ACTIVE_PLAYERS, "300",
+                SceneRuntimeMetadata.CAPACITY_STATUS, SceneRuntimeMetadata.CAPACITY_OK,
+                ServiceMetadata.LOAD_USED, "6",
+                ServiceMetadata.LOAD_CAPACITY, "10"
+        ));
+        registry.register(degradedSmall);
+        registry.register(availableSmall);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory degradedDirectory = new ClusterDirectory(registry);
+        degradedDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory availableDirectory = new ClusterDirectory(registry);
+        availableDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway degradedGateway = new ClusterRpcGateway(degradedSmall, degradedDirectory, topology, transport);
+        degradedGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("degraded"));
+        ClusterRpcGateway availableGateway = new ClusterRpcGateway(availableSmall, availableDirectory, topology, transport);
+        availableGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("available"));
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport)
+                .addTargetSelector(new SceneEnterTargetSelector());
+        RecordingCallback callback = new RecordingCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "room-9"),
+                String.class
+        ), callback);
+
+        assertEquals("available", callback.response.get());
+    }
+
+    @Test
+    void sceneEnterSelectorRejectsDegradedLargeSceneWithoutSmallFallback() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor degradedWorld = sceneDescriptor("scene-world-1", 9002, Map.of(
+                "scene.mode", SceneHostingMode.LARGE_SCENE_SHARD.name(),
+                "scene.id", "world-1",
+                SceneRuntimeMetadata.MAX_SHARD_PLAYERS, "600",
+                SceneRuntimeMetadata.CAPACITY_STATUS, SceneRuntimeMetadata.CAPACITY_DEGRADED,
+                SceneRuntimeMetadata.CAPACITY_REASON, SceneRuntimeMetadata.MAX_SHARD_PLAYERS,
+                ServiceMetadata.LOAD_USED, "900",
+                ServiceMetadata.LOAD_CAPACITY, "1000"
+        ));
+        ServiceDescriptor smallScene = sceneDescriptor("scene-small", 9003, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "10",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "1",
+                SceneRuntimeMetadata.CAPACITY_STATUS, SceneRuntimeMetadata.CAPACITY_OK
+        ));
+        registry.register(degradedWorld);
+        registry.register(smallScene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport)
+                .addTargetSelector(new SceneEnterTargetSelector());
+        FailureCallback callback = new FailureCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "world-1"),
+                String.class
+        ), callback);
+
+        assertInstanceOf(RpcNoRoutableServiceException.class, callback.error.get());
+        assertEquals(0, gameGateway.stats().pendingRequests());
+        assertEquals(1, gameGateway.stats().failedRequests());
+    }
+
+    @Test
+    void sceneEnterSelectorRejectsWhenAllSmallSceneServicesAreFull() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor fullSmall = sceneDescriptor("scene-full", 9002, Map.of(
+                "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
+                "scene.capacity", "2",
+                SceneRuntimeMetadata.ACTIVE_SCENES, "2",
+                SceneRuntimeMetadata.ACTIVE_PLAYERS, "20",
+                ServiceMetadata.LOAD_USED, "2",
+                ServiceMetadata.LOAD_CAPACITY, "2"
+        ));
+        registry.register(fullSmall);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport)
+                .addTargetSelector(new SceneEnterTargetSelector());
+        FailureCallback callback = new FailureCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "room-9"),
+                String.class
+        ), callback);
+
+        assertInstanceOf(RpcNoRoutableServiceException.class, callback.error.get());
+        assertEquals(0, gameGateway.stats().pendingRequests());
+        assertEquals(1, gameGateway.stats().failedRequests());
+    }
+
+    @Test
     void rpcTargetResolutionRoundRobinsAcrossRoutableServices() {
         InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
         LocalClusterTransport transport = new LocalClusterTransport();
@@ -347,6 +636,15 @@ class ClusterRpcGatewayTest {
         );
     }
 
+    private static ServiceDescriptor sceneDescriptor(String node, int port, Map<String, String> metadata) {
+        return new ServiceDescriptor(
+                ServiceId.of(ServiceKind.SCENE, "r1", node),
+                new ServiceEndpoint("127.0.0.1", port),
+                Set.of(SceneOperations.ENTER),
+                metadata
+        );
+    }
+
     private static final class RecordingExecutor implements Executor {
         private final List<Runnable> commands = new ArrayList<>();
 
@@ -392,6 +690,20 @@ class ClusterRpcGatewayTest {
         @Override
         public void failure(Throwable error) {
             throw new AssertionError(error);
+        }
+    }
+
+    private static final class FailureCallback implements com.commonbattle.actor.rpc.RpcCallback<String> {
+        private final AtomicReference<Throwable> error = new AtomicReference<>();
+
+        @Override
+        public void success(String response) {
+            throw new AssertionError("unexpected success: " + response);
+        }
+
+        @Override
+        public void failure(Throwable error) {
+            this.error.set(error);
         }
     }
 }

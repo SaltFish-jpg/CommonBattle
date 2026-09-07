@@ -16,8 +16,8 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
+import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.profile.ProfileInterestView;
-import com.commonbattle.observability.DrainConfig;
 import com.commonbattle.observability.OpsHttpServer;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
@@ -48,11 +48,11 @@ final class BootOpsHttp {
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 clock,
                 actors,
-                new AgentLifecycleManager(local.id(), actors, new InMemoryAgentDirectory(), clock),
-                new InMemoryVersionedEventOutbox(clock),
+                lifecycles(registry, local, actors, clock),
+                outbox(registry, clock),
                 directory,
                 registry,
-                RuntimeHealthPolicy.defaults()
+                config.runtimeHealthPolicy()
         );
         return startServer(config, probe, clock, registry);
     }
@@ -163,7 +163,7 @@ final class BootOpsHttp {
                 eventCenters,
                 eventSubscriptions,
                 profileInterests,
-                RuntimeHealthPolicy.defaults()
+                config.runtimeHealthPolicy()
         );
         ServiceEndpoint endpoint = config.opsEndpoint();
         return startServer(config, probe, clock, new RuntimeHealthRegistry());
@@ -181,9 +181,26 @@ final class BootOpsHttp {
                 probe,
                 new ServerDrainController(probe, clock, duration -> Thread.sleep(duration.toMillis()),
                         registry.drainableComponents()),
-                DrainConfig.defaults()
+                config.drainConfig()
         );
         server.start();
         return server;
+    }
+
+    private static VersionedEventOutbox outbox(RuntimeHealthRegistry registry, Clock clock) {
+        return registry.outboxes().stream()
+                .findFirst()
+                .orElseGet(() -> new InMemoryVersionedEventOutbox(clock));
+    }
+
+    private static AgentLifecycleManager lifecycles(
+            RuntimeHealthRegistry registry,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            Clock clock
+    ) {
+        return registry.lifecycleManagers().stream()
+                .findFirst()
+                .orElseGet(() -> new AgentLifecycleManager(local.id(), actors, new InMemoryAgentDirectory(), clock));
     }
 }

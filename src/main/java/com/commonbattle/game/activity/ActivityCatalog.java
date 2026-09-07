@@ -2,6 +2,7 @@ package com.commonbattle.game.activity;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -21,5 +22,9 @@ public final class ActivityCatalog {
             throw new IllegalArgumentException("Unknown activity " + activityId);
         }
         return definition;
+    }
+
+    public Collection<ActivityDefinition> definitions() {
+        return java.util.List.copyOf(definitions.values());
     }
 }

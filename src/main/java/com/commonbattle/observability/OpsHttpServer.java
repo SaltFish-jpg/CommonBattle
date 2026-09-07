@@ -97,7 +97,8 @@ public final class OpsHttpServer implements AutoCloseable {
             int code = result.drained() ? 200 : 503;
             respondJson(exchange, code, "{\"drained\":" + result.drained()
                     + ",\"elapsedMillis\":" + result.elapsed().toMillis()
-                    + ",\"status\":\"" + result.lastSnapshot().status().name() + "\"}");
+                    + ",\"status\":\"" + result.lastSnapshot().status().name() + "\""
+                    + ",\"reason\":\"" + escape(result.reason()) + "\"}");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             respondJson(exchange, 503, "{\"drained\":false,\"reason\":\"interrupted\"}");
@@ -115,6 +116,10 @@ public final class OpsHttpServer implements AutoCloseable {
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(bytes);
         }
+    }
+
+    private static String escape(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     @Override

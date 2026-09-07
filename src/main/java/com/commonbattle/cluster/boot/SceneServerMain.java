@@ -32,6 +32,7 @@ import com.commonbattle.example.cross.scene.MultiSmallSceneService;
 import com.commonbattle.example.cross.scene.ProfileAwareSceneService;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
 import com.commonbattle.example.cross.scene.ScenePlacement;
+import com.commonbattle.example.cross.scene.SceneRuntimeMetadata;
 import com.commonbattle.example.cross.scene.SceneServiceStrategy;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigChangedEvent;
@@ -43,8 +44,14 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileInterestSubscription;
+import com.commonbattle.game.profile.ProfileRuntime;
+import com.commonbattle.game.profile.ProfileSnapshotReader;
 import com.commonbattle.game.profile.RemoteProfileSnapshotReader;
+import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
+import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -53,6 +60,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * Scene 服启动入口。
@@ -73,9 +81,11 @@ public final class SceneServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    AgentMigrationPayloadCodecs.registerTo(
-                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                    )
+                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                            AgentMigrationPayloadCodecs.registerTo(
+                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                            )
+                    ))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
@@ -85,18 +95,22 @@ public final class SceneServerMain {
                     new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
             RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
+            BootAgentMigrationTasks.configure(runtime, config, Clock.systemUTC());
             ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(local.id(), gateway);
             LocalProfileCache sceneProfileCache = new LocalProfileCache();
             ExecutorService profileRepairExecutor = runtime.add("profileRepairExecutor", Executors.newFixedThreadPool(
                     profileRepairWorkers(config),
                     new NamedThreadFactory("common-battle-profile-repair")
             ));
+            ProfileSnapshotReader profileSnapshotReader = new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1));
             ProfileInterestSubscription profileInterests = runtime.add("profileInterests", new ProfileInterestSubscription(
                     eventBus,
                     sceneProfileCache,
-                    new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1)),
+                    profileSnapshotReader,
                     profileRepairExecutor
             ));
+            ProfileRuntime profileRuntime = new ProfileRuntime(sceneProfileCache, profileInterests, profileSnapshotReader);
+            runtime.observe("profileRuntime", profileRuntime);
             DefaultAgentMessagePort profileMessagePort = runtime.add(
                     "profileMessagePort",
                     new DefaultAgentMessagePort(
@@ -109,10 +123,23 @@ public final class SceneServerMain {
             SceneProfileAwarenessAgent profileAwareness = new SceneProfileAwarenessAgent(
                     profileMessagePort,
                     actors.actor("scene-profile:" + local.id().node()),
-                    profileInterests,
-                    sceneProfileCache
+                    profileRuntime
             );
-            SceneServiceStrategy activeSceneService = new ProfileAwareSceneService(sceneService, profileAwareness);
+            ScenePlayerDomainEventAgent domainAwareness = new ScenePlayerDomainEventAgent(
+                    profileMessagePort,
+                    actors.actor("scene-domain-events:" + local.id().node())
+            );
+            SceneServiceStrategy activeSceneService = new ProfileAwareSceneService(
+                    sceneService,
+                    profileAwareness,
+                    domainAwareness
+            );
+            Supplier<ServiceDescriptor> publishedSceneDescriptor = () -> SceneRuntimeMetadata.apply(
+                    activeSceneService.descriptor(),
+                    activeSceneService.stats(),
+                    config.runtimeHealthPolicy()
+            );
+            runtime.observe("sceneRuntime", activeSceneService);
             gateway.handle(SceneOperations.ENTER, (request, responder) -> {
                 EnterSceneRequest payload = (EnterSceneRequest) request.payload();
                 ScenePlacement placement = activeSceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
@@ -132,7 +159,7 @@ public final class SceneServerMain {
                     "descriptorPublisher",
                     new ServiceDescriptorPublisher(
                             registry,
-                            activeSceneService::descriptor,
+                            publishedSceneDescriptor,
                             config.registryLeaseTtl(),
                             config.registryHeartbeatInterval()
                     )
@@ -155,6 +182,16 @@ public final class SceneServerMain {
                     configCache,
                     () -> java.util.Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision()),
                     new GameConfigEventReplayRepairer(configAutoRecovery, configCache::appliedEventRevision, configCache::stale)
+            );
+            eventSubscriptions.register(
+                    PlayerDomainVersionedEvent.TOPIC,
+                    event -> {
+                        if (!(event instanceof PlayerDomainVersionedEvent playerEvent)) {
+                            throw new IllegalArgumentException("event must be PlayerDomainVersionedEvent");
+                        }
+                        domainAwareness.onPlayerDomainEvent(playerEvent);
+                    },
+                    domainAwareness.processor()::knownRevisions
             );
             eventSubscriptions.start();
             GameConfigWarmupResult warmup = new GameConfigWarmupService(

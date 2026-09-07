@@ -18,6 +18,7 @@ import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
+import com.commonbattle.example.cross.scene.SceneEnterTargetSelector;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigChangedEvent;
@@ -26,9 +27,14 @@ import com.commonbattle.game.config.GameConfigWarmupResult;
 import com.commonbattle.game.config.GameConfigWarmupService;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
+import com.commonbattle.game.event.ReliableVersionedEventPublisher;
+import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.profile.InMemoryProfileSnapshotRepository;
 import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
 import com.commonbattle.game.profile.ProfileSnapshotRepository;
+import com.commonbattle.game.profile.ReliableProfileEventPublisher;
+import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.time.Clock;
 import java.util.List;
@@ -51,9 +57,11 @@ public final class GameServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    AgentMigrationPayloadCodecs.registerTo(
-                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                    )
+                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                            AgentMigrationPayloadCodecs.registerTo(
+                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                            )
+                    ))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
@@ -61,11 +69,13 @@ public final class GameServerMain {
             ));
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
                     new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+            gateway.addTargetSelector(new SceneEnterTargetSelector());
             ProfileSnapshotRepository profileSnapshots = new InMemoryProfileSnapshotRepository();
             new ProfileSnapshotEndpoint(profileSnapshots).bind(gateway);
             RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            BootAgentMigrationTasks.configure(runtime, config, Clock.systemUTC());
             node.start(
                     List.of(ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
                     config.registryLeaseTtl(),
@@ -80,6 +90,17 @@ public final class GameServerMain {
                     "eventSubscriptions",
                     new ClusterEventSubscriptionManager(eventBus)
             );
+            VersionedEventOutbox playerEventOutbox = BootEventOutbox.configure(runtime, config, Clock.systemUTC());
+            ReliableVersionedEventPublisher playerDomainEvents = new ReliableVersionedEventPublisher(
+                    playerEventOutbox,
+                    eventBus
+            );
+            ReliableProfileEventPublisher profileEvents = new ReliableProfileEventPublisher(
+                    profileSnapshots,
+                    playerEventOutbox,
+                    eventBus
+            );
+            BootEventOutbox.configureReplayScheduler(runtime, config, playerDomainEvents);
             RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
             GameConfigAutoRecovery configAutoRecovery = new GameConfigAutoRecovery(configRecovery);
             runtime.observe("configAutoRecovery", configAutoRecovery);
@@ -98,9 +119,22 @@ public final class GameServerMain {
             if (!warmup.ready()) {
                 throw new IllegalStateException("Game config warmup failed: " + warmup.message());
             }
+            BootGamePlayerRuntime playerRuntime = BootGamePlayerRuntime.configure(
+                    runtime,
+                    config,
+                    local,
+                    actors,
+                    gateway,
+                    configCache,
+                    profileSnapshots,
+                    playerDomainEvents,
+                    profileEvents,
+                    Clock.systemUTC()
+            );
             runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
             System.out.println("Game server started: " + local.id().wireName()
                     + ", config=" + configCache.active().version()
+                    + ", players=" + playerRuntime.agents().loadedAgents()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port()
                     + ", actors=" + actors);
             new CountDownLatch(1).await();

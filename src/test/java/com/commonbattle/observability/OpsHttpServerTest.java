@@ -110,7 +110,7 @@ class OpsHttpServerTest {
             HttpResult ready = get(server, "/ready");
 
             assertEquals(200, drain.statusCode());
-            assertEquals("{\"drained\":true,\"elapsedMillis\":0,\"status\":\"UP\"}", drain.body());
+            assertEquals("{\"drained\":true,\"elapsedMillis\":0,\"status\":\"UP\",\"reason\":\"\"}", drain.body());
             assertEquals(503, ready.statusCode());
             assertEquals("{\"status\":\"UP\",\"draining\":true}", ready.body());
         }

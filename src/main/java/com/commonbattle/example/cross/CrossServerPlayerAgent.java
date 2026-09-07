@@ -10,6 +10,9 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
+import com.commonbattle.cluster.rpc.RpcNoRoutableServiceException;
+
+import java.time.Duration;
 
 /**
  * 跨服玩家 Agent 示例。
@@ -24,6 +27,7 @@ public final class CrossServerPlayerAgent {
     private volatile String sceneId;
     private volatile String lastError;
     private volatile AgentDeliveryStatus lastDeliveryStatus;
+    private volatile EnterSceneFailure lastEnterSceneFailure;
 
     public CrossServerPlayerAgent(ActorSystem system, RpcGateway gateway, long playerId) {
         this.system = system;
@@ -52,29 +56,24 @@ public final class CrossServerPlayerAgent {
         return lastDeliveryStatus;
     }
 
-    public void enterScene(String targetSceneId) {
-        system.send(self, context -> {
-            status = AgentStatus.ENTERING_SCENE;
-            sceneId = targetSceneId;
-            lastError = null;
-            lastDeliveryStatus = null;
-            RpcRequest<EnterSceneResult> request = new RpcRequest<>(
-                    ServiceKind.SCENE.name(),
-                    SceneOperations.ENTER,
-                    new EnterSceneRequest(playerId, targetSceneId),
-                    EnterSceneResult.class
-            );
-            rpc.call(request, new ActorRpcHandler<>() {
-                @Override
-                public void success(com.commonbattle.actor.ActorContext ignored, EnterSceneResult result) {
-                    onEnterSceneSuccess(ignored, result);
-                }
+    public EnterSceneFailure lastEnterSceneFailure() {
+        return lastEnterSceneFailure;
+    }
 
-                @Override
-                public void failure(com.commonbattle.actor.ActorContext ignored, AgentDeliveryResult delivery, Throwable error) {
-                    onEnterSceneFailure(ignored, delivery, error);
-                }
-            });
+    public void enterScene(String targetSceneId) {
+        system.send(self, context -> beginEnterScene(targetSceneId));
+    }
+
+    public void retryEnterScene() {
+        system.send(self, context -> {
+            if (status != AgentStatus.FAILED
+                    || sceneId == null
+                    || lastEnterSceneFailure == null
+                    || !lastEnterSceneFailure.retryable()) {
+                lastError = "enter scene retry not allowed";
+                return;
+            }
+            beginEnterScene(sceneId);
         });
     }
 
@@ -87,6 +86,7 @@ public final class CrossServerPlayerAgent {
             status = AgentStatus.LEAVING_SCENE;
             lastError = null;
             lastDeliveryStatus = null;
+            lastEnterSceneFailure = null;
             RpcRequest<LeaveSceneResult> request = new RpcRequest<>(
                     ServiceKind.SCENE.name(),
                     SceneOperations.LEAVE,
@@ -107,15 +107,42 @@ public final class CrossServerPlayerAgent {
         });
     }
 
+    private void beginEnterScene(String targetSceneId) {
+        status = AgentStatus.ENTERING_SCENE;
+        sceneId = targetSceneId;
+        lastError = null;
+        lastDeliveryStatus = null;
+        lastEnterSceneFailure = null;
+        RpcRequest<EnterSceneResult> request = new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(playerId, targetSceneId),
+                EnterSceneResult.class
+        );
+        rpc.call(request, new ActorRpcHandler<>() {
+            @Override
+            public void success(com.commonbattle.actor.ActorContext ignored, EnterSceneResult result) {
+                onEnterSceneSuccess(ignored, result);
+            }
+
+            @Override
+            public void failure(com.commonbattle.actor.ActorContext ignored, AgentDeliveryResult delivery, Throwable error) {
+                onEnterSceneFailure(ignored, delivery, error);
+            }
+        });
+    }
+
     private void onEnterSceneSuccess(Object ignored, EnterSceneResult result) {
         status = AgentStatus.IN_SCENE;
         sceneId = result.sceneId();
+        lastEnterSceneFailure = null;
     }
 
     private void onEnterSceneFailure(Object ignored, AgentDeliveryResult delivery, Throwable error) {
         status = AgentStatus.FAILED;
         lastDeliveryStatus = delivery.status();
         lastError = delivery.reason();
+        lastEnterSceneFailure = enterSceneFailure(delivery, error);
     }
 
     private void onLeaveSceneSuccess(Object ignored, LeaveSceneResult result) {
@@ -132,5 +159,20 @@ public final class CrossServerPlayerAgent {
         status = AgentStatus.FAILED;
         lastDeliveryStatus = delivery.status();
         lastError = delivery.reason();
+    }
+
+    private EnterSceneFailure enterSceneFailure(AgentDeliveryResult delivery, Throwable error) {
+        EnterSceneFailureCode code = switch (delivery.status()) {
+            case TIMEOUT -> EnterSceneFailureCode.SCENE_TIMEOUT;
+            case CIRCUIT_OPEN -> EnterSceneFailureCode.SCENE_BUSY;
+            case REJECTED -> EnterSceneFailureCode.RPC_REJECTED;
+            case REMOTE_UNAVAILABLE -> error instanceof RpcNoRoutableServiceException
+                    ? EnterSceneFailureCode.SCENE_BUSY
+                    : EnterSceneFailureCode.SCENE_UNAVAILABLE;
+            default -> EnterSceneFailureCode.UNKNOWN;
+        };
+        boolean retryable = delivery.retryable() || code == EnterSceneFailureCode.RPC_REJECTED;
+        Duration retryAfter = delivery.retryAfter().isZero() && retryable ? Duration.ofSeconds(1) : delivery.retryAfter();
+        return new EnterSceneFailure(code, delivery.reason(), retryable, retryAfter);
     }
 }

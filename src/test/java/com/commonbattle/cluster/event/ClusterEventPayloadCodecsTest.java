@@ -9,9 +9,11 @@ import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivitySchedule;
 import com.commonbattle.game.activity.ActivityType;
 import com.commonbattle.game.activity.ParticipationCondition;
+import com.commonbattle.game.achievement.AchievementDefinition;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.config.GameConfigChangeType;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigPackage;
@@ -28,6 +30,11 @@ import com.commonbattle.game.profile.ProfileField;
 import com.commonbattle.game.profile.ProfileSnapshotOperations;
 import com.commonbattle.game.profile.ProfileSnapshotRequest;
 import com.commonbattle.game.profile.ProfileSnapshotResponse;
+import com.commonbattle.game.player.event.BattleStageClearedEvent;
+import com.commonbattle.game.player.event.EventProgressRule;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.task.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -92,7 +99,43 @@ class ClusterEventPayloadCodecsTest {
                                 1,
                                 Reward.of(new ItemStack("gold", 10)),
                                 ActivitySchedule.openServerWindow(Duration.ofDays(1), Duration.ofDays(3)),
-                                ParticipationCondition.minLevel(5)
+                                ParticipationCondition.minLevel(5),
+                                EventProgressRule.of(BattleStageClearedEvent.TYPE, "forest-1")
+                        )),
+                        List.of(new ShopItemDefinition(
+                                "growth_pack",
+                                new ItemStack("gold", 50),
+                                Reward.of(new ItemStack("exp_potion", 1)),
+                                2,
+                                1,
+                                ShopItemDefinition.UNLIMITED_STOCK
+                        )),
+                        List.of(new BattleStageDefinition(
+                                "forest-1",
+                                100,
+                                40,
+                                70,
+                                8,
+                                5,
+                                Reward.of(new ItemStack("gold", 30)),
+                                "open-day-2",
+                                1,
+                                Reward.of(new ItemStack("exp_potion", 2)),
+                                3
+                        )),
+                        List.of(new TaskDefinition(
+                                "task-clear-forest",
+                                BattleStageClearedEvent.TYPE,
+                                "forest-1",
+                                1,
+                                Reward.of(new ItemStack("gold", 5))
+                        )),
+                        List.of(new AchievementDefinition(
+                                "achievement-clear-forest",
+                                BattleStageClearedEvent.TYPE,
+                                "forest-1",
+                                1,
+                                Reward.of(new ItemStack("gold", 15))
                         )),
                         new GrowthTuning("exp_potion", 80, 100),
                         Instant.parse("2026-09-01T00:00:00Z")
@@ -116,6 +159,49 @@ class ClusterEventPayloadCodecsTest {
         assertEquals(12, decodedEvent.config().version());
         assertEquals(25, decodedEvent.grayPercent());
         assertEquals("open-day-2", decodedEvent.config().activities().getFirst().activityId());
+        assertEquals(BattleStageClearedEvent.TYPE,
+                decodedEvent.config().activities().getFirst().progressRule().eventType());
+        assertEquals("growth_pack", decodedEvent.config().shops().getFirst().sku());
+        assertEquals("forest-1", decodedEvent.config().battles().getFirst().stageId());
+        assertEquals(2, decodedEvent.config().battles().getFirst().firstClearReward().items().getFirst().count());
+        assertEquals(3, decodedEvent.config().battles().getFirst().sweepRequiredStars());
+        assertEquals("task-clear-forest", decodedEvent.config().tasks().getFirst().taskId());
+        assertEquals(BattleStageClearedEvent.TYPE,
+                decodedEvent.config().tasks().getFirst().progressRule().eventType());
+        assertEquals("achievement-clear-forest", decodedEvent.config().achievements().getFirst().achievementId());
+        assertEquals(BattleStageClearedEvent.TYPE,
+                decodedEvent.config().achievements().getFirst().progressRule().eventType());
+    }
+
+    @Test
+    void playerDomainEventCanPassThroughClusterEnvelope() {
+        PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        PlayerDomainVersionedEvent event = new PlayerDomainVersionedEvent(
+                10001L,
+                BattleStageClearedEvent.TYPE,
+                "forest-1",
+                1,
+                9,
+                Instant.parse("2026-09-01T00:00:00Z")
+        );
+        ClusterEnvelope envelope = new ClusterEnvelope(
+                21,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.CENTER, "r1", "center-1"),
+                ClusterEventOperations.PUBLISH,
+                new EventPublishRequest(event)
+        );
+
+        ClusterEnvelope decoded = codec.decode(codec.encode(envelope));
+
+        EventPublishRequest request = assertInstanceOf(EventPublishRequest.class, decoded.payload());
+        PlayerDomainVersionedEvent decodedEvent = assertInstanceOf(PlayerDomainVersionedEvent.class, request.event());
+        assertEquals(PlayerDomainVersionedEvent.TOPIC, decodedEvent.topic());
+        assertEquals(PlayerDomainVersionedEvent.ownerKey(10001L), decodedEvent.ownerKey());
+        assertEquals(BattleStageClearedEvent.TYPE, decodedEvent.eventType());
+        assertEquals("forest-1", decodedEvent.subject());
+        assertEquals(9, decodedEvent.revision());
     }
 
     @Test
@@ -261,6 +347,39 @@ class ClusterEventPayloadCodecsTest {
                         ActivityType.LOGIN,
                         1,
                         Reward.of(new ItemStack("gold", 100), new ItemStack("exp_potion", 1))
+                )),
+                List.of(new ShopItemDefinition(
+                        "growth_pack",
+                        new ItemStack("gold", 50),
+                        Reward.of(new ItemStack("exp_potion", 1)),
+                        2,
+                        1,
+                        ShopItemDefinition.UNLIMITED_STOCK
+                )),
+                List.of(new BattleStageDefinition(
+                        "forest-1",
+                        100,
+                        40,
+                        70,
+                        8,
+                        5,
+                        Reward.of(new ItemStack("gold", 30)),
+                        "",
+                        0
+                )),
+                List.of(new TaskDefinition(
+                        "task-clear-forest",
+                        BattleStageClearedEvent.TYPE,
+                        "forest-1",
+                        1,
+                        Reward.of(new ItemStack("gold", 5))
+                )),
+                List.of(new AchievementDefinition(
+                        "achievement-clear-forest",
+                        BattleStageClearedEvent.TYPE,
+                        "forest-1",
+                        1,
+                        Reward.of(new ItemStack("gold", 15))
                 )),
                 new GrowthTuning("exp_potion", expPerItem, 100),
                 Instant.parse("2026-09-01T00:00:00Z")

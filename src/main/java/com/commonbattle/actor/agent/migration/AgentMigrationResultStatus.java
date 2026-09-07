@@ -1,0 +1,15 @@
+package com.commonbattle.actor.agent.migration;
+
+/**
+ * Agent 迁移最终结果状态。
+ */
+public enum AgentMigrationResultStatus {
+    TARGET_ACCEPTED,
+    SOURCE_MOVE_FAILED,
+    COMPLETION_REJECTED_ROLLED_BACK,
+    COMPLETION_REJECTED_ROLLBACK_FAILED,
+    TARGET_REJECTED_ROLLED_BACK,
+    TARGET_REJECTED_ROLLBACK_FAILED,
+    TARGET_FAILED_ROLLED_BACK,
+    TARGET_FAILED_ROLLBACK_FAILED
+}

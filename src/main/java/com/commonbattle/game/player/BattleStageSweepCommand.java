@@ -1,0 +1,41 @@
+package com.commonbattle.game.player;
+
+import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.player.event.BattleStageClearedEvent;
+
+import java.util.Objects;
+
+/**
+ * 玩家扫荡 PVE 关卡的业务命令。
+ */
+public record BattleStageSweepCommand(String settlementId, String stageId) implements PlayerBusinessCommand<BattleSettlementResult> {
+    public BattleStageSweepCommand(String stageId) {
+        this("", stageId);
+    }
+
+    public BattleStageSweepCommand {
+        settlementId = Objects.requireNonNullElse(settlementId, "");
+        Objects.requireNonNull(stageId, "stageId");
+        if (stageId.isBlank()) {
+            throw new IllegalArgumentException("stageId must not be blank");
+        }
+    }
+
+    @Override
+    public String operation() {
+        return PlayerBusinessOperations.BATTLE_SWEEP_STAGE;
+    }
+
+    @Override
+    public BattleSettlementResult execute(PlayerGameExecution execution) {
+        BattleSettlementResult result = execution.runtime().requireBattleService().sweep(
+                execution.profile().bag(),
+                execution.profile().battle(),
+                execution.activityAccess().now(),
+                settlementId,
+                stageId
+        );
+        execution.publish(BattleStageClearedEvent.from(execution.profile().playerId(), result));
+        return result;
+    }
+}

@@ -1,6 +1,7 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.runtime.DrainableComponent;
+import com.commonbattle.runtime.DrainPhase;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -40,8 +41,17 @@ public final class ServerDrainController {
 
     public DrainResult awaitDrained(DrainConfig config) throws InterruptedException {
         Objects.requireNonNull(config, "config");
-        drainableComponents.forEach(DrainableComponent::beginDrain);
         long start = clock.millis();
+        try {
+            beginDrain(DrainPhase.EXTERNAL_ADVERTISEMENT);
+            if (!config.propagationDelay().isZero()) {
+                sleeper.sleep(config.propagationDelay());
+            }
+            beginDrain(DrainPhase.LOCAL_INGRESS);
+        } catch (RuntimeException e) {
+            return new DrainResult(false, Duration.ofMillis(clock.millis() - start), probe.snapshot(),
+                    "begin_drain_failed:" + e.getClass().getSimpleName());
+        }
         RuntimeHealthSnapshot snapshot = probe.snapshot();
         while (!drained(snapshot)) {
             long elapsed = clock.millis() - start;
@@ -54,10 +64,18 @@ public final class ServerDrainController {
         return new DrainResult(true, Duration.ofMillis(clock.millis() - start), snapshot);
     }
 
+    private void beginDrain(DrainPhase phase) {
+        drainableComponents.stream()
+                .filter(component -> component.phase() == phase)
+                .forEach(DrainableComponent::beginDrain);
+    }
+
     private boolean drained(RuntimeHealthSnapshot snapshot) {
         return snapshot.actorSystem().queuedTasks() == 0
                 && snapshot.rpc().pendingRequests() == 0
-                && snapshot.outbox().pendingEvents() == 0;
+                && snapshot.outbox().pendingEvents() == 0
+                && snapshot.playerAgents().drainPending() == 0
+                && snapshot.playerAgents().drainFailedSaves() == 0;
     }
 
     /**

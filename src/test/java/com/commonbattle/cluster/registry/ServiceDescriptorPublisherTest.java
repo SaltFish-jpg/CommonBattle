@@ -6,6 +6,7 @@ import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
+import com.commonbattle.runtime.DrainPhase;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -65,6 +66,7 @@ class ServiceDescriptorPublisherTest {
 
             assertTrue(publisher.isDraining());
             assertTrue(registry.list(ServiceKind.SCENE).getFirst().draining());
+            assertEquals(DrainPhase.EXTERNAL_ADVERTISEMENT, publisher.phase());
 
             publisher.resumeAccepting();
 

@@ -12,12 +12,19 @@ import com.commonbattle.game.activity.ActivityCatalog;
 import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.achievement.AchievementProgressSnapshot;
+import com.commonbattle.game.achievement.PlayerAchievementsSnapshot;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.battle.BattleSettlementSnapshot;
+import com.commonbattle.game.battle.BattleSettlementStatus;
+import com.commonbattle.game.battle.PlayerBattleSnapshot;
 import com.commonbattle.game.growth.GrowthService;
+import com.commonbattle.game.shop.PlayerShopSnapshot;
+import com.commonbattle.game.task.PlayerTasksSnapshot;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -77,6 +84,7 @@ class PlayerGameAgentPersistenceTest {
 
         assertFalse(recovery.created());
         assertEquals(8, saved.get().revision());
+        assertEquals(recovery.snapshot().eventRevision(), saved.get().eventRevision());
         assertEquals(10001L, recovery.profile().playerId());
         assertEquals(Instant.parse("2026-08-01T00:00:00Z"), recovery.profile().createdAt());
     }
@@ -90,6 +98,91 @@ class PlayerGameAgentPersistenceTest {
         assertEquals(10002L, recovery.profile().playerId());
         assertEquals(0, recovery.snapshot().revision());
     }
+
+    @Test
+    void restoreIncludesShopPurchaseState() {
+        PlayerStateSnapshot snapshot = new PlayerStateSnapshot(
+                10001L,
+                Instant.parse("2026-08-01T00:00:00Z"),
+                new com.commonbattle.game.bag.BagSnapshot(java.util.Map.of()),
+                new com.commonbattle.game.activity.PlayerActivitiesSnapshot(java.util.Map.of()),
+                new com.commonbattle.game.growth.GrowthSnapshot(1, 0),
+                new PlayerShopSnapshot(
+                        java.util.Map.of("growth_pack", 2),
+                        java.util.Map.of("growth_pack@2026-09-01", 1)
+                ),
+                7,
+                CLOCK.instant()
+        );
+
+        PlayerProfile profile = PlayerProfile.restore(snapshot);
+
+        assertEquals(2, profile.shop().lifetimePurchased("growth_pack"));
+        assertEquals(1, profile.shop().dailyPurchased("growth_pack", java.time.LocalDate.of(2026, 9, 1)));
+    }
+
+    @Test
+    void restoreIncludesBattleSettlementState() {
+        PlayerStateSnapshot snapshot = new PlayerStateSnapshot(
+                10001L,
+                Instant.parse("2026-08-01T00:00:00Z"),
+                new com.commonbattle.game.bag.BagSnapshot(java.util.Map.of("gold", 30)),
+                new com.commonbattle.game.activity.PlayerActivitiesSnapshot(java.util.Map.of()),
+                new com.commonbattle.game.growth.GrowthSnapshot(1, 0),
+                PlayerShopSnapshot.empty(),
+                new PlayerBattleSnapshot(java.util.Map.of(
+                        "settle-10001-1",
+                        new BattleSettlementSnapshot(
+                                "settle-10001-1",
+                                "forest-1",
+                                BattleSettlementStatus.VICTORY,
+                                2,
+                                92,
+                                0,
+                                new com.commonbattle.game.bag.BagResult(java.util.List.of(
+                                        new com.commonbattle.game.bag.BagChange("gold", 0, 30)
+                                )),
+                                "battle-win-1",
+                                1
+                        )
+                )),
+                7,
+                CLOCK.instant()
+        );
+
+        PlayerProfile profile = PlayerProfile.restore(snapshot);
+
+        var replay = profile.battle().replay("settle-10001-1", "forest-1").orElseThrow();
+        assertTrue(replay.replayed());
+        assertEquals(BattleSettlementStatus.VICTORY, replay.status());
+        assertEquals(30, replay.rewardResult().changes().getFirst().after());
+    }
+
+    @Test
+    void restoreIncludesAchievementProgressState() {
+        PlayerStateSnapshot snapshot = new PlayerStateSnapshot(
+                10001L,
+                Instant.parse("2026-08-01T00:00:00Z"),
+                new com.commonbattle.game.bag.BagSnapshot(java.util.Map.of()),
+                new com.commonbattle.game.activity.PlayerActivitiesSnapshot(java.util.Map.of()),
+                new com.commonbattle.game.growth.GrowthSnapshot(1, 0),
+                PlayerShopSnapshot.empty(),
+                PlayerBattleSnapshot.empty(),
+                PlayerTasksSnapshot.empty(),
+                new PlayerAchievementsSnapshot(java.util.Map.of(
+                        "achievement-clear-forest",
+                        new AchievementProgressSnapshot(1, true)
+                )),
+                7,
+                CLOCK.instant()
+        );
+
+        PlayerProfile profile = PlayerProfile.restore(snapshot);
+
+        assertEquals(1, profile.achievements().progress("achievement-clear-forest").value());
+        assertTrue(profile.achievements().progress("achievement-clear-forest").claimed());
+    }
+
 
     @Test
     void migrationExportReturnsSnapshotWithoutWritingRepository() {
@@ -128,6 +221,7 @@ class PlayerGameAgentPersistenceTest {
             handle.cancel();
 
             assertEquals(1, saved.get().revision());
+            assertEquals(0, saved.get().eventRevision());
             assertEquals(saved.get(), repository.load(10001L).orElseThrow());
         }
     }

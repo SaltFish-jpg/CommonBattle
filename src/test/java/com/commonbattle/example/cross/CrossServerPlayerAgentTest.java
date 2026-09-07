@@ -7,6 +7,7 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.rpc.RpcCircuitOpenException;
+import com.commonbattle.cluster.rpc.RpcNoRoutableServiceException;
 import com.commonbattle.cluster.rpc.RpcTimeoutException;
 import org.junit.jupiter.api.Test;
 
@@ -16,6 +17,7 @@ import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CrossServerPlayerAgentTest {
     @Test
@@ -76,6 +78,8 @@ class CrossServerPlayerAgentTest {
 
         assertEquals(AgentStatus.FAILED, agent.status());
         assertEquals(AgentDeliveryStatus.TIMEOUT, agent.lastDeliveryStatus());
+        assertEquals(EnterSceneFailureCode.SCENE_TIMEOUT, agent.lastEnterSceneFailure().code());
+        assertTrue(agent.lastEnterSceneFailure().retryable());
     }
 
     @Test
@@ -92,6 +96,50 @@ class CrossServerPlayerAgentTest {
 
         assertEquals(AgentStatus.FAILED, agent.status());
         assertEquals(AgentDeliveryStatus.CIRCUIT_OPEN, agent.lastDeliveryStatus());
+        assertEquals(EnterSceneFailureCode.SCENE_BUSY, agent.lastEnterSceneFailure().code());
+        assertTrue(agent.lastEnterSceneFailure().retryAfter().toMillis() > 0);
+    }
+
+    @Test
+    void noRoutableSceneBecomesRetryableBusinessBusyFailure() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+
+        agent.enterScene("scene-9");
+        executor.runNext();
+        gateway.failure(new RpcNoRoutableServiceException(gateway.request));
+        executor.runNext();
+
+        assertEquals(AgentStatus.FAILED, agent.status());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, agent.lastDeliveryStatus());
+        assertEquals(EnterSceneFailureCode.SCENE_BUSY, agent.lastEnterSceneFailure().code());
+        assertTrue(agent.lastEnterSceneFailure().retryable());
+        assertEquals(1000, agent.lastEnterSceneFailure().retryAfter().toMillis());
+    }
+
+    @Test
+    void retryEnterSceneReissuesRequestOnlyAfterRetryableEnterFailure() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        RecordingGateway gateway = new RecordingGateway();
+        CrossServerPlayerAgent agent = new CrossServerPlayerAgent(system, gateway, 10001L);
+
+        agent.enterScene("scene-9");
+        executor.runNext();
+        gateway.failure(new RpcNoRoutableServiceException(gateway.request));
+        executor.runNext();
+
+        assertEquals(1, gateway.calls);
+
+        agent.retryEnterScene();
+        executor.runNext();
+
+        assertEquals(AgentStatus.ENTERING_SCENE, agent.status());
+        assertEquals(2, gateway.calls);
+        EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, gateway.request.payload());
+        assertEquals("scene-9", payload.sceneId());
     }
 
     @Test
@@ -165,10 +213,12 @@ class CrossServerPlayerAgentTest {
     private static final class RecordingGateway implements RpcGateway {
         private RpcRequest<?> request;
         private RpcCallback<Object> callback;
+        private int calls;
 
         @Override
         @SuppressWarnings("unchecked")
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            calls++;
             this.request = request;
             this.callback = (RpcCallback<Object>) callback;
         }

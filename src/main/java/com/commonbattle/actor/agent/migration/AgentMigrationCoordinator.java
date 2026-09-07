@@ -6,8 +6,10 @@ import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentMigrationCompletion;
 
+import java.time.Clock;
 import java.util.Objects;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -17,63 +19,265 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class AgentMigrationCoordinator {
     private final AgentLifecycleManager sourceLifecycles;
     private final AgentDirectory directory;
-    private final RemoteAgentMigrationClient client;
+    private final AgentMigrationClient client;
     private final Executor completionExecutor;
+    private final AgentMigrationPolicy policy;
+    private final AgentMigrationTaskStore taskStore;
+    private final AgentMigrationTaskIdGenerator taskIds;
+    private final Clock clock;
+    private final AgentMigrationCoordinatorMetrics metrics = new AgentMigrationCoordinatorMetrics();
 
     public AgentMigrationCoordinator(
             AgentLifecycleManager sourceLifecycles,
             AgentDirectory directory,
-            RemoteAgentMigrationClient client,
+            AgentMigrationClient client,
             Executor completionExecutor
+    ) {
+        this(sourceLifecycles, directory, client, completionExecutor, AgentMigrationPolicy.defaults());
+    }
+
+    public AgentMigrationCoordinator(
+            AgentLifecycleManager sourceLifecycles,
+            AgentDirectory directory,
+            AgentMigrationClient client,
+            Executor completionExecutor,
+            AgentMigrationPolicy policy
+    ) {
+        this(sourceLifecycles, directory, client, completionExecutor, policy,
+                AgentMigrationTaskStore.none(), AgentMigrationTaskIdGenerator.defaultGenerator(), Clock.systemUTC());
+    }
+
+    public AgentMigrationCoordinator(
+            AgentLifecycleManager sourceLifecycles,
+            AgentDirectory directory,
+            AgentMigrationClient client,
+            Executor completionExecutor,
+            AgentMigrationPolicy policy,
+            AgentMigrationTaskStore taskStore,
+            AgentMigrationTaskIdGenerator taskIds,
+            Clock clock
     ) {
         this.sourceLifecycles = Objects.requireNonNull(sourceLifecycles, "sourceLifecycles");
         this.directory = Objects.requireNonNull(directory, "directory");
         this.client = Objects.requireNonNull(client, "client");
         this.completionExecutor = Objects.requireNonNull(completionExecutor, "completionExecutor");
+        this.policy = Objects.requireNonNull(policy, "policy");
+        this.taskStore = Objects.requireNonNull(taskStore, "taskStore");
+        this.taskIds = Objects.requireNonNull(taskIds, "taskIds");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     public boolean migrate(AgentIdentity identity, AgentLocation target, AgentMigrationStatePacker packer) {
+        return migrate(identity, target, packer, AgentMigrationResultCallback.ignore());
+    }
+
+    public boolean migrate(
+            AgentIdentity identity,
+            AgentLocation target,
+            AgentMigrationStatePacker packer,
+            AgentMigrationResultCallback callback
+    ) {
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(packer, "packer");
-        AtomicReference<AgentMigrationSnapshot> snapshot = new AtomicReference<>();
+        Objects.requireNonNull(callback, "callback");
+        AgentLocation source = sourceLifecycles.record(identity).orElseThrow().location();
+        AtomicReference<AgentMigrationTask> task = new AtomicReference<>();
+        metrics.initiated();
         return sourceLifecycles.migrate(
                 identity,
                 target,
-                context -> snapshot.set(Objects.requireNonNull(packer.pack(identity, target, context), "snapshot")),
-                completion -> onSourceMoved(completion, snapshot.get())
+                context -> {
+                    AgentMigrationSnapshot snapshot = Objects.requireNonNull(
+                            packer.pack(identity, target, context),
+                            "snapshot"
+                    );
+                    AgentMigrationTask prepared = preparedTask(identity, source, target, snapshot);
+                    task.set(prepared);
+                    taskStore.save(prepared);
+                },
+                completion -> onSourceMoved(completion, task.get(), callback)
         );
     }
 
-    private void onSourceMoved(AgentMigrationCompletion completion, AgentMigrationSnapshot snapshot) {
+    public AgentMigrationCoordinatorStats stats() {
+        return metrics.snapshot();
+    }
+
+    private void onSourceMoved(
+            AgentMigrationCompletion completion,
+            AgentMigrationTask task,
+            AgentMigrationResultCallback callback
+    ) {
         if (!completion.moved()) {
+            metrics.sourceMoveFailed();
+            submitResult(callback, result(
+                    completion,
+                    AgentMigrationResultStatus.SOURCE_MOVE_FAILED,
+                    completion.failedCause().map(Throwable::getMessage).orElse("")
+            ));
             return;
         }
-        completionExecutor.execute(() -> acceptTargetOrRollback(completion, snapshot));
-    }
-
-    private void acceptTargetOrRollback(AgentMigrationCompletion completion, AgentMigrationSnapshot snapshot) {
+        metrics.sourceMoved();
+        AgentMigrationTask moved = task == null ? movedTask(completion) : task.withStatus(
+                AgentMigrationTaskStatus.MOVED,
+                "",
+                clock.instant()
+        );
+        taskStore.mark(moved.taskId(), AgentMigrationTaskStatus.MOVED, "", moved.updatedAt());
         try {
-            AgentMigrationAcceptResponse response = client.accept(
-                    completion.target().serviceId(),
-                    new AgentMigrationAcceptRequest(
-                            completion.identity(),
-                            completion.target().actorRef().id(),
-                            snapshot.stateType(),
-                            snapshot.stateBytes()
-                    )
-            );
-            if (!response.accepted()) {
-                rollback(completion);
-            }
-        } catch (RuntimeException e) {
-            rollback(completion);
+            completionExecutor.execute(() -> acceptTargetOrRollback(moved, callback));
+        } catch (RejectedExecutionException e) {
+            metrics.completionRejected();
+            boolean rolledBack = rollback(moved);
+            callback.completed(result(
+                    moved,
+                    rolledBack
+                            ? AgentMigrationResultStatus.COMPLETION_REJECTED_ROLLED_BACK
+                            : AgentMigrationResultStatus.COMPLETION_REJECTED_ROLLBACK_FAILED,
+                    e.getMessage()
+            ));
         }
     }
 
-    private void rollback(AgentMigrationCompletion completion) {
-        if (directory.move(completion.identity(), completion.target(), completion.source())) {
-            sourceLifecycles.resumeAfterMigrationRollback(completion.identity(), completion.source());
+    private void acceptTargetOrRollback(
+            AgentMigrationTask task,
+            AgentMigrationResultCallback callback
+    ) {
+        AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                task.identity(),
+                task.target().actorRef().id(),
+                task.snapshot().stateType(),
+                task.snapshot().stateBytes()
+        );
+        try {
+            AgentMigrationAcceptResponse response = acceptWithRetry(task, request);
+            if (!response.accepted()) {
+                metrics.targetRejected();
+                boolean rolledBack = rollback(task);
+                callback.completed(result(
+                        task,
+                        rolledBack
+                                ? AgentMigrationResultStatus.TARGET_REJECTED_ROLLED_BACK
+                                : AgentMigrationResultStatus.TARGET_REJECTED_ROLLBACK_FAILED,
+                        response.reason()
+                ));
+                return;
+            }
+            metrics.targetAccepted();
+            taskStore.mark(task.taskId(), AgentMigrationTaskStatus.TARGET_ACCEPTED, "", clock.instant());
+            callback.completed(result(task, AgentMigrationResultStatus.TARGET_ACCEPTED, ""));
+        } catch (RuntimeException e) {
+            metrics.targetFailed();
+            boolean rolledBack = rollback(task);
+            callback.completed(result(
+                    task,
+                    rolledBack
+                            ? AgentMigrationResultStatus.TARGET_FAILED_ROLLED_BACK
+                            : AgentMigrationResultStatus.TARGET_FAILED_ROLLBACK_FAILED,
+                    e.getMessage()
+            ));
         }
+    }
+
+    private AgentMigrationAcceptResponse acceptWithRetry(
+            AgentMigrationTask task,
+            AgentMigrationAcceptRequest request
+    ) {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= policy.targetAcceptAttempts(); attempt++) {
+            try {
+                return client.accept(task.target().serviceId(), request);
+            } catch (RuntimeException e) {
+                last = e;
+                if (attempt < policy.targetAcceptAttempts()) {
+                    metrics.targetRetry();
+                }
+            }
+        }
+        throw last == null ? new IllegalStateException("Agent migration target accept failed") : last;
+    }
+
+    private boolean rollback(AgentMigrationTask task) {
+        if (directory.move(task.identity(), task.target(), task.source())) {
+            sourceLifecycles.resumeAfterMigrationRollback(task.identity(), task.source());
+            metrics.rollbackSucceeded();
+            taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLED_BACK, "", clock.instant());
+            return true;
+        } else {
+            metrics.rollbackFailed();
+            taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLBACK_FAILED, "directory_move_failed",
+                    clock.instant());
+            return false;
+        }
+    }
+
+    private AgentMigrationTask preparedTask(
+            AgentIdentity identity,
+            AgentLocation source,
+            AgentLocation target,
+            AgentMigrationSnapshot snapshot
+    ) {
+        java.time.Instant now = clock.instant();
+        return new AgentMigrationTask(
+                taskIds.nextId(identity, source, target, now),
+                identity,
+                source,
+                target,
+                snapshot,
+                AgentMigrationTaskStatus.PREPARED,
+                "",
+                now
+        );
+    }
+
+    private AgentMigrationTask movedTask(AgentMigrationCompletion completion) {
+        java.time.Instant now = clock.instant();
+        return new AgentMigrationTask(
+                taskIds.nextId(completion.identity(), completion.source(), completion.target(), now),
+                completion.identity(),
+                completion.source(),
+                completion.target(),
+                new AgentMigrationSnapshot("unknown", new byte[0]),
+                AgentMigrationTaskStatus.MOVED,
+                "missing_prepared_task",
+                now
+        );
+    }
+
+    private void submitResult(AgentMigrationResultCallback callback, AgentMigrationResult result) {
+        try {
+            completionExecutor.execute(() -> callback.completed(result));
+        } catch (RejectedExecutionException ignored) {
+            callback.completed(result);
+        }
+    }
+
+    private static AgentMigrationResult result(
+            AgentMigrationCompletion completion,
+            AgentMigrationResultStatus status,
+            String reason
+    ) {
+        return new AgentMigrationResult(
+                completion.identity(),
+                completion.source(),
+                completion.target(),
+                status,
+                reason
+        );
+    }
+
+    private static AgentMigrationResult result(
+            AgentMigrationTask task,
+            AgentMigrationResultStatus status,
+            String reason
+    ) {
+        return new AgentMigrationResult(
+                task.identity(),
+                task.source(),
+                task.target(),
+                status,
+                reason
+        );
     }
 }

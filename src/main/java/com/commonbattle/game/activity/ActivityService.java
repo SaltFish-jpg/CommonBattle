@@ -2,6 +2,7 @@ package com.commonbattle.game.activity;
 
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.PlayerBag;
+import com.commonbattle.game.player.event.PlayerDomainEvent;
 
 import java.util.Objects;
 
@@ -71,6 +72,24 @@ public final class ActivityService {
                 progress.value(),
                 bagService.grant(bag, definition.reward())
         );
+    }
+
+    public int onEvent(PlayerActivities activities, ActivityAccessContext access, PlayerDomainEvent event) {
+        Objects.requireNonNull(activities, "activities");
+        Objects.requireNonNull(access, "access");
+        Objects.requireNonNull(event, "event");
+        if (event.delta() <= 0 || event.replayed()) {
+            return 0;
+        }
+        int matched = 0;
+        for (ActivityDefinition definition : catalog.definitions()) {
+            if (definition.type() == ActivityType.COUNTER && definition.progressRule().matches(event)) {
+                ensureAvailable(definition, access);
+                activities.progress(definition.activityId()).increase(event.delta());
+                matched++;
+            }
+        }
+        return matched;
     }
 
     private void ensureAvailable(ActivityDefinition definition, ActivityAccessContext access) {

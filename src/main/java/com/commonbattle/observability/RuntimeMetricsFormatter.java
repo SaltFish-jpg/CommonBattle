@@ -27,6 +27,13 @@ public final class RuntimeMetricsFormatter {
         actorRpc(metrics, snapshot);
         commands(metrics, snapshot);
         agents(metrics, snapshot);
+        playerAgents(metrics, snapshot);
+        agentMigrations(metrics, snapshot);
+        agentMigrationExecutors(metrics, snapshot);
+        agentMigrationRecoveries(metrics, snapshot);
+        agentMigrationRecoverySchedulers(metrics, snapshot);
+        agentMigrationTaskRetentions(metrics, snapshot);
+        agentMigrationTaskStores(metrics, snapshot);
         outbox(metrics, snapshot);
         cluster(metrics, snapshot);
         registryLeases(metrics, snapshot);
@@ -37,6 +44,9 @@ public final class RuntimeMetricsFormatter {
         eventCenters(metrics, snapshot);
         eventSubscriptions(metrics, snapshot);
         profileInterests(metrics, snapshot);
+        profileRuntimes(metrics, snapshot);
+        sceneRuntimes(metrics, snapshot);
+        shopRuntimes(metrics, snapshot);
         commandAudits(metrics, snapshot);
         return metrics.toString();
     }
@@ -111,6 +121,108 @@ public final class RuntimeMetricsFormatter {
     private static void agents(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         labeledEnum(metrics, "commonbattle_agents", "state", snapshot.agents().counts(), AgentLifecycleState.values());
         gauge(metrics, "commonbattle_agents_total", snapshot.agents().total());
+    }
+
+    private static void playerAgents(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_player_agent_managers", snapshot.playerAgents().managerCount());
+        gauge(metrics, "commonbattle_player_agents_loaded", snapshot.playerAgents().loadedAgents());
+        gauge(metrics, "commonbattle_player_autosave_schedulers", snapshot.playerAgents().autoSaveSchedulers());
+        gauge(metrics, "commonbattle_player_autosave_runs_total", snapshot.playerAgents().autoSaveRuns());
+        gauge(metrics, "commonbattle_player_autosave_submitted_total", snapshot.playerAgents().autoSaveSubmitted());
+        gauge(metrics, "commonbattle_player_autosave_completed_total", snapshot.playerAgents().autoSaveCompleted());
+        gauge(metrics, "commonbattle_player_autosave_failed_runs_total", snapshot.playerAgents().autoSaveFailedRuns());
+        gauge(metrics, "commonbattle_player_autosave_failed_saves_total", snapshot.playerAgents().autoSaveFailedSaves());
+        gauge(metrics, "commonbattle_player_agent_drain_services", snapshot.playerAgents().drainServices());
+        gauge(metrics, "commonbattle_player_agent_draining_services", snapshot.playerAgents().drainingServices());
+        gauge(metrics, "commonbattle_player_agent_drain_submitted_total", snapshot.playerAgents().drainSubmitted());
+        gauge(metrics, "commonbattle_player_agent_drain_completed_total", snapshot.playerAgents().drainCompleted());
+        gauge(metrics, "commonbattle_player_agent_drain_failed_saves_total", snapshot.playerAgents().drainFailedSaves());
+        gauge(metrics, "commonbattle_player_agent_drain_pending", snapshot.playerAgents().drainPending());
+    }
+
+    private static void agentMigrations(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_initiated_total", snapshot.agentMigrations().initiated());
+        gauge(metrics, "commonbattle_agent_migration_source_moved_total", snapshot.agentMigrations().sourceMoved());
+        gauge(metrics, "commonbattle_agent_migration_source_move_failed_total",
+                snapshot.agentMigrations().sourceMoveFailed());
+        gauge(metrics, "commonbattle_agent_migration_target_accepted_total", snapshot.agentMigrations().targetAccepted());
+        gauge(metrics, "commonbattle_agent_migration_target_rejected_total", snapshot.agentMigrations().targetRejected());
+        gauge(metrics, "commonbattle_agent_migration_target_failed_total", snapshot.agentMigrations().targetFailed());
+        gauge(metrics, "commonbattle_agent_migration_target_retries_total", snapshot.agentMigrations().targetRetries());
+        gauge(metrics, "commonbattle_agent_migration_completion_rejected_total",
+                snapshot.agentMigrations().completionRejected());
+        gauge(metrics, "commonbattle_agent_migration_rollback_succeeded_total",
+                snapshot.agentMigrations().rollbackSucceeded());
+        gauge(metrics, "commonbattle_agent_migration_rollback_failed_total",
+                snapshot.agentMigrations().rollbackFailed());
+    }
+
+    private static void agentMigrationExecutors(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_executor_submitted_total",
+                snapshot.agentMigrationExecutors().submitted());
+        gauge(metrics, "commonbattle_agent_migration_executor_running", snapshot.agentMigrationExecutors().running());
+        gauge(metrics, "commonbattle_agent_migration_executor_completed_total",
+                snapshot.agentMigrationExecutors().completed());
+        gauge(metrics, "commonbattle_agent_migration_executor_failed_total", snapshot.agentMigrationExecutors().failed());
+        gauge(metrics, "commonbattle_agent_migration_executor_rejected_total",
+                snapshot.agentMigrationExecutors().rejected());
+        gauge(metrics, "commonbattle_agent_migration_executor_queued_tasks",
+                snapshot.agentMigrationExecutors().queuedTasks());
+    }
+
+    private static void agentMigrationRecoveries(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_recovery_scans_total",
+                snapshot.agentMigrationRecoveries().scans());
+        gauge(metrics, "commonbattle_agent_migration_recovery_tasks_total",
+                snapshot.agentMigrationRecoveries().recoveredTasks());
+        gauge(metrics, "commonbattle_agent_migration_recovery_target_accepted_total",
+                snapshot.agentMigrationRecoveries().targetAccepted());
+        gauge(metrics, "commonbattle_agent_migration_recovery_target_rejected_total",
+                snapshot.agentMigrationRecoveries().targetRejected());
+        gauge(metrics, "commonbattle_agent_migration_recovery_target_failed_total",
+                snapshot.agentMigrationRecoveries().targetFailed());
+        gauge(metrics, "commonbattle_agent_migration_recovery_target_retries_total",
+                snapshot.agentMigrationRecoveries().targetRetries());
+        gauge(metrics, "commonbattle_agent_migration_recovery_rollback_succeeded_total",
+                snapshot.agentMigrationRecoveries().rollbackSucceeded());
+        gauge(metrics, "commonbattle_agent_migration_recovery_rollback_failed_total",
+                snapshot.agentMigrationRecoveries().rollbackFailed());
+        gauge(metrics, "commonbattle_agent_migration_recovery_executor_rejected_total",
+                snapshot.agentMigrationRecoveries().executorRejected());
+    }
+
+    private static void agentMigrationRecoverySchedulers(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_recovery_scheduler_runs_total",
+                snapshot.agentMigrationRecoverySchedulers().runs());
+        gauge(metrics, "commonbattle_agent_migration_recovery_scheduler_claimed_tasks_total",
+                snapshot.agentMigrationRecoverySchedulers().claimedTasks());
+        gauge(metrics, "commonbattle_agent_migration_recovery_scheduler_failed_runs_total",
+                snapshot.agentMigrationRecoverySchedulers().failedRuns());
+    }
+
+    private static void agentMigrationTaskRetentions(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_task_retention_runs_total",
+                snapshot.agentMigrationTaskRetentions().runs());
+        gauge(metrics, "commonbattle_agent_migration_task_retention_purged_tasks_total",
+                snapshot.agentMigrationTaskRetentions().purgedTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_retention_failed_runs_total",
+                snapshot.agentMigrationTaskRetentions().failedRuns());
+    }
+
+    private static void agentMigrationTaskStores(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_agent_migration_task_stores", snapshot.agentMigrationTaskStores().stores());
+        gauge(metrics, "commonbattle_agent_migration_task_store_tasks",
+                snapshot.agentMigrationTaskStores().totalTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_store_prepared_tasks",
+                snapshot.agentMigrationTaskStores().preparedTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_store_moved_tasks",
+                snapshot.agentMigrationTaskStores().movedTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_store_terminal_tasks",
+                snapshot.agentMigrationTaskStores().terminalTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_store_leased_pending_tasks",
+                snapshot.agentMigrationTaskStores().leasedPendingTasks());
+        gauge(metrics, "commonbattle_agent_migration_task_store_oldest_pending_age_millis",
+                snapshot.agentMigrationTaskStores().oldestPendingAgeMillis());
     }
 
     private static void outbox(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -217,6 +329,43 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_profile_interest_replay_failures_total", snapshot.profileInterests().replayFailures());
         gauge(metrics, "commonbattle_profile_interest_repair_requests_total", snapshot.profileInterests().repairRequests());
         gauge(metrics, "commonbattle_profile_interest_repair_failures_total", snapshot.profileInterests().repairFailures());
+    }
+
+    private static void profileRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_profile_runtimes", snapshot.profileRuntimes().runtimeCount());
+        gauge(metrics, "commonbattle_profile_runtime_read_requests_total", snapshot.profileRuntimes().readRequests());
+        gauge(metrics, "commonbattle_profile_runtime_local_hits_total", snapshot.profileRuntimes().localHits());
+        gauge(metrics, "commonbattle_profile_runtime_local_stale_total", snapshot.profileRuntimes().localStale());
+        gauge(metrics, "commonbattle_profile_runtime_local_misses_total", snapshot.profileRuntimes().localMisses());
+        gauge(metrics, "commonbattle_profile_runtime_refreshes_total", snapshot.profileRuntimes().refreshes());
+        gauge(metrics, "commonbattle_profile_runtime_remote_misses_total", snapshot.profileRuntimes().remoteMisses());
+        gauge(metrics, "commonbattle_profile_runtime_local_fallbacks_total", snapshot.profileRuntimes().localFallbacks());
+    }
+
+    private static void sceneRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_scene_runtimes", snapshot.sceneRuntimes().runtimeCount());
+        gauge(metrics, "commonbattle_scene_active_scenes", snapshot.sceneRuntimes().activeScenes());
+        gauge(metrics, "commonbattle_scene_active_players", snapshot.sceneRuntimes().activePlayers());
+        gauge(metrics, "commonbattle_scene_shards", snapshot.sceneRuntimes().shardCount());
+        gauge(metrics, "commonbattle_scene_max_shard_players", snapshot.sceneRuntimes().maxShardPlayers());
+    }
+
+    private static void shopRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_shop_runtimes", snapshot.shopRuntimes().runtimeCount());
+        gauge(metrics, "commonbattle_shop_purchase_requests_total", snapshot.shopRuntimes().purchaseRequests());
+        gauge(metrics, "commonbattle_shop_successful_purchases_total", snapshot.shopRuntimes().successfulPurchases());
+        gauge(metrics, "commonbattle_shop_idempotent_replays_total", snapshot.shopRuntimes().idempotentReplays());
+        gauge(metrics, "commonbattle_shop_unknown_items_total", snapshot.shopRuntimes().unknownItems());
+        gauge(metrics, "commonbattle_shop_lifetime_limit_rejected_total", snapshot.shopRuntimes().lifetimeLimitRejected());
+        gauge(metrics, "commonbattle_shop_daily_limit_rejected_total", snapshot.shopRuntimes().dailyLimitRejected());
+        gauge(metrics, "commonbattle_shop_not_enough_currency_total", snapshot.shopRuntimes().notEnoughCurrency());
+        gauge(metrics, "commonbattle_shop_out_of_stock_total", snapshot.shopRuntimes().outOfStock());
+        gauge(metrics, "commonbattle_shop_order_conflicts_total", snapshot.shopRuntimes().orderConflicts());
+        gauge(metrics, "commonbattle_shop_recorded_orders_total", snapshot.shopRuntimes().recordedOrders());
+        gauge(metrics, "commonbattle_shop_active_reservations", snapshot.shopRuntimes().activeReservations());
+        gauge(metrics, "commonbattle_shop_reservation_reap_runs_total", snapshot.shopRuntimes().reservationReapRuns());
+        gauge(metrics, "commonbattle_shop_reaped_reservations_total", snapshot.shopRuntimes().reapedReservations());
+        gauge(metrics, "commonbattle_shop_reservation_reap_failures_total", snapshot.shopRuntimes().reservationReapFailures());
     }
 
     private static void commandAudits(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {

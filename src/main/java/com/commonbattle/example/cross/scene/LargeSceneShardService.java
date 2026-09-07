@@ -8,9 +8,11 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.game.scene.SceneRuntimeStats;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 超大场景承载策略。
@@ -20,6 +22,8 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     private final ServiceDescriptor descriptor;
     private final ActorRef[] shards;
     private final String sceneId;
+    private final Map<Long, ScenePlacement> placementsByPlayer = new ConcurrentHashMap<>();
+    private final Map<Integer, Set<Long>> playersByShard = new ConcurrentHashMap<>();
 
     public LargeSceneShardService(
             ActorSystem actors,
@@ -67,7 +71,17 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
 
     @Override
     public ServiceDescriptor descriptor() {
-        return descriptor;
+        return SceneRuntimeMetadata.apply(ServiceMetadata.withLoad(descriptor, stats().activePlayers(), shards.length), stats());
+    }
+
+    @Override
+    public SceneRuntimeStats stats() {
+        int activePlayers = placementsByPlayer.size();
+        int maxShardPlayers = playersByShard.values().stream()
+                .mapToInt(Set::size)
+                .max()
+                .orElse(0);
+        return new SceneRuntimeStats(activePlayers == 0 ? 0 : 1, activePlayers, shards.length, maxShardPlayers);
     }
 
     @Override
@@ -77,5 +91,45 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         }
         int shardIndex = Math.floorMod(chunkX * 31 + chunkY, shards.length);
         return new ScenePlacement(sceneId, shards[shardIndex], shardIndex, shards.length);
+    }
+
+    @Override
+    public ScenePlacement enter(long playerId, String requestedSceneId, int chunkX, int chunkY) {
+        ScenePlacement next = place(requestedSceneId, chunkX, chunkY);
+        ScenePlacement previous = placementsByPlayer.put(playerId, next);
+        if (previous != null) {
+            removeFromShard(playerId, previous.shardIndex());
+        }
+        playersByShard.computeIfAbsent(next.shardIndex(), ignored -> ConcurrentHashMap.newKeySet()).add(playerId);
+        return next;
+    }
+
+    @Override
+    public boolean leave(long playerId, String requestedSceneId) {
+        if (!sceneId.equals(requestedSceneId)) {
+            return false;
+        }
+        ScenePlacement previous = placementsByPlayer.remove(playerId);
+        if (previous == null) {
+            return false;
+        }
+        Set<Long> players = playersByShard.get(previous.shardIndex());
+        if (players != null) {
+            players.remove(playerId);
+            if (players.isEmpty()) {
+                playersByShard.remove(previous.shardIndex(), players);
+            }
+        }
+        return true;
+    }
+
+    private void removeFromShard(long playerId, int shardIndex) {
+        Set<Long> players = playersByShard.get(shardIndex);
+        if (players != null) {
+            players.remove(playerId);
+            if (players.isEmpty()) {
+                playersByShard.remove(shardIndex, players);
+            }
+        }
     }
 }

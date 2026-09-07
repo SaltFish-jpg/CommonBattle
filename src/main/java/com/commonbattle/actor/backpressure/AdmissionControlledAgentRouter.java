@@ -42,7 +42,7 @@ public final class AdmissionControlledAgentRouter {
         }
         AgentRoute route = router.resolve(target);
         if (route.type() == AgentRouteType.MISSING) {
-            return new AdmissionRouteResult(AdmissionDecision.reject("agent_missing", java.time.Duration.ZERO), route);
+            return new AdmissionRouteResult(AdmissionDecision.reject(route.reason(), java.time.Duration.ZERO), route);
         }
         return new AdmissionRouteResult(decision, route);
     }

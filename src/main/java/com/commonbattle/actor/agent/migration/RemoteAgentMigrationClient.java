@@ -14,13 +14,14 @@ import java.util.concurrent.atomic.AtomicReference;
  * 迁移源服务使用的目标端接收客户端。
  * 它通过精确 ServiceId 定点调用目标 Game/Scene，避免迁移请求被普通同类服务负载均衡到错误节点。
  */
-public final class RemoteAgentMigrationClient {
+public final class RemoteAgentMigrationClient implements AgentMigrationClient {
     private final ClusterRpcGateway gateway;
 
     public RemoteAgentMigrationClient(ClusterRpcGateway gateway) {
         this.gateway = Objects.requireNonNull(gateway, "gateway");
     }
 
+    @Override
     public AgentMigrationAcceptResponse accept(ServiceId targetServiceId, AgentMigrationAcceptRequest request) {
         return await(RpcRequest.toService(
                 targetServiceId,

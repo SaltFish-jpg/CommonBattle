@@ -10,6 +10,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.ClusterEnvelope;
 import com.commonbattle.cluster.network.ClusterTransport;
+import com.commonbattle.runtime.DrainableComponent;
 
 import java.io.Serializable;
 import java.time.Duration;
@@ -18,18 +19,20 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 基于服务目录和跨服传输的 RPC 网关。
  * 请求按服务类型路由到目标服务；响应按 requestId 回到调用方，再由 ActorRpcClient 投递回所属 Actor 邮箱。
  */
-public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
+public final class ClusterRpcGateway implements RpcGateway, AutoCloseable, DrainableComponent {
     private static final String RPC_SUCCESS = "$rpc.success";
     private static final String RPC_FAILURE = "$rpc.failure";
     private static final String IDEMPOTENCY_KEY = "rpc.idempotency_key";
@@ -42,10 +45,12 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
     private final ScheduledExecutorService timeoutScheduler;
     private final boolean ownsTimeoutScheduler;
     private final RpcGatewayMetrics metrics = new RpcGatewayMetrics();
+    private final AtomicBoolean draining = new AtomicBoolean();
     private final AtomicLong nextRequestId = new AtomicLong(1);
     private final AtomicLong routeCursor = new AtomicLong();
     private final Map<Long, PendingRpcCall<?>> callbacks = new ConcurrentHashMap<>();
     private final Map<String, RpcEndpointHandler> handlers = new ConcurrentHashMap<>();
+    private final List<RpcTargetSelector> targetSelectors = new CopyOnWriteArrayList<>();
     private final RpcIdempotencyStore idempotencyStore;
 
     public ClusterRpcGateway(
@@ -159,6 +164,15 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
         handlers.put(Objects.requireNonNull(operation, "operation"), Objects.requireNonNull(handler, "handler"));
     }
 
+    /**
+     * 注册业务专用选路器。
+     * 选择器只影响其声明支持的请求，其它请求继续走网关默认路由。
+     */
+    public ClusterRpcGateway addTargetSelector(RpcTargetSelector selector) {
+        targetSelectors.add(Objects.requireNonNull(selector, "selector"));
+        return this;
+    }
+
     @Override
     public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
         call(request, callback, RpcCallOptions.of(governance.defaultTimeout()));
@@ -202,6 +216,21 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
         }
     }
 
+    @Override
+    public void beginDrain() {
+        draining.set(true);
+    }
+
+    @Override
+    public void resumeAccepting() {
+        draining.set(false);
+    }
+
+    @Override
+    public boolean isDraining() {
+        return draining.get();
+    }
+
     public RpcGatewayStats stats() {
         return metrics.snapshot(idempotencyStore.size());
     }
@@ -213,13 +242,20 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
                     .orElseThrow(() -> new RpcNoRoutableServiceException(serviceId.kind(), request.operation()));
         }
         ServiceKind kind = ServiceKind.valueOf(request.target());
-        List<ServiceDescriptor> supported = directory.routable(kind).stream()
+        List<ServiceDescriptor> routable = directory.routable(kind);
+        List<ServiceDescriptor> supported = routable.stream()
                 .filter(service -> service.supports(request.operation()))
                 .toList();
+        List<ServiceDescriptor> candidates = supported.isEmpty() ? routable : supported;
+        for (RpcTargetSelector selector : targetSelectors) {
+            if (selector.supports(request, kind)) {
+                return selector.select(request, candidates);
+            }
+        }
         if (!supported.isEmpty()) {
             return select(supported);
         }
-        return select(kind, request.operation(), directory.routable(kind));
+        return select(kind, request.operation(), routable);
     }
 
     private ServiceDescriptor nextHop(ServiceDescriptor target) {
@@ -268,6 +304,11 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
             completeFailure(envelope);
             return;
         }
+        if (draining.get()) {
+            metrics.rejected();
+            replyFailure(envelope, new RpcServiceDrainingException(local.id(), envelope.operation()));
+            return;
+        }
         RpcEndpointHandler handler = handlers.get(envelope.operation());
         if (handler == null) {
             replyFailure(envelope, new IllegalStateException("No handler for " + envelope.operation()));
@@ -281,19 +322,24 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable {
                 return;
             }
         }
-        handler.handle(envelope, new RpcResponder() {
-            @Override
-            public void success(Object payload) {
-                cache(idempotencyKey, RpcIdempotencyResult.success(payload));
-                replySuccess(envelope, payload);
-            }
+        try {
+            handler.handle(envelope, new RpcResponder() {
+                @Override
+                public void success(Object payload) {
+                    cache(idempotencyKey, RpcIdempotencyResult.success(payload));
+                    replySuccess(envelope, payload);
+                }
 
-            @Override
-            public void failure(Throwable error) {
-                cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(error.getMessage())));
-                replyFailure(envelope, error);
-            }
-        });
+                @Override
+                public void failure(Throwable error) {
+                    cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(error.getMessage())));
+                    replyFailure(envelope, error);
+                }
+            });
+        } catch (RuntimeException e) {
+            cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(e.getMessage())));
+            replyFailure(envelope, e);
+        }
     }
 
     @SuppressWarnings("unchecked")

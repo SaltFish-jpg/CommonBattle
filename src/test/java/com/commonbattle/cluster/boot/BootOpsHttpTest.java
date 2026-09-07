@@ -16,6 +16,9 @@ import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.player.event.BattleStageClearedEvent;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.observability.OpsHttpServer;
 import com.commonbattle.runtime.DrainableComponent;
 import org.junit.jupiter.api.Test;
@@ -72,6 +75,16 @@ class BootOpsHttpTest {
                 () -> Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision())
         );
         ClusterNode node = runtime.add("clusterNode", new ClusterNode(new InMemoryServiceRegistry(), local, directory));
+        VersionedEventOutbox outbox = BootEventOutbox.configure(runtime, config, CLOCK);
+        outbox.append(new PlayerDomainVersionedEvent(
+                10001L,
+                BattleStageClearedEvent.TYPE,
+                "forest-1",
+                1,
+                1,
+                CLOCK.instant()
+        ));
+        outbox.markAttemptFailed(1);
         RecordingDrainable drainable = new RecordingDrainable();
         runtime.observe("commandIngress", drainable);
         try (OpsHttpServer server = runtime.add("opsHttp", BootOpsHttp.start(
@@ -90,6 +103,7 @@ class BootOpsHttpTest {
 
             assertTrue(health.contains("\"configCaches\":{\"cacheCount\":1,\"activeCaches\":1"));
             assertTrue(health.contains("\"eventSubscriptions\":{\"managerCount\":1,\"registered\":1"));
+            assertTrue(health.contains("\"outbox\":{\"pendingEvents\":1,\"failedAttempts\":1"));
             HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/drain"))
                             .POST(HttpRequest.BodyPublishers.noBody())
@@ -114,6 +128,7 @@ class BootOpsHttpTest {
         properties.setProperty("cluster.actor.workers", "4");
         properties.setProperty("cluster.ops.host", "127.0.0.1");
         properties.setProperty("cluster.ops.port", String.valueOf(opsPort));
+        properties.setProperty("cluster.drain.propagation.delay.millis", "0");
         return properties;
     }
 

@@ -7,6 +7,19 @@ import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
+import com.commonbattle.actor.agent.migration.AgentMigrationAcceptResponse;
+import com.commonbattle.actor.agent.migration.AgentMigrationPolicy;
+import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryScheduler;
+import com.commonbattle.actor.agent.migration.AgentMigrationRecoverySchedulerStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryService;
+import com.commonbattle.actor.agent.migration.AgentMigrationSnapshot;
+import com.commonbattle.actor.agent.migration.AgentMigrationTask;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStore;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStoreStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionService;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStatus;
+import com.commonbattle.actor.agent.migration.InMemoryAgentMigrationTaskStore;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.rpc.ActorRpcClient;
 import com.commonbattle.actor.rpc.ActorRpcHandler;
@@ -60,6 +73,13 @@ import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
 import com.commonbattle.game.profile.ProfileInterestStats;
 import com.commonbattle.game.profile.ProfileInterestView;
+import com.commonbattle.game.profile.ProfileInterestControl;
+import com.commonbattle.game.profile.ProfileReadMode;
+import com.commonbattle.game.profile.ProfileRuntime;
+import com.commonbattle.game.scene.SceneRuntimeStats;
+import com.commonbattle.game.scene.SceneRuntimeView;
+import com.commonbattle.game.shop.ShopRuntimeStats;
+import com.commonbattle.game.shop.ShopRuntimeView;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -115,10 +135,212 @@ class RuntimeHealthProbeTest {
         String metrics = RuntimeMetricsFormatter.format(snapshot);
         assertTrue(json.contains("\"largestMailboxQueuedTasks\":0"));
         assertTrue(json.contains("\"queuedTasksByCategory\""));
+        assertTrue(json.contains("\"agentMigrations\""));
+        assertTrue(json.contains("\"agentMigrationExecutors\""));
+        assertTrue(json.contains("\"agentMigrationRecoveries\""));
+        assertTrue(json.contains("\"agentMigrationRecoverySchedulers\""));
+        assertTrue(json.contains("\"agentMigrationTaskRetentions\""));
+        assertTrue(json.contains("\"agentMigrationTaskStores\""));
         assertTrue(metrics.contains("commonbattle_actor_largest_mailbox_queued_tasks 0"));
         assertTrue(metrics.contains("commonbattle_actor_queued_tasks_by_category{category=\"DEFAULT\"} 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_initiated_total 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_executor_submitted_total 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_recovery_scans_total 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_recovery_scheduler_runs_total 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_retention_runs_total 0"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_stores 0"));
         assertTrue(json.contains("\"draining\":{\"CENTER\":0,\"REGION\":0,\"GAME\":1"));
         assertTrue(metrics.contains("commonbattle_cluster_draining_services{kind=\"GAME\"} 1"));
+    }
+
+    @Test
+    void snapshotAggregatesAgentMigrationTaskRetentionStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
+        store.save(migrationTask(
+                "migration-retention-1",
+                AgentMigrationTaskStatus.TARGET_ACCEPTED,
+                CLOCK.instant().minus(Duration.ofHours(2))
+        ));
+        AgentMigrationTaskRetentionService retention = new AgentMigrationTaskRetentionService(
+                store,
+                CLOCK,
+                Duration.ofHours(1)
+        );
+        retention.purge();
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(retention);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(new AgentMigrationTaskRetentionStats(1, 1, 0), snapshot.agentMigrationTaskRetentions());
+        assertTrue(json.contains("\"agentMigrationTaskRetentions\":{\"runs\":1,\"purgedTasks\":1,\"failedRuns\":0}"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_retention_runs_total 1"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_retention_purged_tasks_total 1"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_retention_failed_runs_total 0"));
+    }
+
+    @Test
+    void snapshotAggregatesAgentMigrationTaskStoreStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
+        store.save(migrationTask(
+                "migration-store-1",
+                AgentMigrationTaskStatus.PREPARED,
+                CLOCK.instant().minus(Duration.ofMinutes(5))
+        ));
+        store.save(migrationTask(
+                "migration-store-2",
+                AgentMigrationTaskStatus.MOVED,
+                CLOCK.instant().minus(Duration.ofMinutes(1))
+        ));
+        store.claim("migration-store-2", "recovery-1", CLOCK.instant(), Duration.ofSeconds(30)).orElseThrow();
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(store);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(new AgentMigrationTaskStoreStats(1, 2, 1, 1, 0, 1, 300_000),
+                snapshot.agentMigrationTaskStores());
+        assertTrue(json.contains("\"agentMigrationTaskStores\":{\"stores\":1,\"totalTasks\":2,\"preparedTasks\":1,\"movedTasks\":1,\"terminalTasks\":0,\"leasedPendingTasks\":1,\"oldestPendingAgeMillis\":300000}"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_store_prepared_tasks 1"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_store_leased_pending_tasks 1"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_task_store_oldest_pending_age_millis 300000"));
+    }
+
+    @Test
+    void snapshotAggregatesAgentMigrationRecoverySchedulerStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        AgentMigrationRecoveryScheduler scheduler = new AgentMigrationRecoveryScheduler(
+                emptyRecoveryService(actors),
+                ignored -> {
+                },
+                Duration.ofSeconds(1)
+        );
+        scheduler.recoverOnce();
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(scheduler);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(new AgentMigrationRecoverySchedulerStats(1, 0, 0),
+                snapshot.agentMigrationRecoverySchedulers());
+        assertTrue(json.contains("\"agentMigrationRecoverySchedulers\":{\"runs\":1,\"claimedTasks\":0,\"failedRuns\":0}"));
+        assertTrue(metrics.contains("commonbattle_agent_migration_recovery_scheduler_runs_total 1"));
+    }
+
+    @Test
+    void snapshotDegradesWhenAgentMigrationRecoverySchedulerFails() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        AgentMigrationRecoveryScheduler scheduler = new AgentMigrationRecoveryScheduler(
+                failingRecoveryService(actors),
+                ignored -> {
+                },
+                Duration.ofSeconds(1)
+        );
+        assertThrows(IllegalStateException.class, scheduler::recoverOnce);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(scheduler);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(new AgentMigrationRecoverySchedulerStats(1, 0, 1),
+                snapshot.agentMigrationRecoverySchedulers());
+    }
+
+    @Test
+    void snapshotDegradesWhenMigrationPendingTaskIsTooOld() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
+        store.save(migrationTask(
+                "migration-store-stuck",
+                AgentMigrationTaskStatus.PREPARED,
+                CLOCK.instant().minus(Duration.ofMinutes(5))
+        ));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(store);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                new RuntimeHealthPolicy(10_000, 0, 60_000)
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(300_000, snapshot.agentMigrationTaskStores().oldestPendingAgeMillis());
     }
 
     @Test
@@ -896,6 +1118,188 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_profile_interest_repair_failures_total 1"));
     }
 
+    @Test
+    void snapshotAggregatesProfileRuntimeStatsAndDegradesOnLocalFallback() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        LocalProfileCache cache = new LocalProfileCache();
+        ProfileRuntime profiles = new ProfileRuntime(cache, ProfileInterestControl.noop(), playerId -> java.util.Optional.empty());
+        profiles.read(10001L, ProfileReadMode.LOCAL_FAST);
+        cache.apply(profileEvent(1));
+        profiles.read(10001L, ProfileReadMode.LOCAL_FAST);
+        cache.apply(profileEvent(3));
+        profiles.read(10001L, ProfileReadMode.REFRESH_IF_STALE);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(profiles);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.profileRuntimes().runtimeCount());
+        assertEquals(3, snapshot.profileRuntimes().readRequests());
+        assertEquals(1, snapshot.profileRuntimes().localHits());
+        assertEquals(1, snapshot.profileRuntimes().localMisses());
+        assertEquals(1, snapshot.profileRuntimes().localFallbacks());
+        assertTrue(json.contains("\"profileRuntimes\":{\"runtimeCount\":1,\"readRequests\":3"));
+        assertTrue(metrics.contains("commonbattle_profile_runtime_read_requests_total 3"));
+        assertTrue(metrics.contains("commonbattle_profile_runtime_local_fallbacks_total 1"));
+    }
+
+    @Test
+    void shopRuntimeStatsAreReportedAndOrderConflictsDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ShopRuntimeView shops = () -> new ShopRuntimeStats(3, 1, 1, 0, 0, 0, 0, 0, 1, 1,
+                2, 4, 6, 0);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(shops);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.shopRuntimes().runtimeCount());
+        assertEquals(3, snapshot.shopRuntimes().purchaseRequests());
+        assertEquals(1, snapshot.shopRuntimes().successfulPurchases());
+        assertEquals(1, snapshot.shopRuntimes().idempotentReplays());
+        assertEquals(1, snapshot.shopRuntimes().orderConflicts());
+        assertEquals(1, snapshot.shopRuntimes().recordedOrders());
+        assertEquals(2, snapshot.shopRuntimes().activeReservations());
+        assertEquals(4, snapshot.shopRuntimes().reservationReapRuns());
+        assertEquals(6, snapshot.shopRuntimes().reapedReservations());
+        assertTrue(json.contains("\"shopRuntimes\":{\"runtimeCount\":1,\"purchaseRequests\":3"));
+        assertTrue(metrics.contains("commonbattle_shop_purchase_requests_total 3"));
+        assertTrue(metrics.contains("commonbattle_shop_order_conflicts_total 1"));
+        assertTrue(metrics.contains("commonbattle_shop_active_reservations 2"));
+        assertTrue(metrics.contains("commonbattle_shop_reaped_reservations_total 6"));
+    }
+
+    @Test
+    void sceneRuntimeStatsAreReported() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        SceneRuntimeView first = () -> new SceneRuntimeStats(2, 30, 8, 12);
+        SceneRuntimeView second = () -> new SceneRuntimeStats(1, 10, 4, 7);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(java.util.List.of(first, second));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.UP, snapshot.status());
+        assertEquals(2, snapshot.sceneRuntimes().runtimeCount());
+        assertEquals(3, snapshot.sceneRuntimes().activeScenes());
+        assertEquals(40, snapshot.sceneRuntimes().activePlayers());
+        assertEquals(12, snapshot.sceneRuntimes().shardCount());
+        assertEquals(12, snapshot.sceneRuntimes().maxShardPlayers());
+        assertTrue(json.contains("\"sceneRuntimes\":{\"runtimeCount\":2,\"activeScenes\":3,\"activePlayers\":40"));
+        assertTrue(metrics.contains("commonbattle_scene_runtimes 2"));
+        assertTrue(metrics.contains("commonbattle_scene_active_scenes 3"));
+        assertTrue(metrics.contains("commonbattle_scene_active_players 40"));
+        assertTrue(metrics.contains("commonbattle_scene_max_shard_players 12"));
+    }
+
+    @Test
+    void sceneRuntimeThresholdsDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        SceneRuntimeView scenes = () -> new SceneRuntimeStats(3, 40, 8, 12);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(scenes);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                new RuntimeHealthPolicy(10_000, 0, 300_000, 2, 0, 10)
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(3, snapshot.sceneRuntimes().activeScenes());
+        assertEquals(12, snapshot.sceneRuntimes().maxShardPlayers());
+    }
+
+    @Test
+    void shopReservationReapFailuresDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ShopRuntimeView shops = () -> new ShopRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                1, 2, 0, 1);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(shops);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.CENTER, "r1", "center-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.shopRuntimes().reservationReapFailures());
+        assertTrue(metrics.contains("commonbattle_shop_reservation_reap_failures_total 1"));
+    }
+
     private static ServiceDescriptor descriptor(ServiceKind kind, String node) {
         return new ServiceDescriptor(
                 ServiceId.of(kind, "r1", node),
@@ -944,6 +1348,51 @@ class RuntimeHealthProbeTest {
                         revision,
                         CLOCK.instant()
                 )
+        );
+    }
+
+    private static AgentMigrationTask migrationTask(
+            String taskId,
+            AgentMigrationTaskStatus status,
+            Instant updatedAt
+    ) {
+        return new AgentMigrationTask(
+                taskId,
+                AgentIdentity.player(10001L),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new ActorRef("player-10001")),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"), new ActorRef("player-10001")),
+                new AgentMigrationSnapshot("player.snapshot.v1", new byte[]{1}),
+                status,
+                "",
+                updatedAt
+        );
+    }
+
+    private static AgentMigrationRecoveryService emptyRecoveryService(ActorSystem actors) {
+        InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        return new AgentMigrationRecoveryService(
+                AgentMigrationTaskStore.none(),
+                directory,
+                new AgentLifecycleManager(local, actors, directory, CLOCK),
+                (target, request) -> AgentMigrationAcceptResponse.success(),
+                new InlineExecutor(),
+                AgentMigrationPolicy.defaults(),
+                CLOCK
+        );
+    }
+
+    private static AgentMigrationRecoveryService failingRecoveryService(ActorSystem actors) {
+        InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        return new AgentMigrationRecoveryService(
+                new FailingMigrationTaskStore(),
+                directory,
+                new AgentLifecycleManager(local, actors, directory, CLOCK),
+                (target, request) -> AgentMigrationAcceptResponse.success(),
+                new InlineExecutor(),
+                AgentMigrationPolicy.defaults(),
+                CLOCK
         );
     }
 
@@ -1055,6 +1504,36 @@ class RuntimeHealthProbeTest {
     private static final class NoopRpcGateway implements com.commonbattle.actor.rpc.RpcGateway {
         @Override
         public <T> void call(com.commonbattle.actor.rpc.RpcRequest<T> request, com.commonbattle.actor.rpc.RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class FailingMigrationTaskStore implements AgentMigrationTaskStore {
+        @Override
+        public void save(AgentMigrationTask task) {
+        }
+
+        @Override
+        public java.util.Optional<AgentMigrationTask> claim(String taskId, String owner, Instant now, Duration leaseTtl) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public void mark(String taskId, AgentMigrationTaskStatus status, String reason, Instant now) {
+        }
+
+        @Override
+        public java.util.List<AgentMigrationTask> pendingTasks() {
+            throw new IllegalStateException("store unavailable");
+        }
+
+        @Override
+        public int purgeTerminalTasksBefore(Instant cutoff) {
+            return 0;
+        }
+
+        @Override
+        public AgentMigrationTaskStoreStats stats(Instant now) {
+            return AgentMigrationTaskStoreStats.empty();
         }
     }
 

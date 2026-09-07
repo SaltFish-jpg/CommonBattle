@@ -16,6 +16,8 @@ import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
 import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
+import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -37,9 +39,11 @@ public final class RegionServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    AgentMigrationPayloadCodecs.registerTo(
-                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                    )
+                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                            AgentMigrationPayloadCodecs.registerTo(
+                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
+                            )
+                    ))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),

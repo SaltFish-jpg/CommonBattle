@@ -1,9 +1,12 @@
 package com.commonbattle.example.cross.scene;
 
 import com.commonbattle.cluster.ServiceDescriptor;
+import com.commonbattle.game.scene.SceneRuntimeStats;
+import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * 带 Profile 动态关注的 Scene 服务包装层。
@@ -12,15 +15,30 @@ import java.util.Objects;
 public final class ProfileAwareSceneService implements SceneServiceStrategy {
     private final SceneServiceStrategy delegate;
     private final SceneProfileAwarenessAgent profiles;
+    private final ScenePlayerDomainEventAgent domainEvents;
 
     public ProfileAwareSceneService(SceneServiceStrategy delegate, SceneProfileAwarenessAgent profiles) {
+        this(delegate, profiles, null);
+    }
+
+    public ProfileAwareSceneService(
+            SceneServiceStrategy delegate,
+            SceneProfileAwarenessAgent profiles,
+            ScenePlayerDomainEventAgent domainEvents
+    ) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
+        this.domainEvents = domainEvents;
     }
 
     @Override
     public ServiceDescriptor descriptor() {
         return delegate.descriptor();
+    }
+
+    @Override
+    public SceneRuntimeStats stats() {
+        return delegate.stats();
     }
 
     @Override
@@ -32,6 +50,9 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     public ScenePlacement enter(long playerId, String sceneId, int chunkX, int chunkY) {
         ScenePlacement placement = delegate.enter(playerId, sceneId, chunkX, chunkY);
         profiles.enter(playerId, placement.sceneId());
+        if (domainEvents != null) {
+            domainEvents.enter(playerId);
+        }
         return placement;
     }
 
@@ -40,11 +61,18 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
         boolean left = delegate.leave(playerId, sceneId);
         if (left) {
             profiles.leave(playerId, sceneId);
+            if (domainEvents != null) {
+                domainEvents.leave(playerId);
+            }
         }
         return left;
     }
 
     public SceneProfileAwarenessAgent profiles() {
         return profiles;
+    }
+
+    public Optional<ScenePlayerDomainEventAgent> domainEvents() {
+        return Optional.ofNullable(domainEvents);
     }
 }

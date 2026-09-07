@@ -32,10 +32,23 @@ public final class BagService {
     public BagResult consume(PlayerBag bag, ItemStack cost) {
         Objects.requireNonNull(bag, "bag");
         Objects.requireNonNull(cost, "cost");
-        catalog.require(cost.itemId());
+        validate(cost);
         int before = bag.count(cost.itemId());
         bag.remove(cost.itemId(), cost.count());
         return new BagResult(List.of(new BagChange(cost.itemId(), before, bag.count(cost.itemId()))));
+    }
+
+    public void validate(Reward reward) {
+        Objects.requireNonNull(reward, "reward");
+        for (ItemStack item : reward.items()) {
+            validate(item);
+        }
+    }
+
+    public void validate(ItemStack item) {
+        Objects.requireNonNull(item, "item");
+        ItemDefinition definition = catalog.require(item.itemId());
+        validateStack(definition, item.count());
     }
 
     private void validateStack(ItemDefinition definition, int count) {

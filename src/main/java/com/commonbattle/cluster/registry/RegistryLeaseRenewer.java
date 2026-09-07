@@ -4,6 +4,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceRegistry;
 import com.commonbattle.runtime.DrainableComponent;
+import com.commonbattle.runtime.DrainPhase;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -108,10 +109,15 @@ public final class RegistryLeaseRenewer implements AutoCloseable, DrainableCompo
     }
 
     @Override
+    public DrainPhase phase() {
+        return DrainPhase.EXTERNAL_ADVERTISEMENT;
+    }
+
+    @Override
     public void beginDrain() {
         registered = ServiceMetadata.withDraining(local, true);
         if (started.get()) {
-            registry.register(registered, leaseTtl);
+            registerCurrent();
         }
     }
 
@@ -119,7 +125,7 @@ public final class RegistryLeaseRenewer implements AutoCloseable, DrainableCompo
     public void resumeAccepting() {
         registered = local;
         if (started.get()) {
-            registry.register(registered, leaseTtl);
+            registerCurrent();
         }
     }
 
@@ -132,7 +138,15 @@ public final class RegistryLeaseRenewer implements AutoCloseable, DrainableCompo
         try {
             renewOnce();
         } catch (RuntimeException e) {
+        }
+    }
+
+    private void registerCurrent() {
+        try {
+            registry.register(registered, leaseTtl);
+        } catch (RuntimeException e) {
             failedRenewals.incrementAndGet();
+            throw e;
         }
     }
 

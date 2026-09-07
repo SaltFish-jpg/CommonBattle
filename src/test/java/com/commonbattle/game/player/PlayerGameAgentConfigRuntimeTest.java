@@ -8,14 +8,23 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.achievement.AchievementClaimResult;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.config.GameConfigPackage;
 import com.commonbattle.game.config.GameConfigRegistry;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.GrowthTuning;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
+import com.commonbattle.example.config.ExampleGameConfigs;
+import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
+import com.commonbattle.game.event.ReliableVersionedEventPublisher;
+import com.commonbattle.game.event.VersionedEvent;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.task.TaskClaimResult;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -28,6 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerGameAgentConfigRuntimeTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
@@ -110,7 +120,76 @@ class PlayerGameAgentConfigRuntimeTest {
         assertEquals(1, second.get());
     }
 
+    @Test
+    void battleEventProgressesActivityTaskAndAchievementInsideConfigRuntime() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(ExampleGameConfigs.basic(1, CLOCK.instant()));
+        PlayerGameAgent agent = createAgent(executor, registry);
+        AtomicReference<BattleSettlementResult> battle = new AtomicReference<>();
+        AtomicReference<TaskClaimResult> task = new AtomicReference<>();
+        AtomicReference<AchievementClaimResult> achievement = new AtomicReference<>();
+
+        agent.clearBattleStage("settle-10001-1", "forest-1", battle::set);
+        executor.runNext();
+        agent.claimTask("task-clear-forest", task::set);
+        executor.runNext();
+        agent.claimAchievement("achievement-clear-forest", achievement::set);
+        executor.runNext();
+
+        assertEquals(1, agent.profile().activities().progress("battle-win-1").value());
+        assertEquals(1, agent.profile().tasks().progress("task-clear-forest").value());
+        assertEquals(1, agent.profile().achievements().progress("achievement-clear-forest").value());
+        assertEquals(18, agent.profile().bag().count("gem"));
+        assertEquals(1, task.get().progress());
+        assertEquals(1, achievement.get().progress());
+        assertEquals(3, battle.get().stars());
+    }
+
+    @Test
+    void playerDomainEventPublishFailureKeepsOutboxPendingWithoutBlockingLocalSettlement() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(ExampleGameConfigs.basic(1, CLOCK.instant()));
+        InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(CLOCK);
+        List<VersionedEvent> published = new ArrayList<>();
+        ReliableVersionedEventPublisher publisher = new ReliableVersionedEventPublisher(
+                outbox,
+                new FailingOncePublisher(published)
+        );
+        PlayerGameAgent agent = createAgent(executor, registry, publisher, 0, 0);
+
+        agent.clearBattleStage("settle-10001-1", "forest-1", ignored -> {
+        });
+        executor.runNext();
+
+        assertEquals(1, agent.profile().activities().progress("battle-win-1").value());
+        assertEquals(1, agent.profile().tasks().progress("task-clear-forest").value());
+        assertEquals(1, agent.profile().achievements().progress("achievement-clear-forest").value());
+        assertEquals(1, outbox.pending().size());
+        assertEquals(1, outbox.pending().getFirst().attempts());
+
+        publisher.replayPending();
+
+        assertTrue(outbox.pending().isEmpty());
+        PlayerDomainVersionedEvent event = (PlayerDomainVersionedEvent) published.getFirst();
+        assertEquals(10001L, event.playerId());
+        assertEquals("battle.stage.cleared", event.eventType());
+        assertEquals("forest-1", event.subject());
+        assertEquals(1, event.revision());
+    }
+
     private static PlayerGameAgent createAgent(Executor executor, GameConfigRegistry registry) {
+        return createAgent(executor, registry, null, 0, 0);
+    }
+
+    private static PlayerGameAgent createAgent(
+            Executor executor,
+            GameConfigRegistry registry,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision
+    ) {
         ActorSystem actors = new ActorSystem(executor, 64);
         ActorRef self = actors.actor("player-10001");
         return new PlayerGameAgent(
@@ -119,7 +198,10 @@ class PlayerGameAgentConfigRuntimeTest {
                 new PlayerProfile(10001L),
                 registry,
                 CLOCK,
-                Instant.parse("2026-08-01T00:00:00Z")
+                Instant.parse("2026-08-01T00:00:00Z"),
+                domainEventPublisher,
+                initialStateRevision,
+                initialEventRevision
         );
     }
 
@@ -161,6 +243,24 @@ class PlayerGameAgentConfigRuntimeTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class FailingOncePublisher implements EventPublisher {
+        private final List<VersionedEvent> published;
+        private boolean fail = true;
+
+        private FailingOncePublisher(List<VersionedEvent> published) {
+            this.published = published;
+        }
+
+        @Override
+        public void publish(VersionedEvent event) {
+            if (fail) {
+                fail = false;
+                throw new IllegalStateException("temporary network failure");
+            }
+            published.add(event);
         }
     }
 }

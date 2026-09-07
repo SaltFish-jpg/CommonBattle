@@ -103,9 +103,7 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         AdmissionRouteResult routed = router.route(AgentIdentity.player(command.playerId()), command.operation());
         if (!routed.admission().accepted()) {
             PlayerCommandResult rejected = PlayerCommandResult.reject(
-                    "rate_limited".equals(routed.admission().reason())
-                            ? PlayerCommandStatus.RATE_LIMITED
-                            : PlayerCommandStatus.AGENT_MISSING,
+                    rejectedStatus(routed.admission().reason()),
                     routed.admission().reason()
             );
             return result(command, rejected, PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO,
@@ -163,6 +161,16 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
     private PlayerCommandResult result(PlayerCommandResult result) {
         metrics.record(result.status());
         return result;
+    }
+
+    private PlayerCommandStatus rejectedStatus(String reason) {
+        if ("rate_limited".equals(reason)) {
+            return PlayerCommandStatus.RATE_LIMITED;
+        }
+        if ("agent_migrating".equals(reason)) {
+            return PlayerCommandStatus.AGENT_MIGRATING;
+        }
+        return PlayerCommandStatus.AGENT_MISSING;
     }
 
     private void audit(

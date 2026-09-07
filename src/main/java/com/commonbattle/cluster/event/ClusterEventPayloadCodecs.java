@@ -13,9 +13,11 @@ import com.commonbattle.game.activity.MinLevelCondition;
 import com.commonbattle.game.activity.NaturalTimeSchedule;
 import com.commonbattle.game.activity.OpenServerTimeSchedule;
 import com.commonbattle.game.activity.ParticipationCondition;
+import com.commonbattle.game.achievement.AchievementDefinition;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.config.GameConfigChangeType;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigPackage;
@@ -31,8 +33,12 @@ import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
 import com.commonbattle.game.profile.ProfileSnapshotRequest;
 import com.commonbattle.game.profile.ProfileSnapshotResponse;
+import com.commonbattle.game.player.event.EventProgressRule;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.task.TaskDefinition;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
@@ -55,7 +61,8 @@ public final class ClusterEventPayloadCodecs {
     private static final Map<Class<?>, EventCodec<?>> EVENT_BY_CLASS = Map.of(
             ProfileChangedEvent.class, new ProfileChangedEventCodec(),
             AllianceMemberChangedEvent.class, new AllianceMemberChangedEventCodec(),
-            GameConfigChangedEvent.class, new GameConfigChangedEventCodec()
+            GameConfigChangedEvent.class, new GameConfigChangedEventCodec(),
+            PlayerDomainVersionedEvent.class, new PlayerDomainVersionedEventCodec()
     );
     private static final Map<String, EventCodec<?>> EVENT_BY_TYPE = indexByType();
 
@@ -728,6 +735,76 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
+    private static final class PlayerDomainVersionedEventCodec implements EventCodec<PlayerDomainVersionedEvent> {
+        @Override
+        public String typeName() {
+            return PlayerDomainVersionedEvent.class.getName();
+        }
+
+        @Override
+        public byte[] encode(PlayerDomainVersionedEvent event) {
+            int size = CodedOutputStream.computeInt64Size(1, event.playerId())
+                    + stringSize(2, event.eventType())
+                    + stringSize(3, event.subject())
+                    + CodedOutputStream.computeInt32Size(4, event.delta())
+                    + CodedOutputStream.computeInt64Size(5, event.revision())
+                    + CodedOutputStream.computeInt64Size(6, event.occurredAt().getEpochSecond())
+                    + CodedOutputStream.computeInt32Size(7, event.occurredAt().getNano());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, event.playerId());
+                output.writeString(2, event.eventType());
+                output.writeString(3, event.subject());
+                output.writeInt32(4, event.delta());
+                output.writeInt64(5, event.revision());
+                output.writeInt64(6, event.occurredAt().getEpochSecond());
+                output.writeInt32(7, event.occurredAt().getNano());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player domain event", e);
+            }
+        }
+
+        @Override
+        public PlayerDomainVersionedEvent decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long playerId = 0;
+            String eventType = "";
+            String subject = "";
+            int delta = 1;
+            long revision = 1;
+            long epochSecond = 0;
+            int nano = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> playerId = input.readInt64();
+                        case 2 -> eventType = input.readString();
+                        case 3 -> subject = input.readString();
+                        case 4 -> delta = input.readInt32();
+                        case 5 -> revision = input.readInt64();
+                        case 6 -> epochSecond = input.readInt64();
+                        case 7 -> nano = input.readInt32();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new PlayerDomainVersionedEvent(
+                        playerId,
+                        eventType,
+                        subject,
+                        delta,
+                        revision,
+                        Instant.ofEpochSecond(epochSecond, nano)
+                );
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player domain event", e);
+            }
+        }
+    }
+
     private record Subscription(ServiceId subscriber, String topic, Set<String> ownerKeys) {
     }
 
@@ -746,6 +823,18 @@ public final class ClusterEventPayloadCodecs {
         for (ActivityDefinition activity : config.activities()) {
             size += CodedOutputStream.computeByteArraySize(3, encodeActivityDefinition(activity));
         }
+        for (ShopItemDefinition shop : config.shops()) {
+            size += CodedOutputStream.computeByteArraySize(7, encodeShopItemDefinition(shop));
+        }
+        for (BattleStageDefinition battle : config.battles()) {
+            size += CodedOutputStream.computeByteArraySize(8, encodeBattleStageDefinition(battle));
+        }
+        for (TaskDefinition task : config.tasks()) {
+            size += CodedOutputStream.computeByteArraySize(9, encodeTaskDefinition(task));
+        }
+        for (AchievementDefinition achievement : config.achievements()) {
+            size += CodedOutputStream.computeByteArraySize(10, encodeAchievementDefinition(achievement));
+        }
         byte[] bytes = new byte[size];
         try {
             CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -759,6 +848,18 @@ public final class ClusterEventPayloadCodecs {
             output.writeByteArray(4, growth);
             output.writeInt64(5, config.createdAt().getEpochSecond());
             output.writeInt32(6, config.createdAt().getNano());
+            for (ShopItemDefinition shop : config.shops()) {
+                output.writeByteArray(7, encodeShopItemDefinition(shop));
+            }
+            for (BattleStageDefinition battle : config.battles()) {
+                output.writeByteArray(8, encodeBattleStageDefinition(battle));
+            }
+            for (TaskDefinition task : config.tasks()) {
+                output.writeByteArray(9, encodeTaskDefinition(task));
+            }
+            for (AchievementDefinition achievement : config.achievements()) {
+                output.writeByteArray(10, encodeAchievementDefinition(achievement));
+            }
             output.flush();
             return bytes;
         } catch (IOException e) {
@@ -771,6 +872,10 @@ public final class ClusterEventPayloadCodecs {
         long version = 0;
         List<ItemDefinition> items = new ArrayList<>();
         List<ActivityDefinition> activities = new ArrayList<>();
+        List<ShopItemDefinition> shops = new ArrayList<>();
+        List<BattleStageDefinition> battles = new ArrayList<>();
+        List<TaskDefinition> tasks = new ArrayList<>();
+        List<AchievementDefinition> achievements = new ArrayList<>();
         GrowthTuning growth = null;
         long epochSecond = 0;
         int nano = 0;
@@ -784,10 +889,15 @@ public final class ClusterEventPayloadCodecs {
                     case 4 -> growth = decodeGrowth(input.readByteArray());
                     case 5 -> epochSecond = input.readInt64();
                     case 6 -> nano = input.readInt32();
+                    case 7 -> shops.add(decodeShopItemDefinition(input.readByteArray()));
+                    case 8 -> battles.add(decodeBattleStageDefinition(input.readByteArray()));
+                    case 9 -> tasks.add(decodeTaskDefinition(input.readByteArray()));
+                    case 10 -> achievements.add(decodeAchievementDefinition(input.readByteArray()));
                     default -> input.skipField(tag);
                 }
             }
-            return new GameConfigPackage(version, items, activities, growth, Instant.ofEpochSecond(epochSecond, nano));
+            return new GameConfigPackage(version, items, activities, shops, battles, tasks, achievements, growth,
+                    Instant.ofEpochSecond(epochSecond, nano));
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode config package", e);
         }
@@ -840,7 +950,8 @@ public final class ClusterEventPayloadCodecs {
                 + CodedOutputStream.computeInt32Size(3, activity.threshold())
                 + CodedOutputStream.computeByteArraySize(4, reward)
                 + CodedOutputStream.computeByteArraySize(5, schedule)
-                + CodedOutputStream.computeByteArraySize(6, participation);
+                + CodedOutputStream.computeByteArraySize(6, participation)
+                + CodedOutputStream.computeByteArraySize(7, encodeEventProgressRule(activity.progressRule()));
         byte[] bytes = new byte[size];
         try {
             CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -850,6 +961,7 @@ public final class ClusterEventPayloadCodecs {
             output.writeByteArray(4, reward);
             output.writeByteArray(5, schedule);
             output.writeByteArray(6, participation);
+            output.writeByteArray(7, encodeEventProgressRule(activity.progressRule()));
             output.flush();
             return bytes;
         } catch (IOException e) {
@@ -865,6 +977,7 @@ public final class ClusterEventPayloadCodecs {
         Reward reward = Reward.of();
         ActivitySchedule schedule = ActivitySchedule.alwaysOpen();
         ParticipationCondition participation = ParticipationCondition.always();
+        EventProgressRule progressRule = EventProgressRule.none();
         try {
             int tag;
             while ((tag = input.readTag()) != 0) {
@@ -875,12 +988,265 @@ public final class ClusterEventPayloadCodecs {
                     case 4 -> reward = decodeReward(input.readByteArray());
                     case 5 -> schedule = decodeSchedule(input.readByteArray());
                     case 6 -> participation = decodeParticipation(input.readByteArray());
+                    case 7 -> progressRule = decodeEventProgressRule(input.readByteArray());
                     default -> input.skipField(tag);
                 }
             }
-            return new ActivityDefinition(activityId, type, threshold, reward, schedule, participation);
+            return new ActivityDefinition(activityId, type, threshold, reward, schedule, participation, progressRule);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode activity definition", e);
+        }
+    }
+
+    private static byte[] encodeShopItemDefinition(ShopItemDefinition shop) {
+        byte[] price = encodeItemStack(shop.price());
+        byte[] reward = encodeReward(shop.reward());
+        int size = stringSize(1, shop.sku())
+                + CodedOutputStream.computeByteArraySize(2, price)
+                + CodedOutputStream.computeByteArraySize(3, reward)
+                + CodedOutputStream.computeInt32Size(4, shop.lifetimeLimit())
+                + CodedOutputStream.computeInt32Size(5, shop.dailyLimit())
+                + CodedOutputStream.computeInt32Size(6, shop.globalStock());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, shop.sku());
+            output.writeByteArray(2, price);
+            output.writeByteArray(3, reward);
+            output.writeInt32(4, shop.lifetimeLimit());
+            output.writeInt32(5, shop.dailyLimit());
+            output.writeInt32(6, shop.globalStock());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode shop item definition", e);
+        }
+    }
+
+    private static ShopItemDefinition decodeShopItemDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String sku = "";
+        ItemStack price = null;
+        Reward reward = null;
+        int lifetimeLimit = 0;
+        int dailyLimit = 0;
+        int globalStock = ShopItemDefinition.UNLIMITED_STOCK;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> sku = input.readString();
+                    case 2 -> price = decodeItemStack(input.readByteArray());
+                    case 3 -> reward = decodeReward(input.readByteArray());
+                    case 4 -> lifetimeLimit = input.readInt32();
+                    case 5 -> dailyLimit = input.readInt32();
+                    case 6 -> globalStock = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new ShopItemDefinition(sku, price, reward, lifetimeLimit, dailyLimit, globalStock);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode shop item definition", e);
+        }
+    }
+
+    private static byte[] encodeBattleStageDefinition(BattleStageDefinition battle) {
+        byte[] reward = encodeReward(battle.victoryReward());
+        int size = stringSize(1, battle.stageId())
+                + CodedOutputStream.computeInt32Size(2, battle.playerHp())
+                + CodedOutputStream.computeInt32Size(3, battle.playerAttack())
+                + CodedOutputStream.computeInt32Size(4, battle.enemyHp())
+                + CodedOutputStream.computeInt32Size(5, battle.enemyAttack())
+                + CodedOutputStream.computeInt32Size(6, battle.maxRounds())
+                + CodedOutputStream.computeByteArraySize(7, reward)
+                + stringSize(8, battle.progressActivityId())
+                + CodedOutputStream.computeInt32Size(9, battle.progressDelta())
+                + CodedOutputStream.computeByteArraySize(10, encodeReward(battle.firstClearReward()))
+                + CodedOutputStream.computeInt32Size(11, battle.sweepRequiredStars());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, battle.stageId());
+            output.writeInt32(2, battle.playerHp());
+            output.writeInt32(3, battle.playerAttack());
+            output.writeInt32(4, battle.enemyHp());
+            output.writeInt32(5, battle.enemyAttack());
+            output.writeInt32(6, battle.maxRounds());
+            output.writeByteArray(7, reward);
+            output.writeString(8, battle.progressActivityId());
+            output.writeInt32(9, battle.progressDelta());
+            output.writeByteArray(10, encodeReward(battle.firstClearReward()));
+            output.writeInt32(11, battle.sweepRequiredStars());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode battle stage definition", e);
+        }
+    }
+
+    private static BattleStageDefinition decodeBattleStageDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String stageId = "";
+        int playerHp = 1;
+        int playerAttack = 1;
+        int enemyHp = 1;
+        int enemyAttack = 1;
+        int maxRounds = 1;
+        Reward reward = new Reward(List.of());
+        String progressActivityId = "";
+        int progressDelta = 0;
+        Reward firstClearReward = Reward.of();
+        int sweepRequiredStars = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> stageId = input.readString();
+                    case 2 -> playerHp = input.readInt32();
+                    case 3 -> playerAttack = input.readInt32();
+                    case 4 -> enemyHp = input.readInt32();
+                    case 5 -> enemyAttack = input.readInt32();
+                    case 6 -> maxRounds = input.readInt32();
+                    case 7 -> reward = decodeReward(input.readByteArray());
+                    case 8 -> progressActivityId = input.readString();
+                    case 9 -> progressDelta = input.readInt32();
+                    case 10 -> firstClearReward = decodeReward(input.readByteArray());
+                    case 11 -> sweepRequiredStars = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new BattleStageDefinition(stageId, playerHp, playerAttack, enemyHp, enemyAttack, maxRounds,
+                    reward, progressActivityId, progressDelta, firstClearReward, sweepRequiredStars);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode battle stage definition", e);
+        }
+    }
+
+    private static byte[] encodeTaskDefinition(TaskDefinition task) {
+        byte[] reward = encodeReward(task.reward());
+        int size = stringSize(1, task.taskId())
+                + stringSize(2, task.progressRule().eventType())
+                + stringSize(3, task.progressRule().subject())
+                + CodedOutputStream.computeInt32Size(4, task.threshold())
+                + CodedOutputStream.computeByteArraySize(5, reward);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, task.taskId());
+            output.writeString(2, task.progressRule().eventType());
+            output.writeString(3, task.progressRule().subject());
+            output.writeInt32(4, task.threshold());
+            output.writeByteArray(5, reward);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode task definition", e);
+        }
+    }
+
+    private static TaskDefinition decodeTaskDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String taskId = "";
+        String eventType = "";
+        String subject = "";
+        int threshold = 1;
+        Reward reward = Reward.of();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> taskId = input.readString();
+                    case 2 -> eventType = input.readString();
+                    case 3 -> subject = input.readString();
+                    case 4 -> threshold = input.readInt32();
+                    case 5 -> reward = decodeReward(input.readByteArray());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new TaskDefinition(taskId, eventType, subject, threshold, reward);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode task definition", e);
+        }
+    }
+
+    private static byte[] encodeAchievementDefinition(AchievementDefinition achievement) {
+        byte[] reward = encodeReward(achievement.reward());
+        int size = stringSize(1, achievement.achievementId())
+                + stringSize(2, achievement.progressRule().eventType())
+                + stringSize(3, achievement.progressRule().subject())
+                + CodedOutputStream.computeInt32Size(4, achievement.threshold())
+                + CodedOutputStream.computeByteArraySize(5, reward);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, achievement.achievementId());
+            output.writeString(2, achievement.progressRule().eventType());
+            output.writeString(3, achievement.progressRule().subject());
+            output.writeInt32(4, achievement.threshold());
+            output.writeByteArray(5, reward);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode achievement definition", e);
+        }
+    }
+
+    private static AchievementDefinition decodeAchievementDefinition(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String achievementId = "";
+        String eventType = "";
+        String subject = "";
+        int threshold = 1;
+        Reward reward = Reward.of();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> achievementId = input.readString();
+                    case 2 -> eventType = input.readString();
+                    case 3 -> subject = input.readString();
+                    case 4 -> threshold = input.readInt32();
+                    case 5 -> reward = decodeReward(input.readByteArray());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new AchievementDefinition(achievementId, eventType, subject, threshold, reward);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode achievement definition", e);
+        }
+    }
+
+    private static byte[] encodeEventProgressRule(EventProgressRule rule) {
+        int size = stringSize(1, rule.eventType())
+                + stringSize(2, rule.subject());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, rule.eventType());
+            output.writeString(2, rule.subject());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode event progress rule", e);
+        }
+    }
+
+    private static EventProgressRule decodeEventProgressRule(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String eventType = "";
+        String subject = "";
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> eventType = input.readString();
+                    case 2 -> subject = input.readString();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new EventProgressRule(eventType, subject);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode event progress rule", e);
         }
     }
 

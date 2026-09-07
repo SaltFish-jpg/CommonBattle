@@ -8,6 +8,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.game.scene.SceneRuntimeStats;
 
 import java.util.Map;
 import java.util.Set;
@@ -22,6 +23,8 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
     private final ServiceDescriptor baseDescriptor;
     private final int capacity;
     private final Map<String, ActorRef> scenes = new ConcurrentHashMap<>();
+    private final Map<String, Set<Long>> playersByScene = new ConcurrentHashMap<>();
+    private final Object sceneCreationLock = new Object();
 
     public MultiSmallSceneService(ActorSystem actors, ServiceId serviceId, ServiceEndpoint endpoint, int capacity) {
         this.actors = actors;
@@ -54,12 +57,53 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
 
     @Override
     public ServiceDescriptor descriptor() {
-        return ServiceMetadata.withLoad(baseDescriptor, scenes.size(), capacity);
+        return SceneRuntimeMetadata.apply(ServiceMetadata.withLoad(baseDescriptor, scenes.size(), capacity), stats());
+    }
+
+    @Override
+    public SceneRuntimeStats stats() {
+        int activePlayers = playersByScene.values().stream()
+                .mapToInt(Set::size)
+                .sum();
+        return new SceneRuntimeStats(playersByScene.size(), activePlayers, 0, activePlayers);
     }
 
     @Override
     public ScenePlacement place(String sceneId, int chunkX, int chunkY) {
-        ActorRef actor = scenes.computeIfAbsent(sceneId, id -> actors.actor("scene:" + baseDescriptor.id().node() + ":" + id));
+        ActorRef actor = scenes.get(sceneId);
+        if (actor == null) {
+            synchronized (sceneCreationLock) {
+                actor = scenes.get(sceneId);
+                if (actor == null) {
+                    if (scenes.size() >= capacity) {
+                        throw new SceneCapacityExceededException(baseDescriptor.id().node(), capacity);
+                    }
+                    actor = actors.actor("scene:" + baseDescriptor.id().node() + ":" + sceneId);
+                    scenes.put(sceneId, actor);
+                }
+            }
+        }
         return new ScenePlacement(sceneId, actor, 0, 1);
+    }
+
+    @Override
+    public ScenePlacement enter(long playerId, String sceneId, int chunkX, int chunkY) {
+        ScenePlacement placement = place(sceneId, chunkX, chunkY);
+        playersByScene.computeIfAbsent(placement.sceneId(), ignored -> ConcurrentHashMap.newKeySet()).add(playerId);
+        return placement;
+    }
+
+    @Override
+    public boolean leave(long playerId, String sceneId) {
+        Set<Long> players = playersByScene.get(sceneId);
+        if (players == null) {
+            return false;
+        }
+        boolean removed = players.remove(playerId);
+        if (players.isEmpty()) {
+            playersByScene.remove(sceneId, players);
+            scenes.remove(sceneId);
+        }
+        return removed;
     }
 }

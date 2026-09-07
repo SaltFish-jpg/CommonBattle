@@ -4,6 +4,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceRegistry;
 import com.commonbattle.runtime.DrainableComponent;
+import com.commonbattle.runtime.DrainPhase;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -108,6 +109,11 @@ public final class ServiceDescriptorPublisher implements AutoCloseable, Drainabl
                 failed.get(),
                 draining.get()
         );
+    }
+
+    @Override
+    public DrainPhase phase() {
+        return DrainPhase.EXTERNAL_ADVERTISEMENT;
     }
 
     @Override

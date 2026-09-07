@@ -9,8 +9,10 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventOperations;
 import com.commonbattle.cluster.registry.RegistryOperations;
 import com.commonbattle.game.config.GameConfigOperations;
+import com.commonbattle.game.player.PlayerBusinessRpcOperations;
 import com.commonbattle.game.profile.ProfileSnapshotOperations;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.game.shop.ShopStockOperations;
 
 import java.util.Map;
 import java.util.Set;
@@ -45,12 +47,16 @@ final class ClusterDescriptors {
                     ClusterEventOperations.SUBSCRIBE,
                     ClusterEventOperations.UNSUBSCRIBE,
                     ClusterEventOperations.PUBLISH,
-                    GameConfigOperations.SNAPSHOT
+                    GameConfigOperations.SNAPSHOT,
+                    ShopStockOperations.RESERVE,
+                    ShopStockOperations.RELEASE,
+                    ShopStockOperations.REMAINING
             );
             case REGION -> Set.of("region.route", "region.heartbeat");
             case GAME -> Set.of(
                     "game.resume",
                     "game.heartbeat",
+                    PlayerBusinessRpcOperations.DISPATCH,
                     ProfileSnapshotOperations.GET,
                     AgentMigrationOperations.ACCEPT
             );

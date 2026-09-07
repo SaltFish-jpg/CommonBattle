@@ -8,6 +8,14 @@ import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneResult;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.game.player.ActivityProgressCommand;
+import com.commonbattle.game.player.PlayerBusinessAck;
+import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.player.PlayerBusinessOperations;
+import com.commonbattle.game.player.PlayerBusinessResponse;
+import com.commonbattle.game.player.PlayerBusinessResponseStatus;
+import com.commonbattle.game.player.PlayerBusinessRpcOperations;
+import com.commonbattle.game.session.PlayerCommand;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -106,6 +114,55 @@ class ProtoClusterCodecTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals("room-1", requestPayload.sceneId());
         assertEquals(true, responsePayload.left());
+    }
+
+    @Test
+    void encodesPlayerBusinessCommandAndResponseEnvelope() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        ClusterEnvelope request = new ClusterEnvelope(
+                11,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                PlayerBusinessRpcOperations.DISPATCH,
+                new PlayerCommand(
+                        10001L,
+                        "session-1",
+                        1,
+                        1,
+                        PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                        new ActivityProgressCommand("kill-3", 1)
+                )
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                11,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                "$rpc.success",
+                new PlayerBusinessResponse(
+                        10001L,
+                        "session-1",
+                        1,
+                        1,
+                        PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                        PlayerBusinessResponseStatus.SUCCESS,
+                        PlayerBusinessResponse.OK,
+                        "",
+                        PlayerBusinessAck.OK
+                )
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        PlayerCommand command = assertInstanceOf(PlayerCommand.class, decodedRequest.payload());
+        ActivityProgressCommand payload = assertInstanceOf(ActivityProgressCommand.class, command.payload());
+        PlayerBusinessResponse businessResponse = assertInstanceOf(PlayerBusinessResponse.class, decodedResponse.payload());
+        assertEquals(PlayerBusinessRpcOperations.DISPATCH, decodedRequest.operation());
+        assertEquals(PlayerBusinessOperations.ACTIVITY_PROGRESS, command.operation());
+        assertEquals("kill-3", payload.activityId());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, businessResponse.status());
+        assertEquals(PlayerBusinessAck.OK, businessResponse.payload());
     }
 
     public static class PrototypeMoveRequest {

@@ -6,6 +6,8 @@ import com.commonbattle.game.profile.CachedProfile;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileInterestControl;
+import com.commonbattle.game.profile.ProfileReadMode;
+import com.commonbattle.game.profile.ProfileRuntime;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -21,8 +23,7 @@ import java.util.Set;
 public final class SceneProfileAwarenessAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
-    private final ProfileInterestControl interests;
-    private final LocalProfileCache cache;
+    private final ProfileRuntime profiles;
     private final Map<Long, Set<String>> onlineInterests = new HashMap<>();
 
     public SceneProfileAwarenessAgent(AgentMessagePort messages, ActorRef self) {
@@ -39,10 +40,17 @@ public final class SceneProfileAwarenessAgent {
             ProfileInterestControl interests,
             LocalProfileCache cache
     ) {
+        this(messages, self, new ProfileRuntime(cache, interests, ignored -> Optional.empty()));
+    }
+
+    public SceneProfileAwarenessAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            ProfileRuntime profiles
+    ) {
         this.messages = messages;
         this.self = self;
-        this.interests = Objects.requireNonNull(interests, "interests");
-        this.cache = Objects.requireNonNull(cache, "cache");
+        this.profiles = Objects.requireNonNull(profiles, "profiles");
     }
 
     public void enter(long playerId) {
@@ -57,7 +65,7 @@ public final class SceneProfileAwarenessAgent {
         messages.tellLocal(self, ignored -> {
             Set<String> keys = onlineInterests.computeIfAbsent(playerId, ignoredPlayer -> new HashSet<>());
             if (keys.add(interestKey)) {
-                interests.watch(playerId);
+                profiles.watch(playerId);
             }
         });
     }
@@ -79,19 +87,23 @@ public final class SceneProfileAwarenessAgent {
             if (keys.isEmpty()) {
                 onlineInterests.remove(playerId);
             }
-            interests.unwatch(playerId);
+            profiles.unwatch(playerId);
         });
     }
 
     public void onProfileChanged(ProfileChangedEvent event) {
         messages.tellLocal(self, ignored -> {
             if (onlineInterests.containsKey(event.playerId())) {
-                cache.apply(event);
+                profiles.apply(event);
             }
         });
     }
 
     public Optional<CachedProfile> profileOf(long playerId) {
-        return cache.get(playerId);
+        return profiles.read(playerId, ProfileReadMode.LOCAL_FAST).profile();
+    }
+
+    public ProfileRuntime profileRuntime() {
+        return profiles;
     }
 }

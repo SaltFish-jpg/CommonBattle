@@ -1,6 +1,7 @@
 package com.commonbattle.game.activity;
 
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.player.event.EventProgressRule;
 
 import java.util.Objects;
 
@@ -14,10 +15,23 @@ public record ActivityDefinition(
         int threshold,
         Reward reward,
         ActivitySchedule schedule,
-        ParticipationCondition participation
+        ParticipationCondition participation,
+        EventProgressRule progressRule
 ) {
     public ActivityDefinition(String activityId, ActivityType type, int threshold, Reward reward) {
-        this(activityId, type, threshold, reward, ActivitySchedule.alwaysOpen(), ParticipationCondition.always());
+        this(activityId, type, threshold, reward, ActivitySchedule.alwaysOpen(),
+                ParticipationCondition.always(), EventProgressRule.none());
+    }
+
+    public ActivityDefinition(
+            String activityId,
+            ActivityType type,
+            int threshold,
+            Reward reward,
+            ActivitySchedule schedule,
+            ParticipationCondition participation
+    ) {
+        this(activityId, type, threshold, reward, schedule, participation, EventProgressRule.none());
     }
 
     public ActivityDefinition {
@@ -26,6 +40,7 @@ public record ActivityDefinition(
         Objects.requireNonNull(reward, "reward");
         Objects.requireNonNull(schedule, "schedule");
         Objects.requireNonNull(participation, "participation");
+        Objects.requireNonNull(progressRule, "progressRule");
         if (activityId.isBlank()) {
             throw new IllegalArgumentException("Activity id must not be blank");
         }

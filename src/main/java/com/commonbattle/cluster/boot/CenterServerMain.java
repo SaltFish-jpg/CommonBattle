@@ -23,6 +23,15 @@ import com.commonbattle.game.config.GameConfigCenterEndpoint;
 import com.commonbattle.game.config.GameConfigCenterPublisher;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
+import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.shop.InMemoryShopStockRepository;
+import com.commonbattle.game.shop.SerializedShopStockRepository;
+import com.commonbattle.game.shop.ShopStockReservationRepository;
+import com.commonbattle.game.shop.ShopStockReservationRetentionScheduler;
+import com.commonbattle.game.shop.ShopStockReservationRetentionService;
+import com.commonbattle.game.shop.ShopStockEndpoint;
+import com.commonbattle.game.shop.ShopStockPayloadCodecs;
+import com.commonbattle.persistence.InMemoryAtomicBytesStore;
 
 import java.time.Clock;
 import java.util.concurrent.CountDownLatch;
@@ -41,9 +50,11 @@ public final class CenterServerMain {
             config.validate(ServiceKind.CENTER).throwIfInvalid();
             ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    AgentMigrationPayloadCodecs.registerTo(
-                            AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults()))
-                    )
+                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                            AgentMigrationPayloadCodecs.registerTo(
+                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults()))
+                            )
+                    ))
             );
             Clock clock = Clock.systemUTC();
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock);
@@ -60,6 +71,17 @@ public final class CenterServerMain {
                     new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport));
             runtime.add("centerRegistryEndpoint", new CenterRegistryEndpoint(center, registry, transport, gateway));
             new CenterAgentDirectoryEndpoint(new InMemoryAgentDirectory()).bind(gateway);
+            ShopStockReservationRepository stockRepository = shopStockRepository(config, clock);
+            new ShopStockEndpoint(stockRepository).bind(gateway);
+            if (config.shopStockReservationRetentionEnabled()) {
+                ShopStockReservationRetentionService stockRetention = new ShopStockReservationRetentionService(stockRepository);
+                runtime.observe("shopStockReservationRetention", stockRetention);
+                ShopStockReservationRetentionScheduler stockRetentionScheduler = runtime.add(
+                        "shopStockReservationRetentionScheduler",
+                        new ShopStockReservationRetentionScheduler(stockRetention, config.shopStockReservationScanInterval())
+                );
+                stockRetentionScheduler.start();
+            }
             RegistryLeaseReaper leaseReaper = runtime.add(
                     "leaseReaper",
                     new RegistryLeaseReaper(registry, clock, config.registryLeaseScanInterval())
@@ -82,5 +104,16 @@ public final class CenterServerMain {
             runtime.closeSuppressing(e);
             throw e;
         }
+    }
+
+    private static ShopStockReservationRepository shopStockRepository(ClusterNodeConfig config, Clock clock) {
+        return switch (config.shopStockStoreKind()) {
+            case MEMORY -> new InMemoryShopStockRepository(clock, config.shopStockReservationTtl());
+            case ATOMIC_MEMORY -> new SerializedShopStockRepository(
+                    new InMemoryAtomicBytesStore(),
+                    clock,
+                    config.shopStockReservationTtl()
+            );
+        };
     }
 }
