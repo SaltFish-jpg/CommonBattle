@@ -119,6 +119,59 @@ public final class ShopService implements ShopRuntimeView {
         return purchaseKnown(bag, state, orderId, definition.orElseThrow(), quantity, now);
     }
 
+    public boolean requiresStockReservation(String sku) {
+        Objects.requireNonNull(sku, "sku");
+        return catalog.find(sku).map(ShopItemDefinition::limitedStock).orElse(false);
+    }
+
+    public ShopPurchaseResult outOfStock(PlayerShopState state, String sku, int quantity, Instant now) {
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(sku, "sku");
+        Objects.requireNonNull(now, "now");
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive");
+        }
+        return rejected(ShopPurchaseStatus.OUT_OF_STOCK, sku, quantity,
+                state.lifetimePurchased(sku),
+                state.dailyPurchased(sku, LocalDate.ofInstant(now, resetZone)));
+    }
+
+    public ShopPurchaseResult purchaseReservedAt(
+            PlayerBag bag,
+            PlayerShopState state,
+            String orderId,
+            String sku,
+            int quantity,
+            Instant now
+    ) {
+        Objects.requireNonNull(bag, "bag");
+        Objects.requireNonNull(state, "state");
+        orderId = Objects.requireNonNullElse(orderId, "");
+        Objects.requireNonNull(sku, "sku");
+        Objects.requireNonNull(now, "now");
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive");
+        }
+        purchaseRequests.incrementAndGet();
+        if (!orderId.isBlank()) {
+            var recorded = orders.find(orderId);
+            if (recorded.isPresent()) {
+                ShopPurchaseOrder order = recorded.orElseThrow();
+                if (!order.matches(sku, quantity)) {
+                    return rejected(ShopPurchaseStatus.ORDER_CONFLICT, sku, quantity,
+                            state.lifetimePurchased(sku), state.dailyPurchased(sku, LocalDate.ofInstant(now, resetZone)));
+                }
+                idempotentReplays.incrementAndGet();
+                return order.result().asReplayed();
+            }
+        }
+        var definition = catalog.find(sku);
+        if (definition.isEmpty()) {
+            return rejected(ShopPurchaseStatus.UNKNOWN_ITEM, sku, quantity, 0, 0);
+        }
+        return purchaseKnownAfterStockReserved(bag, state, orderId, definition.orElseThrow(), quantity, now);
+    }
+
     private ShopPurchaseResult purchaseKnown(
             PlayerBag bag,
             PlayerShopState state,
@@ -151,9 +204,54 @@ public final class ShopService implements ShopRuntimeView {
             return rejected(ShopPurchaseStatus.OUT_OF_STOCK, definition.sku(), quantity,
                     lifetimePurchased, dailyPurchased);
         }
+        return completePurchase(bag, state, orderId, definition, quantity, now, lifetimePurchased, dailyPurchased, true);
+    }
+
+    private ShopPurchaseResult purchaseKnownAfterStockReserved(
+            PlayerBag bag,
+            PlayerShopState state,
+            String orderId,
+            ShopItemDefinition definition,
+            int quantity,
+            Instant now
+    ) {
+        LocalDate today = LocalDate.ofInstant(now, resetZone);
+        int lifetimePurchased = state.lifetimePurchased(definition.sku());
+        int dailyPurchased = state.dailyPurchased(definition.sku(), today);
+        if (exceeds(definition.lifetimeLimit(), lifetimePurchased, quantity)) {
+            return rejected(ShopPurchaseStatus.LIFETIME_LIMIT_REACHED, definition.sku(), quantity,
+                    lifetimePurchased, dailyPurchased);
+        }
+        if (exceeds(definition.dailyLimit(), dailyPurchased, quantity)) {
+            return rejected(ShopPurchaseStatus.DAILY_LIMIT_REACHED, definition.sku(), quantity,
+                    lifetimePurchased, dailyPurchased);
+        }
+        ItemStack cost = multiply(definition.price(), quantity);
+        Reward reward = multiply(definition.reward(), quantity);
+        bags.validate(cost);
+        bags.validate(reward);
+        if (!bag.has(cost.itemId(), cost.count())) {
+            return rejected(ShopPurchaseStatus.NOT_ENOUGH_CURRENCY, definition.sku(), quantity,
+                    lifetimePurchased, dailyPurchased);
+        }
+        return completePurchase(bag, state, orderId, definition, quantity, now, lifetimePurchased, dailyPurchased, false);
+    }
+
+    private ShopPurchaseResult completePurchase(
+            PlayerBag bag,
+            PlayerShopState state,
+            String orderId,
+            ShopItemDefinition definition,
+            int quantity,
+            Instant now,
+            int lifetimePurchased,
+            int dailyPurchased,
+            boolean releaseStockOnFailure
+    ) {
+        LocalDate today = LocalDate.ofInstant(now, resetZone);
         try {
-            BagResult costResult = bags.consume(bag, cost);
-            BagResult rewardResult = bags.grant(bag, reward);
+            BagResult costResult = bags.consume(bag, multiply(definition.price(), quantity));
+            BagResult rewardResult = bags.grant(bag, multiply(definition.reward(), quantity));
             state.record(definition.sku(), quantity, today);
             ShopPurchaseResult result = new ShopPurchaseResult(
                     ShopPurchaseStatus.SUCCESS,
@@ -172,7 +270,9 @@ public final class ShopService implements ShopRuntimeView {
             successfulPurchases.incrementAndGet();
             return result;
         } catch (RuntimeException e) {
-            releaseStock(orderId, definition, quantity);
+            if (releaseStockOnFailure) {
+                releaseStock(orderId, definition, quantity);
+            }
             throw e;
         }
     }

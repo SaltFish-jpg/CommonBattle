@@ -12,17 +12,20 @@ import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.actor.agent.remote.CenterAgentDirectoryEndpoint;
 import com.commonbattle.cluster.event.ClusterEventCenter;
 import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
+import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseReaper;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.CenterRegistryEndpoint;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
+import com.commonbattle.cluster.registry.RegistrySubscriptionLeaseReaper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.config.GameConfigCenterEndpoint;
 import com.commonbattle.game.config.GameConfigCenterPublisher;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
+import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.shop.InMemoryShopStockRepository;
 import com.commonbattle.game.shop.SerializedShopStockRepository;
@@ -50,14 +53,15 @@ public final class CenterServerMain {
             config.validate(ServiceKind.CENTER).throwIfInvalid();
             ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
                             AgentMigrationPayloadCodecs.registerTo(
                                     AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults()))
                             )
-                    ))
+                    )))
             );
             Clock clock = Clock.systemUTC();
-            InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock);
+            InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock, config.registryHistoryLimit());
+            runtime.observe("registryHistory", registry);
             ClusterDirectory directory = runtime.add("directory", new ClusterDirectory(registry));
             for (ServiceKind kind : ServiceKind.values()) {
                 directory.watch(kind);
@@ -69,7 +73,17 @@ public final class CenterServerMain {
             registry.register(center);
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
                     new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport));
-            runtime.add("centerRegistryEndpoint", new CenterRegistryEndpoint(center, registry, transport, gateway));
+            CenterRegistryEndpoint registryEndpoint = runtime.add(
+                    "centerRegistryEndpoint",
+                    new CenterRegistryEndpoint(
+                            center,
+                            registry,
+                            transport,
+                            gateway,
+                            clock,
+                            config.registrySubscriptionLeaseTtl()
+                    )
+            );
             new CenterAgentDirectoryEndpoint(new InMemoryAgentDirectory()).bind(gateway);
             ShopStockReservationRepository stockRepository = shopStockRepository(config, clock);
             new ShopStockEndpoint(stockRepository).bind(gateway);
@@ -87,9 +101,34 @@ public final class CenterServerMain {
                     new RegistryLeaseReaper(registry, clock, config.registryLeaseScanInterval())
             );
             leaseReaper.start();
+            RegistrySubscriptionLeaseReaper subscriptionLeaseReaper = runtime.add(
+                    "subscriptionLeaseReaper",
+                    new RegistrySubscriptionLeaseReaper(
+                            registryEndpoint,
+                            clock,
+                            config.registrySubscriptionLeaseScanInterval()
+                    )
+            );
+            subscriptionLeaseReaper.start();
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
-            ClusterEventCenter eventCenter = new ClusterEventCenter(center, transport, gateway, config.eventHistoryPolicy());
+            ClusterEventCenter eventCenter = new ClusterEventCenter(
+                    center,
+                    transport,
+                    gateway,
+                    config.eventHistoryPolicy(),
+                    clock,
+                    config.eventSubscriptionLeaseTtl()
+            );
             runtime.observe("eventCenter", eventCenter);
+            ClusterEventSubscriptionLeaseReaper eventSubscriptionLeaseReaper = runtime.add(
+                    "eventSubscriptionLeaseReaper",
+                    new ClusterEventSubscriptionLeaseReaper(
+                            eventCenter,
+                            clock,
+                            config.eventSubscriptionLeaseScanInterval()
+                    )
+            );
+            eventSubscriptionLeaseReaper.start();
             runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, runtime.healthRegistry()));
             GameConfigCenterPublisher configPublisher = new GameConfigCenterPublisher(
                     new InMemoryGameConfigRegistry(new GameConfigValidator(), clock),

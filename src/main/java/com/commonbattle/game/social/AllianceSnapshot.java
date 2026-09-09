@@ -9,4 +9,8 @@ public record AllianceSnapshot(long allianceId, long revision, Set<Long> members
     public AllianceSnapshot {
         members = Set.copyOf(members);
     }
+
+    public String ownerKey() {
+        return AllianceOwnerKeyParser.ownerKey(allianceId);
+    }
 }

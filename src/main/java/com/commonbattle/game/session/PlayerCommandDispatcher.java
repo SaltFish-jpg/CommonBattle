@@ -111,8 +111,11 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         }
         PlayerCommandStatus sequenceStatus = sequencer.inspect(command);
         if (sequenceStatus == PlayerCommandStatus.DUPLICATE) {
-            return result(command, PlayerCommandResult.duplicate(), PlayerCommandAuditOutcome.REJECTED,
-                    0, Duration.ZERO, "duplicate");
+            PlayerCommandStatus originalStatus = sequencer.committedStatus(command)
+                    .orElse(PlayerCommandStatus.ACCEPTED);
+            String reason = "duplicate:" + originalStatus.name();
+            return result(command, PlayerCommandResult.duplicateOf(originalStatus), PlayerCommandAuditOutcome.REJECTED,
+                    0, Duration.ZERO, reason);
         }
         if (sequenceStatus == PlayerCommandStatus.GAP) {
             return result(command, PlayerCommandResult.reject(PlayerCommandStatus.GAP, "command_gap"),
@@ -142,7 +145,7 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
             return result(command, PlayerCommandResult.reject(status, delivery.reason()),
                     PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, delivery.reason());
         }
-        sequencer.commit(command);
+        sequencer.commit(command, PlayerCommandStatus.ACCEPTED);
         return result(PlayerCommandResult.accepted());
     }
 

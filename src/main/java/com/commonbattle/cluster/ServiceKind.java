@@ -8,6 +8,7 @@ public enum ServiceKind {
     CENTER,
     REGION,
     GAME,
+    CHAT,
     SCENE,
     PROXY
 }

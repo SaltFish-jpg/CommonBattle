@@ -10,14 +10,28 @@ public record RuntimeHealthPolicy(
         long maxMigrationPendingTaskAgeMillis,
         int maxSceneActiveScenes,
         int maxSceneActivePlayers,
-        int maxSceneShardHotspotPlayers
+        int maxSceneShardHotspotPlayers,
+        int maxPlayerBusinessPendingResponses,
+        long maxPlayerBusinessPendingResponseAgeMillis
 ) {
     public RuntimeHealthPolicy(
             int maxQueuedTasks,
             int maxPendingOutboxEvents,
             long maxMigrationPendingTaskAgeMillis
     ) {
-        this(maxQueuedTasks, maxPendingOutboxEvents, maxMigrationPendingTaskAgeMillis, 0, 0, 0);
+        this(maxQueuedTasks, maxPendingOutboxEvents, maxMigrationPendingTaskAgeMillis, 0, 0, 0, 0, 0);
+    }
+
+    public RuntimeHealthPolicy(
+            int maxQueuedTasks,
+            int maxPendingOutboxEvents,
+            long maxMigrationPendingTaskAgeMillis,
+            int maxSceneActiveScenes,
+            int maxSceneActivePlayers,
+            int maxSceneShardHotspotPlayers
+    ) {
+        this(maxQueuedTasks, maxPendingOutboxEvents, maxMigrationPendingTaskAgeMillis,
+                maxSceneActiveScenes, maxSceneActivePlayers, maxSceneShardHotspotPlayers, 0, 0);
     }
 
     public RuntimeHealthPolicy {
@@ -39,9 +53,15 @@ public record RuntimeHealthPolicy(
         if (maxSceneShardHotspotPlayers < 0) {
             throw new IllegalArgumentException("maxSceneShardHotspotPlayers must not be negative");
         }
+        if (maxPlayerBusinessPendingResponses < 0) {
+            throw new IllegalArgumentException("maxPlayerBusinessPendingResponses must not be negative");
+        }
+        if (maxPlayerBusinessPendingResponseAgeMillis < 0) {
+            throw new IllegalArgumentException("maxPlayerBusinessPendingResponseAgeMillis must not be negative");
+        }
     }
 
     public static RuntimeHealthPolicy defaults() {
-        return new RuntimeHealthPolicy(10_000, 0, 300_000, 0, 0, 0);
+        return new RuntimeHealthPolicy(10_000, 0, 300_000, 0, 0, 0, 0, 0);
     }
 }

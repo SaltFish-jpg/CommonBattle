@@ -13,6 +13,8 @@ public record EventCenterHealthStats(
         int subscribers,
         long publishedEvents,
         long droppedEvents,
+        long deliveryFailures,
+        long expiredSubscriptions,
         Map<String, EventCenterTopicHealthStats> topics
 ) {
     public EventCenterHealthStats {
@@ -28,7 +30,7 @@ public record EventCenterHealthStats(
             long publishedEvents,
             long droppedEvents
     ) {
-        this(centerCount, topicCount, retainedEvents, retainedOwners, subscribers, publishedEvents, droppedEvents,
+        this(centerCount, topicCount, retainedEvents, retainedOwners, subscribers, publishedEvents, droppedEvents, 0, 0,
                 Map.of());
     }
 

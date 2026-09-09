@@ -19,6 +19,7 @@ public record ProfileReadResult(Optional<CachedProfile> profile, ProfileReadStat
 
     public boolean fresh() {
         return profile.filter(cached -> !cached.stale()).isPresent()
+                && status != ProfileReadStatus.REMOTE_STALE
                 && status != ProfileReadStatus.LOCAL_FALLBACK;
     }
 

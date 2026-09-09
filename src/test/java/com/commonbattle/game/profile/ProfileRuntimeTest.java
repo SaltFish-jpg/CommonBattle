@@ -27,7 +27,7 @@ class ProfileRuntimeTest {
         assertTrue(result.fresh());
         assertEquals("avatar_1", result.profile().orElseThrow().snapshot().appearance().avatar());
         assertEquals(0, reader.calls);
-        assertEquals(new ProfileRuntimeStats(1, 1, 0, 0, 0, 0, 0), runtime.stats());
+        assertEquals(new ProfileRuntimeStats(1, 1, 0, 0, 0, 0, 0, 0), runtime.stats());
     }
 
     @Test
@@ -44,7 +44,7 @@ class ProfileRuntimeTest {
         assertEquals(4, result.profile().orElseThrow().snapshot().revision());
         assertFalse(cache.isStale(10001L));
         assertEquals(1, reader.calls);
-        assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 1, 0, 0), runtime.stats());
+        assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 1, 0, 0, 0), runtime.stats());
     }
 
     @Test
@@ -74,7 +74,56 @@ class ProfileRuntimeTest {
         assertTrue(result.present());
         assertFalse(result.fresh());
         assertEquals("avatar_stale", result.profile().orElseThrow().snapshot().appearance().avatar());
-        assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 0, 0, 1), runtime.stats());
+        assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 0, 0, 0, 1), runtime.stats());
+    }
+
+    @Test
+    void readAtLeastUsesLocalSnapshotWhenRevisionIsAlreadyFreshEnough() {
+        LocalProfileCache cache = new LocalProfileCache();
+        cache.apply(event(1, "hero", "avatar_1"));
+        cache.apply(event(2, "hero", "avatar_2"));
+        cache.apply(event(3, "hero", "avatar_3"));
+        CountingReader reader = new CountingReader(event(4, "hero", "avatar_4").snapshot());
+        ProfileRuntime runtime = new ProfileRuntime(cache, ProfileInterestControl.noop(), reader);
+
+        ProfileReadResult result = runtime.readAtLeast(10001L, 2);
+
+        assertEquals(ProfileReadStatus.LOCAL_HIT, result.status());
+        assertTrue(result.fresh());
+        assertEquals(3, result.profile().orElseThrow().snapshot().revision());
+        assertEquals(0, reader.calls);
+    }
+
+    @Test
+    void readAtLeastRefreshesStaleEventSnapshotAtRequiredRevision() {
+        LocalProfileCache cache = new LocalProfileCache();
+        cache.apply(event(3, "hero-gap", "avatar_gap"));
+        CountingReader reader = new CountingReader(event(3, "hero", "avatar_3").snapshot());
+        ProfileRuntime runtime = new ProfileRuntime(cache, ProfileInterestControl.noop(), reader);
+
+        ProfileReadResult result = runtime.readAtLeast(10001L, 3);
+
+        assertEquals(ProfileReadStatus.REFRESHED, result.status());
+        assertTrue(result.fresh());
+        assertEquals("avatar_3", result.profile().orElseThrow().snapshot().appearance().avatar());
+        assertFalse(cache.isStale(10001L));
+        assertEquals(1, reader.calls);
+    }
+
+    @Test
+    void readAtLeastRejectsRemoteSnapshotOlderThanRequiredRevision() {
+        LocalProfileCache cache = new LocalProfileCache();
+        cache.apply(event(2, "hero", "avatar_2"));
+        CountingReader reader = new CountingReader(event(2, "hero", "avatar_2").snapshot());
+        ProfileRuntime runtime = new ProfileRuntime(cache, ProfileInterestControl.noop(), reader);
+
+        ProfileReadResult result = runtime.readAtLeast(10001L, 3);
+
+        assertEquals(ProfileReadStatus.REMOTE_STALE, result.status());
+        assertTrue(result.present());
+        assertFalse(result.fresh());
+        assertEquals(2, result.profile().orElseThrow().snapshot().revision());
+        assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 0, 1, 0, 0), runtime.stats());
     }
 
     @Test

@@ -11,6 +11,8 @@ public record ClusterEventTopicStats(
         int subscribers,
         long publishedEvents,
         long droppedEvents,
+        long deliveryFailures,
+        long expiredSubscriptions,
         long minRetainedRevision,
         long maxRetainedRevision
 ) {

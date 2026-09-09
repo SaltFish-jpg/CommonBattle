@@ -34,6 +34,9 @@ public final class RegistryPayloadCodecs {
         registry.register(new ListRequestCodec());
         registry.register(new ListResponseCodec());
         registry.register(new SubscribeRequestCodec());
+        registry.register(new UnsubscribeRequestCodec());
+        registry.register(new ReplayRequestCodec());
+        registry.register(new ReplayResponseCodec());
         registry.register(new RegistryEventCodec());
         registry.register(new AckCodec());
         return registry;
@@ -274,11 +277,17 @@ public final class RegistryPayloadCodecs {
             for (byte[] service : services) {
                 size += CodedOutputStream.computeByteArraySize(1, service);
             }
+            if (payload.version() > 0) {
+                size += CodedOutputStream.computeInt64Size(2, payload.version());
+            }
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
                 for (byte[] service : services) {
                     output.writeByteArray(1, service);
+                }
+                if (payload.version() > 0) {
+                    output.writeInt64(2, payload.version());
                 }
                 output.flush();
                 return bytes;
@@ -291,16 +300,17 @@ public final class RegistryPayloadCodecs {
         public RegistryListResponse decode(byte[] bytes) {
             CodedInputStream input = CodedInputStream.newInstance(bytes);
             List<ServiceDescriptor> services = new ArrayList<>();
+            long version = 0;
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
-                    if (WireFormat.getTagFieldNumber(tag) == 1) {
-                        services.add(decodeDescriptor(input.readByteArray()));
-                    } else {
-                        input.skipField(tag);
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> services.add(decodeDescriptor(input.readByteArray()));
+                        case 2 -> version = input.readInt64();
+                        default -> input.skipField(tag);
                     }
                 }
-                return new RegistryListResponse(services);
+                return new RegistryListResponse(services, version);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode registry list response", e);
             }
@@ -320,16 +330,232 @@ public final class RegistryPayloadCodecs {
 
         @Override
         public byte[] encode(RegistrySubscribeRequest payload) {
-            return stringBytes(string(encodeServiceId(payload.subscriber())) + "|" + payload.kind().name());
+            byte[] subscriber = encodeServiceId(payload.subscriber());
+            int size = CodedOutputStream.computeByteArraySize(1, subscriber)
+                    + CodedOutputStream.computeStringSize(2, payload.kind().name());
+            if (payload.sinceVersion() > 0) {
+                size += CodedOutputStream.computeInt64Size(3, payload.sinceVersion());
+            }
+            long leaseMillis = payload.leaseTtl().toMillis();
+            if (leaseMillis > 0) {
+                size += CodedOutputStream.computeInt64Size(4, leaseMillis);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, subscriber);
+                output.writeString(2, payload.kind().name());
+                if (payload.sinceVersion() > 0) {
+                    output.writeInt64(3, payload.sinceVersion());
+                }
+                if (leaseMillis > 0) {
+                    output.writeInt64(4, leaseMillis);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry subscribe request", e);
+            }
         }
 
         @Override
         public RegistrySubscribeRequest decode(byte[] bytes) {
-            String[] parts = string(bytes).split("\\|", -1);
-            return new RegistrySubscribeRequest(
-                    ServiceId.of(ServiceKind.valueOf(parts[0]), parts[1], parts[2]),
-                    ServiceKind.valueOf(parts[3])
-            );
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ServiceId subscriber = null;
+            ServiceKind kind = null;
+            long sinceVersion = 0;
+            long leaseMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> subscriber = decodeServiceId(input.readByteArray());
+                        case 2 -> kind = ServiceKind.valueOf(input.readString());
+                        case 3 -> sinceVersion = input.readInt64();
+                        case 4 -> leaseMillis = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                if (subscriber == null || kind == null) {
+                    throw new IllegalStateException("Missing subscriber or kind in registry subscribe request");
+                }
+                return new RegistrySubscribeRequest(subscriber, kind, sinceVersion, Duration.ofMillis(leaseMillis));
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry subscribe request", e);
+            }
+        }
+    }
+
+    private static final class UnsubscribeRequestCodec implements PayloadCodec<RegistryUnsubscribeRequest> {
+        @Override
+        public String typeName() {
+            return RegistryUnsubscribeRequest.class.getName();
+        }
+
+        @Override
+        public Class<RegistryUnsubscribeRequest> javaType() {
+            return RegistryUnsubscribeRequest.class;
+        }
+
+        @Override
+        public byte[] encode(RegistryUnsubscribeRequest payload) {
+            byte[] subscriber = encodeServiceId(payload.subscriber());
+            int size = CodedOutputStream.computeByteArraySize(1, subscriber)
+                    + CodedOutputStream.computeStringSize(2, payload.kind().name());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, subscriber);
+                output.writeString(2, payload.kind().name());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry unsubscribe request", e);
+            }
+        }
+
+        @Override
+        public RegistryUnsubscribeRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ServiceId subscriber = null;
+            ServiceKind kind = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> subscriber = decodeServiceId(input.readByteArray());
+                        case 2 -> kind = ServiceKind.valueOf(input.readString());
+                        default -> input.skipField(tag);
+                    }
+                }
+                if (subscriber == null || kind == null) {
+                    throw new IllegalStateException("Missing subscriber or kind in registry unsubscribe request");
+                }
+                return new RegistryUnsubscribeRequest(subscriber, kind);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry unsubscribe request", e);
+            }
+        }
+    }
+
+    private static final class ReplayRequestCodec implements PayloadCodec<RegistryReplayRequest> {
+        @Override
+        public String typeName() {
+            return RegistryReplayRequest.class.getName();
+        }
+
+        @Override
+        public Class<RegistryReplayRequest> javaType() {
+            return RegistryReplayRequest.class;
+        }
+
+        @Override
+        public byte[] encode(RegistryReplayRequest payload) {
+            byte[] subscriber = encodeServiceId(payload.subscriber());
+            int size = CodedOutputStream.computeByteArraySize(1, subscriber)
+                    + CodedOutputStream.computeStringSize(2, payload.kind().name())
+                    + CodedOutputStream.computeInt64Size(3, payload.sinceVersion());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, subscriber);
+                output.writeString(2, payload.kind().name());
+                output.writeInt64(3, payload.sinceVersion());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry replay request", e);
+            }
+        }
+
+        @Override
+        public RegistryReplayRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ServiceId subscriber = null;
+            ServiceKind kind = null;
+            long sinceVersion = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> subscriber = decodeServiceId(input.readByteArray());
+                        case 2 -> kind = ServiceKind.valueOf(input.readString());
+                        case 3 -> sinceVersion = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                if (subscriber == null || kind == null) {
+                    throw new IllegalStateException("Missing subscriber or kind in registry replay request");
+                }
+                return new RegistryReplayRequest(subscriber, kind, sinceVersion);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry replay request", e);
+            }
+        }
+    }
+
+    private static final class ReplayResponseCodec implements PayloadCodec<RegistryReplayResponse> {
+        @Override
+        public String typeName() {
+            return RegistryReplayResponse.class.getName();
+        }
+
+        @Override
+        public Class<RegistryReplayResponse> javaType() {
+            return RegistryReplayResponse.class;
+        }
+
+        @Override
+        public byte[] encode(RegistryReplayResponse payload) {
+            List<byte[]> events = payload.events().stream().map(RegistryPayloadCodecs::encodeEvent).toList();
+            int size = CodedOutputStream.computeInt64Size(2, payload.currentVersion())
+                    + CodedOutputStream.computeBoolSize(3, payload.compacted());
+            if (payload.minReplayVersion() > 0) {
+                size += CodedOutputStream.computeInt64Size(4, payload.minReplayVersion());
+            }
+            for (byte[] event : events) {
+                size += CodedOutputStream.computeByteArraySize(1, event);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                for (byte[] event : events) {
+                    output.writeByteArray(1, event);
+                }
+                output.writeInt64(2, payload.currentVersion());
+                output.writeBool(3, payload.compacted());
+                if (payload.minReplayVersion() > 0) {
+                    output.writeInt64(4, payload.minReplayVersion());
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode registry replay response", e);
+            }
+        }
+
+        @Override
+        public RegistryReplayResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            List<RegistryEvent> events = new ArrayList<>();
+            long currentVersion = 0;
+            boolean compacted = false;
+            long minReplayVersion = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> events.add(decodeEvent(input.readByteArray()));
+                        case 2 -> currentVersion = input.readInt64();
+                        case 3 -> compacted = input.readBool();
+                        case 4 -> minReplayVersion = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new RegistryReplayResponse(events, currentVersion, compacted, minReplayVersion);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode registry replay response", e);
+            }
         }
     }
 
@@ -346,13 +572,58 @@ public final class RegistryPayloadCodecs {
 
         @Override
         public byte[] encode(RegistryEvent payload) {
-            return stringBytes(payload.type().name() + "|" + string(encodeDescriptor(payload.service())));
+            return encodeEvent(payload);
         }
 
         @Override
         public RegistryEvent decode(byte[] bytes) {
-            String[] parts = string(bytes).split("\\|", 2);
-            return new RegistryEvent(RegistryEventType.valueOf(parts[0]), decodeDescriptor(stringBytes(parts[1])));
+            return decodeEvent(bytes);
+        }
+    }
+
+    private static byte[] encodeEvent(RegistryEvent event) {
+        byte[] service = encodeDescriptor(event.service());
+        int size = CodedOutputStream.computeStringSize(1, event.type().name())
+                + CodedOutputStream.computeByteArraySize(2, service);
+        if (event.version() > 0) {
+            size += CodedOutputStream.computeInt64Size(3, event.version());
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, event.type().name());
+            output.writeByteArray(2, service);
+            if (event.version() > 0) {
+                output.writeInt64(3, event.version());
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode registry event", e);
+        }
+    }
+
+    private static RegistryEvent decodeEvent(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        RegistryEventType type = null;
+        ServiceDescriptor service = null;
+        long version = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> type = RegistryEventType.valueOf(input.readString());
+                    case 2 -> service = decodeDescriptor(input.readByteArray());
+                    case 3 -> version = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            if (type == null || service == null) {
+                throw new IllegalStateException("Missing type or service in registry event");
+            }
+            return new RegistryEvent(type, service, version);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode registry event", e);
         }
     }
 

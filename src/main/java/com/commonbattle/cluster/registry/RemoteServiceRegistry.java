@@ -13,6 +13,7 @@ import com.commonbattle.cluster.ServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 
 import java.util.EnumMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.time.Duration;
@@ -20,6 +21,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -30,7 +33,10 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
     private final ServiceId local;
     private final ClusterRpcGateway gateway;
     private final ClusterDirectory mirror;
+    private final Duration subscriptionLeaseTtl;
     private final java.util.Map<ServiceId, ServiceDescriptor> cache = new ConcurrentHashMap<>();
+    private final java.util.Map<ServiceKind, Long> versions = new ConcurrentHashMap<>();
+    private final java.util.Map<ServiceKind, AtomicInteger> remoteReferences = new EnumMap<>(ServiceKind.class);
     private final java.util.Map<ServiceKind, CopyOnWriteArrayList<RegistrySubscriber>> subscribers =
             new EnumMap<>(ServiceKind.class);
 
@@ -39,11 +45,23 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
     }
 
     public RemoteServiceRegistry(ServiceId local, ClusterRpcGateway gateway, ClusterDirectory mirror) {
+        this(local, gateway, mirror, Duration.ofSeconds(15));
+    }
+
+    public RemoteServiceRegistry(
+            ServiceId local,
+            ClusterRpcGateway gateway,
+            ClusterDirectory mirror,
+            Duration subscriptionLeaseTtl
+    ) {
         this.local = Objects.requireNonNull(local, "local");
         this.gateway = Objects.requireNonNull(gateway, "gateway");
         this.mirror = mirror;
+        this.subscriptionLeaseTtl = positive(subscriptionLeaseTtl, "subscriptionLeaseTtl");
         for (ServiceKind kind : ServiceKind.values()) {
             subscribers.put(kind, new CopyOnWriteArrayList<>());
+            versions.put(kind, 0L);
+            remoteReferences.put(kind, new AtomicInteger());
         }
         this.gateway.handle(RegistryOperations.EVENT, (request, responder) -> {
             RegistryEvent event = (RegistryEvent) request.payload();
@@ -98,27 +116,121 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
     @Override
     public AutoCloseable subscribe(ServiceKind kind, RegistrySubscriber subscriber) {
         subscribers.get(kind).add(Objects.requireNonNull(subscriber, "subscriber"));
+        int references = remoteReferences.get(kind).incrementAndGet();
+        try {
+            RegistryListResponse snapshot = refresh(kind);
+            if (references == 1) {
+                await(new RpcRequest<>(
+                        ServiceKind.CENTER.name(),
+                        RegistryOperations.SUBSCRIBE,
+                        new RegistrySubscribeRequest(local, kind, snapshot.version(), subscriptionLeaseTtl),
+                        RegistryAck.class
+                ));
+            }
+        } catch (RuntimeException e) {
+            subscribers.get(kind).remove(subscriber);
+            remoteReferences.get(kind).decrementAndGet();
+            throw e;
+        }
+        AtomicBoolean closed = new AtomicBoolean();
+        return () -> {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+            subscribers.get(kind).remove(subscriber);
+            int remaining = remoteReferences.get(kind).decrementAndGet();
+            if (remaining == 0) {
+                await(new RpcRequest<>(
+                        ServiceKind.CENTER.name(),
+                        RegistryOperations.UNSUBSCRIBE,
+                        new RegistryUnsubscribeRequest(local, kind),
+                        RegistryAck.class
+                ));
+            } else if (remaining < 0) {
+                remoteReferences.get(kind).set(0);
+                throw new IllegalStateException("Registry subscription reference underflow: " + kind);
+            }
+        };
+    }
+
+    public int recoverSubscriptions() {
+        int recoveredKinds = 0;
+        for (ServiceKind kind : ServiceKind.values()) {
+            if (subscribers.get(kind).isEmpty()) {
+                continue;
+            }
+            RegistryReplayResponse replay = await(new RpcRequest<>(
+                    ServiceKind.CENTER.name(),
+                    RegistryOperations.REPLAY,
+                    new RegistryReplayRequest(local, kind, versions.get(kind)),
+                    RegistryReplayResponse.class
+            ));
+            if (replay.compacted()) {
+                refresh(kind);
+            } else {
+                replay.events().forEach(this::apply);
+                versions.compute(kind, (ignored, current) -> Math.max(current == null ? 0 : current, replay.currentVersion()));
+            }
+            await(new RpcRequest<>(
+                        ServiceKind.CENTER.name(),
+                        RegistryOperations.SUBSCRIBE,
+                        new RegistrySubscribeRequest(local, kind, versions.get(kind), subscriptionLeaseTtl),
+                        RegistryAck.class
+                ));
+            recoveredKinds++;
+        }
+        return recoveredKinds;
+    }
+
+    private RegistryListResponse refresh(ServiceKind kind) {
         RegistryListResponse snapshot = await(new RpcRequest<>(
                 ServiceKind.CENTER.name(),
                 RegistryOperations.LIST,
                 new RegistryListRequest(kind),
                 RegistryListResponse.class
         ));
-        snapshot.services().forEach(service -> apply(new RegistryEvent(RegistryEventType.REGISTERED, service)));
-        await(new RpcRequest<>(
-                ServiceKind.CENTER.name(),
-                RegistryOperations.SUBSCRIBE,
-                new RegistrySubscribeRequest(local, kind),
-                RegistryAck.class
-        ));
-        return () -> subscribers.get(kind).remove(subscriber);
+        replace(kind, snapshot.services(), snapshot.version());
+        return snapshot;
+    }
+
+    private void replace(ServiceKind kind, List<ServiceDescriptor> services, long version) {
+        List<ServiceDescriptor> existing = cache.values().stream()
+                .filter(service -> service.id().kind() == kind)
+                .toList();
+        java.util.Map<ServiceId, ServiceDescriptor> next = new java.util.HashMap<>();
+        services.forEach(service -> next.put(service.id(), service));
+        List<RegistryEvent> syntheticEvents = new ArrayList<>();
+        for (ServiceDescriptor current : existing) {
+            if (!next.containsKey(current.id())) {
+                cache.remove(current.id());
+                syntheticEvents.add(new RegistryEvent(RegistryEventType.UNREGISTERED, current));
+            }
+        }
+        for (ServiceDescriptor service : services) {
+            ServiceDescriptor previous = cache.put(service.id(), service);
+            if (!service.equals(previous)) {
+                syntheticEvents.add(new RegistryEvent(RegistryEventType.REGISTERED, service));
+            }
+        }
+        versions.put(kind, version);
+        if (mirror != null) {
+            mirror.replace(kind, services, version);
+        }
+        syntheticEvents.forEach(event ->
+                subscribers.get(event.service().id().kind()).forEach(subscriber -> subscriber.onEvent(event)));
     }
 
     private void apply(RegistryEvent event) {
+        if (event.version() > 0 && event.version() <= versions.get(event.service().id().kind())) {
+            return;
+        }
         if (event.type() == RegistryEventType.REGISTERED) {
             cache.put(event.service().id(), event.service());
         } else {
             cache.remove(event.service().id());
+        }
+        if (event.version() > 0) {
+            versions.put(event.service().id().kind(), event.version());
         }
         if (mirror != null) {
             mirror.accept(event);
@@ -155,5 +267,13 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
             throw new IllegalStateException("Registry RPC failed: " + request.operation(), failure.get());
         }
         return value.get();
+    }
+
+    private static Duration positive(Duration duration, String name) {
+        Objects.requireNonNull(duration, name);
+        if (duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return duration;
     }
 }

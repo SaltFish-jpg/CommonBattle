@@ -2,6 +2,8 @@ package com.commonbattle.example.cross.scene;
 
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.game.scene.SceneRuntimeStats;
+import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
+import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
 import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 
@@ -16,9 +18,11 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     private final SceneServiceStrategy delegate;
     private final SceneProfileAwarenessAgent profiles;
     private final ScenePlayerDomainEventAgent domainEvents;
+    private final SceneAllianceAwarenessAgent allianceEvents;
+    private final SceneFriendAwarenessAgent friendEvents;
 
     public ProfileAwareSceneService(SceneServiceStrategy delegate, SceneProfileAwarenessAgent profiles) {
-        this(delegate, profiles, null);
+        this(delegate, profiles, null, null, null);
     }
 
     public ProfileAwareSceneService(
@@ -26,9 +30,30 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
             SceneProfileAwarenessAgent profiles,
             ScenePlayerDomainEventAgent domainEvents
     ) {
+        this(delegate, profiles, domainEvents, null, null);
+    }
+
+    public ProfileAwareSceneService(
+            SceneServiceStrategy delegate,
+            SceneProfileAwarenessAgent profiles,
+            ScenePlayerDomainEventAgent domainEvents,
+            SceneAllianceAwarenessAgent allianceEvents
+    ) {
+        this(delegate, profiles, domainEvents, allianceEvents, null);
+    }
+
+    public ProfileAwareSceneService(
+            SceneServiceStrategy delegate,
+            SceneProfileAwarenessAgent profiles,
+            ScenePlayerDomainEventAgent domainEvents,
+            SceneAllianceAwarenessAgent allianceEvents,
+            SceneFriendAwarenessAgent friendEvents
+    ) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.domainEvents = domainEvents;
+        this.allianceEvents = allianceEvents;
+        this.friendEvents = friendEvents;
     }
 
     @Override
@@ -53,6 +78,12 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
         if (domainEvents != null) {
             domainEvents.enter(playerId);
         }
+        if (allianceEvents != null) {
+            allianceEvents.enter(playerId);
+        }
+        if (friendEvents != null) {
+            friendEvents.enter(playerId);
+        }
         return placement;
     }
 
@@ -64,6 +95,12 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
             if (domainEvents != null) {
                 domainEvents.leave(playerId);
             }
+            if (allianceEvents != null) {
+                allianceEvents.leave(playerId);
+            }
+            if (friendEvents != null) {
+                friendEvents.leave(playerId);
+            }
         }
         return left;
     }
@@ -74,5 +111,13 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
 
     public Optional<ScenePlayerDomainEventAgent> domainEvents() {
         return Optional.ofNullable(domainEvents);
+    }
+
+    public Optional<SceneAllianceAwarenessAgent> allianceEvents() {
+        return Optional.ofNullable(allianceEvents);
+    }
+
+    public Optional<SceneFriendAwarenessAgent> friendEvents() {
+        return Optional.ofNullable(friendEvents);
     }
 }

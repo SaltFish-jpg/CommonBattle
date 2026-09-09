@@ -12,11 +12,12 @@ public record ProfileRuntimeHealthStats(
         long localStale,
         long localMisses,
         long refreshes,
+        long remoteStale,
         long remoteMisses,
         long localFallbacks
 ) {
     public static ProfileRuntimeHealthStats empty() {
-        return new ProfileRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0);
+        return new ProfileRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static ProfileRuntimeHealthStats from(int runtimeCount, ProfileRuntimeStats stats) {
@@ -27,6 +28,7 @@ public record ProfileRuntimeHealthStats(
                 stats.localStale(),
                 stats.localMisses(),
                 stats.refreshes(),
+                stats.remoteStale(),
                 stats.remoteMisses(),
                 stats.localFallbacks()
         );

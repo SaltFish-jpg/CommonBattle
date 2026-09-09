@@ -12,6 +12,7 @@ import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
 import com.commonbattle.game.profile.ProfileInterestControl;
+import com.commonbattle.game.profile.ProfileRuntime;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -55,7 +56,8 @@ class SceneProfileAwarenessAgentTest {
     @Test
     void sceneMarksProfileCacheStaleWhenEventRevisionHasGap() {
         RecordingExecutor executor = new RecordingExecutor();
-        SceneProfileAwarenessAgent scene = createScene(executor);
+        RecordingInterestControl interests = new RecordingInterestControl();
+        SceneProfileAwarenessAgent scene = createScene(executor, interests);
 
         scene.enter(10001L);
         executor.runNext();
@@ -64,6 +66,7 @@ class SceneProfileAwarenessAgentTest {
 
         assertTrue(scene.profileOf(10001L).orElseThrow().stale());
         assertEquals(3, scene.profileOf(10001L).orElseThrow().snapshot().revision());
+        assertEquals(List.of(10001L), interests.repairs);
     }
 
     @Test
@@ -110,6 +113,32 @@ class SceneProfileAwarenessAgentTest {
         assertEquals(List.of(10001L, 10001L), interests.unwatched);
         assertEquals("avatar_2", scene.profileOf(10001L).orElseThrow().snapshot().appearance().avatar());
         assertEquals(1, scene.profileOf(10001L).orElseThrow().snapshot().revision());
+    }
+
+    @Test
+    void freshProfileOfRefreshesAfterGapEventBeforeSceneUsesSnapshot() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        var cache = new com.commonbattle.game.profile.LocalProfileCache();
+        ProfileRuntime runtime = new ProfileRuntime(
+                cache,
+                ProfileInterestControl.noop(),
+                playerId -> java.util.Optional.of(event(playerId, 3, "hero", "avatar_3").snapshot())
+        );
+        SceneProfileAwarenessAgent scene = new SceneProfileAwarenessAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                actors.actor("scene-profile"),
+                runtime
+        );
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onProfileChanged(event(10001L, 3, "hero", "avatar_gap"));
+        executor.runNext();
+
+        PlayerProfileSnapshot snapshot = scene.freshProfileOf(10001L, 3).orElseThrow().snapshot();
+        assertEquals("avatar_3", snapshot.appearance().avatar());
+        assertFalse(scene.profileOf(10001L).orElseThrow().stale());
     }
 
     private static SceneProfileAwarenessAgent createScene(Executor executor) {
@@ -164,6 +193,7 @@ class SceneProfileAwarenessAgentTest {
     private static final class RecordingInterestControl implements ProfileInterestControl {
         private final List<Long> watched = new ArrayList<>();
         private final List<Long> unwatched = new ArrayList<>();
+        private final List<Long> repairs = new ArrayList<>();
 
         @Override
         public void watch(long playerId) {
@@ -173,6 +203,11 @@ class SceneProfileAwarenessAgentTest {
         @Override
         public void unwatch(long playerId) {
             unwatched.add(playerId);
+        }
+
+        @Override
+        public void requestRepair(long playerId) {
+            repairs.add(playerId);
         }
     }
 }

@@ -1,1 +1,40 @@
-现在开始 需要你持续的探索，将当前实现作为一个工业级的游戏服务器actor架构，所需要的各种框架支持，补充需求，实现需求，循环补全，直到你任务可以交付一个完美版为止，如有不确定的地方可以向我提问；完成一阶段后向我汇报后再进行下一阶段补全。
+把当前项目持续补全成一个“工业级游戏服务器 Actor 架构”，核心是类似 Skynet 的玩家/业务实体 Actor 模型：每个玩家或业务实体拥有独立 mailbox，RPC/Netty 回调只投递消息，业务逻辑统一回到 Actor 邮箱串行执行。并且要求常见游戏业务都有样例实现：战斗、背包、商店、活动、养成等，每完成一阶段都要汇报并跑测试验证。
+已经推进过的阶段大致是：
+Actor + 跨服服务骨架
+区分 Game、Scene、Region、Center、Proxy，支持独立部署、注册中心、订阅流程、代理转发、Netty 底层传输。
+
+RPC 与 protobuf/protostuff 协议层
+引入统一 ClusterEnvelope，payload 支持显式 codec 和 protostuff bean；明确 .proto/字段尾后追加/灰度兼容的设计原则。
+
+玩家业务框架
+搭了玩家 PlayerGameAgent、PlayerCommandDispatcher、session/sequence 校验、玩家命令审计、本服 agent 通信和跨服 RPC 分发边界。
+
+通用业务样例
+已补背包、活动、养成、商店、战斗、任务、成就等基础样例，并接入玩家命令统一入口。
+
+活动调度增强
+活动支持自然时间、开服时间、参与条件判断、进度和领奖逻辑。
+
+Profile 快照与事件感知
+设计并实现基础资料快照、本地 cache、订阅变更事件、Scene/Chat 等服务按需读取最新或可接受快照。
+
+Scene 服务多形态
+支持多小场景共服、一个大 Scene 独占进程、大 Scene 分片/切块压榨 CPU，并把 Scene 容量、负载、健康状态纳入路由和观测。
+
+玩家业务统一响应
+新增 PlayerBusinessResponse 统一响应信封，补了请求/响应 codec。
+又实现了 PlayerBusinessCommandGateway：本服命令进本地 mailbox，远端 owner 命令转 RPC 到目标 Game，最终都返回统一业务响应。
+
+当前下一阶段原计划是：
+补“玩家业务响应等待链路”的工业级保障：
+PlayerBusinessResponseHub 增加 pending、submitted、completed、cancelled、timedOut、fallback 等指标。
+给等待玩家邮箱业务结果的请求加超时清理。
+超时后也返回统一失败信封，而不是让调用方处理另一套异常模型。
+把这些指标接入 RuntimeHealthProbe、ops JSON 和 Prometheus metrics。
+增加对应测试并跑全量 mvn test -DargLine=-Xmx256m。
+再后续可以继续做：
+玩家迁服/Agent migration 的完整业务端到端样例。
+跨服事件最终一致性补偿。
+商店/活动等业务的跨服版本。
+灰度发布、协议兼容校验和启动期 codec 完整性检查。
+压测/调度公平性/热点玩家 mailbox 观测。

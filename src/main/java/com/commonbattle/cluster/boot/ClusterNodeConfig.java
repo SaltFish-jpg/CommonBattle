@@ -7,7 +7,9 @@ import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
+import com.commonbattle.cluster.rpc.PlayerGrayRouteConfig;
 import com.commonbattle.observability.DrainConfig;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
 import com.commonbattle.observability.RuntimeHealthPolicy;
@@ -20,10 +22,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * 独立部署进程使用的节点配置。
@@ -86,6 +90,7 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.player.command.rate.capacity");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.permits");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.interval.millis");
+        validatePositiveInteger(issues, "cluster.player.business.response.timeout.millis");
         validateBoolean(issues, "cluster.player.auto.save.enabled");
         validateNonNegativeInteger(issues, "cluster.player.auto.save.initial.delay.millis");
         validatePositiveInteger(issues, "cluster.player.auto.save.interval.millis");
@@ -98,6 +103,8 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.health.max.scene.active.scenes");
         validateNonNegativeInteger(issues, "cluster.health.max.scene.active.players");
         validateNonNegativeInteger(issues, "cluster.health.max.scene.shard.hotspot.players");
+        validateNonNegativeInteger(issues, "cluster.health.max.player.business.pending.responses");
+        validateNonNegativeInteger(issues, "cluster.health.max.player.business.pending.age.millis");
         validatePositiveInteger(issues, "cluster.drain.timeout.millis");
         validatePositiveInteger(issues, "cluster.drain.poll.interval.millis");
         validateNonNegativeInteger(issues, "cluster.drain.propagation.delay.millis");
@@ -106,6 +113,9 @@ public final class ClusterNodeConfig {
         validateBoolean(issues, "cluster.event.outbox.jdbc.initialize.schema");
         validateBoolean(issues, "cluster.event.outbox.replay.enabled");
         validatePositiveInteger(issues, "cluster.event.outbox.replay.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.subscription.lease.ttl.millis");
+        validatePositiveInteger(issues, "cluster.event.subscription.lease.renew.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.subscription.lease.scan.interval.millis");
         validateJdbcEventOutboxStore(issues);
         validateMigrationTaskStoreKind(issues);
         validateBoolean(issues, "cluster.migration.task.jdbc.initialize.schema");
@@ -114,6 +124,20 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.registry.lease.ttl.millis");
         validatePositiveInteger(issues, "cluster.registry.heartbeat.interval.millis");
         validatePositiveInteger(issues, "cluster.registry.lease.scan.interval.millis");
+        validatePositiveInteger(issues, "cluster.registry.subscription.lease.ttl.millis");
+        validatePositiveInteger(issues, "cluster.registry.subscription.lease.scan.interval.millis");
+        validateNonNegativeInteger(issues, "cluster.registry.history.limit");
+        validateBoolean(issues, "cluster.registry.recovery.enabled");
+        validatePositiveInteger(issues, "cluster.registry.recovery.interval.millis");
+        validateOptionalMetadataValue(issues, "cluster.route.tag");
+        validateOptionalMetadataValue(issues, "cluster.deployment.group");
+        validateServiceMetadataEntries(issues);
+        validateBoolean(issues, "cluster.rpc.gray.enabled");
+        validateOptionalMetadataValue(issues, "cluster.rpc.gray.stable.tag");
+        validateOptionalMetadataValue(issues, "cluster.rpc.gray.gray.tag");
+        validatePercent(issues, "cluster.rpc.gray.percent");
+        validateLongCsv(issues, "cluster.rpc.gray.players");
+        validateStringCsv(issues, "cluster.rpc.gray.operations");
         validateBoolean(issues, "cluster.migration.recovery.enabled");
         validatePositiveInteger(issues, "cluster.migration.recovery.scan.interval.millis");
         validatePositiveInteger(issues, "cluster.migration.recovery.lease.ttl.millis");
@@ -158,6 +182,34 @@ public final class ClusterNodeConfig {
         return new ServiceEndpoint(required("cluster.host"), integer("cluster.port", 0));
     }
 
+    public Map<String, String> serviceMetadata() {
+        Map<String, String> metadata = new HashMap<>();
+        String prefix = "cluster.metadata.";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                String metadataKey = key.substring(prefix.length());
+                String value = properties.getProperty(key);
+                if (!metadataKey.isBlank() && value != null && !value.isBlank()) {
+                    metadata.put(metadataKey, value);
+                }
+            }
+        }
+        putIfPresent(metadata, ServiceMetadata.ROUTE_TAG, "cluster.route.tag");
+        putIfPresent(metadata, ServiceMetadata.DEPLOYMENT_GROUP, "cluster.deployment.group");
+        return Map.copyOf(metadata);
+    }
+
+    public PlayerGrayRouteConfig playerGrayRouteConfig() {
+        return new PlayerGrayRouteConfig(
+                Boolean.parseBoolean(property("cluster.rpc.gray.enabled", "false")),
+                property("cluster.rpc.gray.stable.tag", "stable"),
+                property("cluster.rpc.gray.gray.tag", "gray"),
+                integer("cluster.rpc.gray.percent", 0),
+                longSet("cluster.rpc.gray.players"),
+                stringSet("cluster.rpc.gray.operations")
+        );
+    }
+
     public ServiceEndpoint centerEndpoint() {
         return new ServiceEndpoint(required("cluster.center.host"), integer("cluster.center.port", 0));
     }
@@ -200,7 +252,9 @@ public final class ClusterNodeConfig {
                 integer("cluster.health.max.migration.pending.age.millis", 300_000),
                 integer("cluster.health.max.scene.active.scenes", 0),
                 integer("cluster.health.max.scene.active.players", 0),
-                integer("cluster.health.max.scene.shard.hotspot.players", 0)
+                integer("cluster.health.max.scene.shard.hotspot.players", 0),
+                integer("cluster.health.max.player.business.pending.responses", 0),
+                integer("cluster.health.max.player.business.pending.age.millis", 0)
         );
     }
 
@@ -218,6 +272,10 @@ public final class ClusterNodeConfig {
                 integer("cluster.player.command.rate.refill.permits", 500),
                 Duration.ofMillis(integer("cluster.player.command.rate.refill.interval.millis", 1_000))
         );
+    }
+
+    public Duration playerBusinessResponseTimeout() {
+        return Duration.ofMillis(integer("cluster.player.business.response.timeout.millis", 5_000));
     }
 
     public Instant gameServerOpenTime() {
@@ -284,6 +342,18 @@ public final class ClusterNodeConfig {
         return Duration.ofMillis(integer("cluster.event.outbox.replay.interval.millis", 5_000));
     }
 
+    public Duration eventSubscriptionLeaseTtl() {
+        return Duration.ofMillis(integer("cluster.event.subscription.lease.ttl.millis", 15_000));
+    }
+
+    public Duration eventSubscriptionLeaseRenewInterval() {
+        return Duration.ofMillis(integer("cluster.event.subscription.lease.renew.interval.millis", 5_000));
+    }
+
+    public Duration eventSubscriptionLeaseScanInterval() {
+        return Duration.ofMillis(integer("cluster.event.subscription.lease.scan.interval.millis", 1_000));
+    }
+
     public Duration configWarmupTimeout() {
         return Duration.ofMillis(integer("cluster.config.warmup.timeout.millis", 5_000));
     }
@@ -298,6 +368,26 @@ public final class ClusterNodeConfig {
 
     public Duration registryLeaseScanInterval() {
         return Duration.ofMillis(integer("cluster.registry.lease.scan.interval.millis", 1_000));
+    }
+
+    public Duration registrySubscriptionLeaseTtl() {
+        return Duration.ofMillis(integer("cluster.registry.subscription.lease.ttl.millis", 15_000));
+    }
+
+    public Duration registrySubscriptionLeaseScanInterval() {
+        return Duration.ofMillis(integer("cluster.registry.subscription.lease.scan.interval.millis", 1_000));
+    }
+
+    public int registryHistoryLimit() {
+        return integer("cluster.registry.history.limit", com.commonbattle.cluster.InMemoryServiceRegistry.DEFAULT_HISTORY_LIMIT);
+    }
+
+    public boolean registryRecoveryEnabled() {
+        return Boolean.parseBoolean(property("cluster.registry.recovery.enabled", "true"));
+    }
+
+    public Duration registryRecoveryInterval() {
+        return Duration.ofMillis(integer("cluster.registry.recovery.interval.millis", 5_000));
     }
 
     public boolean migrationTaskRetentionEnabled() {
@@ -528,6 +618,54 @@ public final class ClusterNodeConfig {
         }
     }
 
+    private void validatePercent(List<ClusterConfigIssue> issues, String key) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            int percent = Integer.parseInt(value);
+            if (percent < 0 || percent > 100) {
+                issues.add(new ClusterConfigIssue(key, "must be between 0 and 100"));
+            }
+        } catch (NumberFormatException e) {
+            issues.add(new ClusterConfigIssue(key, "must be an integer"));
+        }
+    }
+
+    private void validateLongCsv(List<ClusterConfigIssue> issues, String key) {
+        String raw = properties.getProperty(key);
+        if (raw == null || raw.isBlank()) {
+            return;
+        }
+        for (String value : raw.split(",", -1)) {
+            String trimmed = value.trim();
+            if (trimmed.isBlank()) {
+                issues.add(new ClusterConfigIssue(key, "must not contain blank item"));
+                return;
+            }
+            try {
+                Long.parseLong(trimmed);
+            } catch (NumberFormatException e) {
+                issues.add(new ClusterConfigIssue(key, "must contain only long integers"));
+                return;
+            }
+        }
+    }
+
+    private void validateStringCsv(List<ClusterConfigIssue> issues, String key) {
+        String raw = properties.getProperty(key);
+        if (raw == null || raw.isBlank()) {
+            return;
+        }
+        for (String value : raw.split(",", -1)) {
+            if (value.trim().isBlank()) {
+                issues.add(new ClusterConfigIssue(key, "must not contain blank item"));
+                return;
+            }
+        }
+    }
+
     private void validateBoolean(List<ClusterConfigIssue> issues, String key) {
         String value = properties.getProperty(key);
         if (value == null || value.isBlank()) {
@@ -535,6 +673,41 @@ public final class ClusterNodeConfig {
         }
         if (!value.equalsIgnoreCase("true") && !value.equalsIgnoreCase("false")) {
             issues.add(new ClusterConfigIssue(key, "must be true or false"));
+        }
+    }
+
+    private void validateOptionalMetadataValue(List<ClusterConfigIssue> issues, String key) {
+        String value = properties.getProperty(key);
+        if (value != null && value.isBlank()) {
+            issues.add(new ClusterConfigIssue(key, "must not be blank"));
+        }
+    }
+
+    private void validateServiceMetadataEntries(List<ClusterConfigIssue> issues) {
+        String prefix = "cluster.metadata.";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                String metadataKey = key.substring(prefix.length());
+                String value = properties.getProperty(key);
+                if (metadataKey.isBlank()) {
+                    issues.add(new ClusterConfigIssue(key, "metadata key must not be blank"));
+                }
+                if (value == null || value.isBlank()) {
+                    issues.add(new ClusterConfigIssue(key, "metadata value must not be blank"));
+                }
+            }
+        }
+        validateMetadataAliasConflict(issues, "cluster.route.tag", ServiceMetadata.ROUTE_TAG);
+        validateMetadataAliasConflict(issues, "cluster.deployment.group", ServiceMetadata.DEPLOYMENT_GROUP);
+    }
+
+    private void validateMetadataAliasConflict(List<ClusterConfigIssue> issues, String aliasKey, String metadataKey) {
+        String alias = properties.getProperty(aliasKey);
+        String generic = properties.getProperty("cluster.metadata." + metadataKey);
+        if (alias != null && !alias.isBlank()
+                && generic != null && !generic.isBlank()
+                && !alias.equals(generic)) {
+            issues.add(new ClusterConfigIssue(aliasKey, "conflicts with cluster.metadata." + metadataKey));
         }
     }
 
@@ -655,5 +828,35 @@ public final class ClusterNodeConfig {
                 validatePositiveInteger(issues, key);
             }
         }
+    }
+
+    private void putIfPresent(Map<String, String> metadata, String metadataKey, String propertyKey) {
+        String value = properties.getProperty(propertyKey);
+        if (value != null && !value.isBlank()) {
+            metadata.put(metadataKey, value);
+        }
+    }
+
+    private Set<Long> longSet(String key) {
+        Set<Long> values = new HashSet<>();
+        for (String value : csv(key)) {
+            values.add(Long.parseLong(value));
+        }
+        return values;
+    }
+
+    private Set<String> stringSet(String key) {
+        return Set.copyOf(csv(key));
+    }
+
+    private List<String> csv(String key) {
+        String raw = properties.getProperty(key);
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        return java.util.Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .toList();
     }
 }

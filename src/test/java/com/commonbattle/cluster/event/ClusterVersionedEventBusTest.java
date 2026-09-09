@@ -22,9 +22,15 @@ import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -156,11 +162,89 @@ class ClusterVersionedEventBusTest {
         assertEquals(1, stats.topics().get(AllianceMemberChangedEvent.TOPIC).droppedEvents());
     }
 
+    @Test
+    void multipleLocalTopicSubscribersShareOneRemoteSubscription() throws Exception {
+        Fixture fixture = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        AtomicInteger firstDelivered = new AtomicInteger();
+        AtomicInteger secondDelivered = new AtomicInteger();
+
+        AutoCloseable first = fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> firstDelivered.incrementAndGet());
+        AutoCloseable second = fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> secondDelivered.incrementAndGet());
+        first.close();
+        fixture.gameEvents().publish(profileEvent(1, "avatar_2"));
+        assertEquals(Set.of(fixture.sceneId()), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+        second.close();
+        fixture.gameEvents().publish(profileEvent(2, "avatar_3"));
+
+        assertEquals(Set.of(), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+        assertEquals(0, firstDelivered.get());
+        assertEquals(1, secondDelivered.get());
+    }
+
+    @Test
+    void expiredSubscriptionStopsFutureDelivery() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
+        Fixture fixture = fixture(ClusterEventHistoryPolicy.fixed(10), clock, Duration.ofMillis(100));
+        AtomicInteger delivered = new AtomicInteger();
+
+        fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> delivered.incrementAndGet());
+        clock.advance(Duration.ofMillis(101));
+        assertEquals(1, fixture.center().expireSubscriptions(clock.instant()));
+        fixture.gameEvents().publish(profileEvent(1, "avatar_2"));
+
+        assertEquals(Set.of(), fixture.center().subscribers(ProfileChangedEvent.TOPIC));
+        assertEquals(0, delivered.get());
+        assertEquals(1, fixture.center().stats().topics().get(ProfileChangedEvent.TOPIC).expiredSubscriptions());
+    }
+
+    @Test
+    void eventSubscriptionLeaseRenewerRefreshesActiveRemoteSubscriptions() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
+        Fixture fixture = fixture(ClusterEventHistoryPolicy.fixed(10), clock, Duration.ofMillis(100));
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        try (ClusterEventSubscriptionLeaseRenewer renewer = new ClusterEventSubscriptionLeaseRenewer(
+                fixture.sceneEvents(),
+                Duration.ofSeconds(1),
+                executor
+        )) {
+            fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> {
+            });
+
+            clock.advance(Duration.ofMillis(80));
+            assertEquals(1, renewer.renewOnce());
+            clock.advance(Duration.ofMillis(80));
+
+            assertEquals(0, fixture.center().expireSubscriptions(clock.instant()));
+            assertEquals(1, renewer.runs());
+            assertEquals(1, renewer.renewedSubscriptions());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void eventCenterRecordsDeliveryFailuresWithoutBreakingPublisher() {
+        Fixture fixture = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> {
+        });
+        fixture.transport().close();
+
+        fixture.center().publishLocal(profileEvent(1, "avatar_2"));
+
+        ClusterEventTopicStats stats = fixture.center().stats().topics().get(ProfileChangedEvent.TOPIC);
+        assertEquals(1, stats.publishedEvents());
+        assertEquals(1, stats.deliveryFailures());
+    }
+
     private static Fixture fixture(int historyLimit) {
         return fixture(ClusterEventHistoryPolicy.fixed(historyLimit));
     }
 
     private static Fixture fixture(ClusterEventHistoryPolicy historyPolicy) {
+        return fixture(historyPolicy, Clock.systemUTC(), Duration.ofSeconds(15));
+    }
+
+    private static Fixture fixture(ClusterEventHistoryPolicy historyPolicy, Clock clock, Duration subscriptionLeaseTtl) {
         LocalClusterTransport transport = new LocalClusterTransport();
         ClusterTopology topology = ClusterTopology.defaultCrossServer();
         InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
@@ -181,12 +265,19 @@ class ClusterVersionedEventBusTest {
         ClusterDirectory gameDirectory = directory(registry);
         ClusterDirectory sceneDirectory = directory(registry);
         ClusterRpcGateway centerGateway = new ClusterRpcGateway(center, centerDirectory, topology, transport);
-        ClusterEventCenter centerEvents = new ClusterEventCenter(center, transport, centerGateway, historyPolicy);
+        ClusterEventCenter centerEvents = new ClusterEventCenter(
+                center,
+                transport,
+                centerGateway,
+                historyPolicy,
+                clock,
+                subscriptionLeaseTtl
+        );
         ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
         ClusterRpcGateway sceneGateway = new ClusterRpcGateway(scene, sceneDirectory, topology, transport);
-        ClusterVersionedEventBus gameEvents = new ClusterVersionedEventBus(game.id(), gameGateway);
-        ClusterVersionedEventBus sceneEvents = new ClusterVersionedEventBus(scene.id(), sceneGateway);
-        return new Fixture(centerEvents, gameEvents, sceneEvents, scene.id());
+        ClusterVersionedEventBus gameEvents = new ClusterVersionedEventBus(game.id(), gameGateway, subscriptionLeaseTtl);
+        ClusterVersionedEventBus sceneEvents = new ClusterVersionedEventBus(scene.id(), sceneGateway, subscriptionLeaseTtl);
+        return new Fixture(centerEvents, gameEvents, sceneEvents, scene.id(), transport);
     }
 
     private static ClusterDirectory directory(InMemoryServiceRegistry registry) {
@@ -231,7 +322,35 @@ class ClusterVersionedEventBusTest {
             ClusterEventCenter center,
             ClusterVersionedEventBus gameEvents,
             ClusterVersionedEventBus sceneEvents,
-            ServiceId sceneId
+            ServiceId sceneId,
+            LocalClusterTransport transport
     ) {
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant instant;
+
+        private MutableClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        private void advance(Duration duration) {
+            instant = instant.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
     }
 }

@@ -3,6 +3,7 @@ package com.commonbattle.game.profile;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.event.EventReplayResult;
+import com.commonbattle.game.event.SubscriptionDecision;
 import com.commonbattle.game.event.VersionedEvent;
 
 import java.util.Collection;
@@ -26,6 +27,7 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
     private final ProfileSnapshotRepairer repairer;
     private final Executor repairExecutor;
     private final ConcurrentHashMap<String, Integer> ownerReferences = new ConcurrentHashMap<>();
+    private final Set<String> replayingOwners = ConcurrentHashMap.newKeySet();
     private final AutoCloseable localSubscription;
     private final AtomicLong watchRequests = new AtomicLong();
     private final AtomicLong unwatchRequests = new AtomicLong();
@@ -113,6 +115,29 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
         return ownerReferences.containsKey(ProfileChangedEvent.ownerKey(playerId));
     }
 
+    @Override
+    public void requestRepair(long playerId) {
+        requestRepairAll(Set.of(playerId));
+    }
+
+    @Override
+    public void requestRepairAll(Collection<Long> playerIds) {
+        Objects.requireNonNull(playerIds, "playerIds");
+        if (playerIds.isEmpty()) {
+            return;
+        }
+        Set<String> ownerKeys = new HashSet<>();
+        for (long playerId : playerIds) {
+            String ownerKey = ProfileChangedEvent.ownerKey(playerId);
+            if (ownerReferences.containsKey(ownerKey)) {
+                ownerKeys.add(ownerKey);
+            }
+        }
+        if (!ownerKeys.isEmpty()) {
+            repairOwners(ownerKeys);
+        }
+    }
+
     public ProfileInterestStats stats() {
         return new ProfileInterestStats(
                 ownerReferences.size(),
@@ -141,6 +166,7 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
 
     private void replay(Map<String, Long> knownRevisions, Set<String> ownerKeys) {
         replayAttempts.incrementAndGet();
+        replayingOwners.addAll(ownerKeys);
         bus.replay(
                 ProfileChangedEvent.TOPIC,
                 knownRevisions,
@@ -148,12 +174,20 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
                 new RpcCallback<>() {
                     @Override
                     public void success(EventReplayResult response) {
-                        repair(response);
+                        try {
+                            repair(response);
+                        } finally {
+                            replayingOwners.removeAll(ownerKeys);
+                        }
                     }
 
                     @Override
                     public void failure(Throwable error) {
-                        replayFailures.incrementAndGet();
+                        try {
+                            replayFailures.incrementAndGet();
+                        } finally {
+                            replayingOwners.removeAll(ownerKeys);
+                        }
                     }
                 }
         );
@@ -189,9 +223,13 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
         if (response.unavailableOwnerKeys().isEmpty()) {
             return;
         }
+        repairOwners(response.unavailableOwnerKeys());
+    }
+
+    private void repairOwners(Set<String> ownerKeys) {
         repairRequests.incrementAndGet();
         try {
-            repairExecutor.execute(() -> repairNow(response.unavailableOwnerKeys()));
+            repairExecutor.execute(() -> repairNow(ownerKeys));
         } catch (RuntimeException e) {
             repairFailures.incrementAndGet();
         }
@@ -212,7 +250,10 @@ public final class ProfileInterestSubscription implements ProfileInterestControl
         if (!(event instanceof ProfileChangedEvent profileChanged)) {
             throw new IllegalArgumentException("event must be ProfileChangedEvent");
         }
-        cache.apply(profileChanged);
+        SubscriptionDecision decision = cache.apply(profileChanged);
+        if (decision == SubscriptionDecision.GAP && !replayingOwners.contains(event.ownerKey())) {
+            repairOwners(Set.of(event.ownerKey()));
+        }
     }
 
     private record UnwatchResult(boolean counted, boolean unsubscribe) {

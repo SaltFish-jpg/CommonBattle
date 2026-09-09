@@ -32,5 +32,25 @@ public interface ServiceRegistry {
 
     List<ServiceDescriptor> list(ServiceKind kind);
 
+    default RegistrySnapshot snapshot(ServiceKind kind) {
+        return new RegistrySnapshot(kind, list(kind), version());
+    }
+
+    default List<RegistryEvent> replay(ServiceKind kind, long sinceVersion) {
+        Objects.requireNonNull(kind, "kind");
+        if (sinceVersion < 0) {
+            throw new IllegalArgumentException("sinceVersion must not be negative");
+        }
+        return List.of();
+    }
+
+    default long version() {
+        return 0;
+    }
+
+    default long minReplayVersion() {
+        return 0;
+    }
+
     AutoCloseable subscribe(ServiceKind kind, RegistrySubscriber subscriber);
 }

@@ -2,6 +2,7 @@ package com.commonbattle.cluster;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 服务注册 metadata 的通用约定。
@@ -12,6 +13,8 @@ public final class ServiceMetadata {
     public static final String PROTOCOL_VERSION = "service.protocol.version";
     public static final String LOAD_USED = "service.load.used";
     public static final String LOAD_CAPACITY = "service.load.capacity";
+    public static final String ROUTE_TAG = "service.route.tag";
+    public static final String DEPLOYMENT_GROUP = "service.deployment.group";
     public static final int DEFAULT_PROTOCOL_VERSION = 1;
     public static final long UNKNOWN_LOAD_SCORE = 0L;
 
@@ -62,6 +65,29 @@ public final class ServiceMetadata {
         return service.withMetadata(metadata);
     }
 
+    public static ServiceDescriptor withRouteTag(ServiceDescriptor service, String tag) {
+        requireMetadataValue(ROUTE_TAG, tag);
+        Map<String, String> metadata = new HashMap<>(service.metadata());
+        metadata.put(ROUTE_TAG, tag);
+        return service.withMetadata(metadata);
+    }
+
+    public static String routeTag(ServiceDescriptor service) {
+        return service.metadata(ROUTE_TAG);
+    }
+
+    public static boolean matches(ServiceDescriptor service, Map<String, String> requiredMetadata) {
+        Objects.requireNonNull(service, "service");
+        Objects.requireNonNull(requiredMetadata, "requiredMetadata");
+        for (Map.Entry<String, String> entry : requiredMetadata.entrySet()) {
+            requireMetadataValue(entry.getKey(), entry.getValue());
+            if (!Objects.equals(service.metadata(entry.getKey()), entry.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static long loadScore(ServiceDescriptor service) {
         int capacity = positiveInt(service.metadata(LOAD_CAPACITY), 0);
         if (capacity <= 0) {
@@ -76,5 +102,13 @@ public final class ServiceMetadata {
             return defaultValue;
         }
         return Integer.parseInt(value);
+    }
+
+    private static void requireMetadataValue(String key, String value) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(value, "value");
+        if (key.isBlank()) {
+            throw new IllegalArgumentException("metadata key must not be blank");
+        }
     }
 }

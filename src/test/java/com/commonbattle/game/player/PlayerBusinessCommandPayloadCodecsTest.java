@@ -92,6 +92,19 @@ class PlayerBusinessCommandPayloadCodecsTest {
     }
 
     @Test
+    void encodesAndDecodesBuyShopItemAsyncCommand() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        BuyShopItemAsyncCommand command = new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1);
+
+        EncodedPayload encoded = registry.encode(command);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        BuyShopItemAsyncCommand buy = assertInstanceOf(BuyShopItemAsyncCommand.class, decoded);
+        assertEquals(PlayerBusinessOperations.SHOP_BUY, buy.operation());
+        assertEquals(command, buy);
+    }
+
+    @Test
     void encodesAndDecodesBattleStageClearCommand() {
         PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
         BattleStageClearCommand command = new BattleStageClearCommand("settle-10001-1", "forest-1");

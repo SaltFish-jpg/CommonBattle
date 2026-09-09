@@ -2,6 +2,7 @@ package com.commonbattle.game.scene;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
+import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEventDelivery;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
@@ -22,11 +23,12 @@ public final class ScenePlayerDomainEventAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
     private final PlayerDomainEventProcessor processor;
+    private OwnerEventInterestControl interests;
     private final Set<Long> onlinePlayers = new HashSet<>();
     private final Map<Long, Integer> stageClears = new HashMap<>();
 
     public ScenePlayerDomainEventAgent(AgentMessagePort messages, ActorRef self) {
-        this(messages, self, new PlayerDomainEventProcessor());
+        this(messages, self, new PlayerDomainEventProcessor(), OwnerEventInterestControl.noop());
     }
 
     public ScenePlayerDomainEventAgent(
@@ -34,29 +36,52 @@ public final class ScenePlayerDomainEventAgent {
             ActorRef self,
             PlayerDomainEventProcessor processor
     ) {
+        this(messages, self, processor, OwnerEventInterestControl.noop());
+    }
+
+    public ScenePlayerDomainEventAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerDomainEventProcessor processor,
+            OwnerEventInterestControl interests
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.processor = Objects.requireNonNull(processor, "processor");
+        this.interests = Objects.requireNonNull(interests, "interests");
         this.processor.on(BattleStageClearedEvent.TYPE, this::onBattleStageCleared);
     }
 
+    public void attachInterests(OwnerEventInterestControl interests) {
+        this.interests = Objects.requireNonNull(interests, "interests");
+    }
+
     public void enter(long playerId) {
-        messages.tellLocal(self, ignored -> onlinePlayers.add(playerId));
+        messages.tellLocal(self, ignored -> {
+            if (onlinePlayers.add(playerId)) {
+                interests.watchOwner(PlayerDomainVersionedEvent.ownerKey(playerId));
+            }
+        });
     }
 
     public void leave(long playerId) {
         messages.tellLocal(self, ignored -> {
-            onlinePlayers.remove(playerId);
-            stageClears.remove(playerId);
+            if (onlinePlayers.remove(playerId)) {
+                stageClears.remove(playerId);
+                interests.unwatchOwner(PlayerDomainVersionedEvent.ownerKey(playerId));
+            }
         });
     }
 
     public void onPlayerDomainEvent(PlayerDomainVersionedEvent event) {
-        messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.contains(event.playerId())) {
-                processor.apply(event);
-            }
-        });
+        messages.tellLocal(self, ignored -> handlePlayerDomainEvent(event));
+    }
+
+    public void handlePlayerDomainEvent(PlayerDomainVersionedEvent event) {
+        Objects.requireNonNull(event, "event");
+        if (onlinePlayers.contains(event.playerId())) {
+            processor.apply(event);
+        }
     }
 
     public OptionalInt stageClears(long playerId) {

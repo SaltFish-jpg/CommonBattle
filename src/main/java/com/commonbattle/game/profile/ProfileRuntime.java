@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 玩家基础资料在非 owner 服务内的运行时门面。
  * Scene、Chat 等服务通过它维护关注、消费变更事件，并按读取模式决定是否回源修复本地快照。
  */
-public final class ProfileRuntime implements ProfileInterestControl, ProfileRuntimeView {
+public final class ProfileRuntime implements ProfileInterestControl, ProfileReadPort, ProfileRuntimeView {
     private final LocalProfileCache cache;
     private final ProfileInterestControl interests;
     private final ProfileSnapshotReader reader;
@@ -20,6 +20,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRunt
     private final AtomicLong localStale = new AtomicLong();
     private final AtomicLong localMisses = new AtomicLong();
     private final AtomicLong refreshes = new AtomicLong();
+    private final AtomicLong remoteStale = new AtomicLong();
     private final AtomicLong remoteMisses = new AtomicLong();
     private final AtomicLong localFallbacks = new AtomicLong();
 
@@ -49,10 +50,29 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRunt
         interests.unwatchAll(playerIds);
     }
 
+    @Override
+    public void requestRepair(long playerId) {
+        interests.requestRepair(playerId);
+    }
+
+    @Override
+    public void requestRepairAll(Collection<Long> playerIds) {
+        interests.requestRepairAll(playerIds);
+    }
+
     public SubscriptionDecision apply(ProfileChangedEvent event) {
         return cache.apply(event);
     }
 
+    public void refresh(PlayerProfileSnapshot snapshot) {
+        cache.refresh(snapshot);
+    }
+
+    public long revisionOf(long playerId) {
+        return cache.revisionOf(playerId);
+    }
+
+    @Override
     public ProfileReadResult read(long playerId, ProfileReadMode mode) {
         Objects.requireNonNull(mode, "mode");
         readRequests.incrementAndGet();
@@ -76,6 +96,32 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRunt
                 .orElseGet(() -> ProfileReadResult.empty(ProfileReadStatus.REMOTE_MISS)));
     }
 
+    @Override
+    public ProfileReadResult readAtLeast(long playerId, long minimumRevision) {
+        if (minimumRevision < 0) {
+            throw new IllegalArgumentException("minimumRevision must not be negative");
+        }
+        readRequests.incrementAndGet();
+        Optional<CachedProfile> cached = cache.get(playerId);
+        if (cached.filter(profile -> !profile.stale() && profile.snapshot().revision() >= minimumRevision).isPresent()) {
+            return record(ProfileReadResult.of(cached.orElseThrow(), ProfileReadStatus.LOCAL_HIT));
+        }
+        Optional<PlayerProfileSnapshot> latest = reader.find(playerId);
+        if (latest.isPresent() && latest.orElseThrow().revision() >= minimumRevision) {
+            cache.refresh(latest.orElseThrow());
+            return record(cache.get(playerId)
+                    .filter(profile -> !profile.stale() && profile.snapshot().revision() >= minimumRevision)
+                    .map(profile -> ProfileReadResult.of(profile, ProfileReadStatus.REFRESHED))
+                    .orElseGet(() -> ProfileReadResult.empty(ProfileReadStatus.REMOTE_MISS)));
+        }
+        if (latest.isPresent()) {
+            return record(cached.map(profile -> ProfileReadResult.of(profile, ProfileReadStatus.REMOTE_STALE))
+                    .orElseGet(() -> ProfileReadResult.empty(ProfileReadStatus.REMOTE_STALE)));
+        }
+        return record(cached.map(profile -> ProfileReadResult.of(profile, ProfileReadStatus.LOCAL_FALLBACK))
+                .orElseGet(() -> ProfileReadResult.empty(ProfileReadStatus.REMOTE_MISS)));
+    }
+
     public LocalProfileCache cache() {
         return cache;
     }
@@ -88,6 +134,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRunt
                 localStale.get(),
                 localMisses.get(),
                 refreshes.get(),
+                remoteStale.get(),
                 remoteMisses.get(),
                 localFallbacks.get()
         );
@@ -99,6 +146,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRunt
             case LOCAL_STALE -> localStale.incrementAndGet();
             case LOCAL_MISS -> localMisses.incrementAndGet();
             case REFRESHED -> refreshes.incrementAndGet();
+            case REMOTE_STALE -> remoteStale.incrementAndGet();
             case REMOTE_MISS -> remoteMisses.incrementAndGet();
             case LOCAL_FALLBACK -> localFallbacks.incrementAndGet();
         }

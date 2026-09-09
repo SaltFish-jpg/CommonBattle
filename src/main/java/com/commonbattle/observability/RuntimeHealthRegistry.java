@@ -14,15 +14,23 @@ import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
+import com.commonbattle.cluster.registry.RegistryHistoryView;
+import com.commonbattle.cluster.registry.RegistrySubscriptionView;
+import com.commonbattle.cluster.registry.RemoteRegistryRecoveryView;
 import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.ResilientRpcGateway;
+import com.commonbattle.cluster.rpc.RpcRoutePolicyView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
+import com.commonbattle.game.event.ActorEventSubscriberView;
+import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutboxReplayScheduler;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
+import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.PlayerBusinessResponseView;
 import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.game.profile.ProfileRuntimeView;
@@ -44,11 +52,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ClusterRpcGateway> rpcGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ResilientRpcGateway> resilientRpcGateways = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<RpcRoutePolicyView> rpcRoutePolicies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorRpcClient> actorRpcClients = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentLifecycleManager> lifecycleManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandDispatcher> commandDispatchers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<NettyClusterTransport> networkTransports = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RegistryLeaseRenewer> leaseRenewers = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<RegistryHistoryView> registryHistories = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<RegistrySubscriptionView> registrySubscriptions = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<RemoteRegistryRecoveryView> remoteRegistryRecoveries = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterNode> clusterNodes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RegistryLeaseReaper> leaseReapers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<LocalGameConfigCache> configCaches = new CopyOnWriteArrayList<>();
@@ -56,6 +68,9 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<PlayerCommandAuditView> commandAudits = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterEventCenter> eventCenters = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterEventSubscriptionManager> eventSubscriptions = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorEventSubscriberView> actorEventSubscribers = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileRuntimeView> profileRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<SceneRuntimeView> sceneRuntimes = new CopyOnWriteArrayList<>();
@@ -63,6 +78,8 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<PlayerGameAgentManager> playerAgentManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAutoSaveScheduler> playerAutoSaves = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAgentDrainService> playerAgentDrains = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerBusinessResponseView> playerBusinessResponses = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<AsyncShopPurchaseView> asyncShopPurchases = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<DrainableComponent> drainableComponents = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ServiceDescriptorPublisher> serviceDescriptorPublishers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentMigrationCoordinator> migrationCoordinators = new CopyOnWriteArrayList<>();
@@ -85,11 +102,15 @@ public final class RuntimeHealthRegistry {
         }
         addIf(component, ClusterRpcGateway.class, rpcGateways);
         addIf(component, ResilientRpcGateway.class, resilientRpcGateways);
+        addIf(component, RpcRoutePolicyView.class, rpcRoutePolicies);
         addIf(component, ActorRpcClient.class, actorRpcClients);
         addIf(component, AgentLifecycleManager.class, lifecycleManagers);
         addIf(component, PlayerCommandDispatcher.class, commandDispatchers);
         addIf(component, NettyClusterTransport.class, networkTransports);
         addIf(component, RegistryLeaseRenewer.class, leaseRenewers);
+        addIf(component, RegistryHistoryView.class, registryHistories);
+        addIf(component, RegistrySubscriptionView.class, registrySubscriptions);
+        addIf(component, RemoteRegistryRecoveryView.class, remoteRegistryRecoveries);
         addIf(component, ClusterNode.class, clusterNodes);
         addIf(component, RegistryLeaseReaper.class, leaseReapers);
         addIf(component, LocalGameConfigCache.class, configCaches);
@@ -97,6 +118,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, PlayerCommandAuditView.class, commandAudits);
         addIf(component, ClusterEventCenter.class, eventCenters);
         addIf(component, ClusterEventSubscriptionManager.class, eventSubscriptions);
+        addIf(component, ActorEventSubscriberView.class, actorEventSubscribers);
+        addIf(component, OwnerActorEventSubscriptionView.class, ownerActorEventSubscriptions);
         addIf(component, ProfileInterestView.class, profileInterests);
         addIf(component, ProfileRuntimeView.class, profileRuntimes);
         addIf(component, SceneRuntimeView.class, sceneRuntimes);
@@ -104,6 +127,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, PlayerGameAgentManager.class, playerAgentManagers);
         addIf(component, PlayerAutoSaveScheduler.class, playerAutoSaves);
         addIf(component, PlayerAgentDrainService.class, playerAgentDrains);
+        addIf(component, PlayerBusinessResponseView.class, playerBusinessResponses);
+        addIf(component, AsyncShopPurchaseView.class, asyncShopPurchases);
         addIf(component, DrainableComponent.class, drainableComponents);
         addIf(component, ServiceDescriptorPublisher.class, serviceDescriptorPublishers);
         addIf(component, AgentMigrationCoordinator.class, migrationCoordinators);
@@ -122,6 +147,10 @@ public final class RuntimeHealthRegistry {
 
     public List<ResilientRpcGateway> resilientRpcGateways() {
         return List.copyOf(resilientRpcGateways);
+    }
+
+    public List<RpcRoutePolicyView> rpcRoutePolicies() {
+        return List.copyOf(rpcRoutePolicies);
     }
 
     public List<ActorRpcClient> actorRpcClients() {
@@ -156,6 +185,18 @@ public final class RuntimeHealthRegistry {
         return List.copyOf(leaseReapers);
     }
 
+    public List<RegistryHistoryView> registryHistories() {
+        return List.copyOf(registryHistories);
+    }
+
+    public List<RegistrySubscriptionView> registrySubscriptions() {
+        return List.copyOf(registrySubscriptions);
+    }
+
+    public List<RemoteRegistryRecoveryView> remoteRegistryRecoveries() {
+        return List.copyOf(remoteRegistryRecoveries);
+    }
+
     public List<LocalGameConfigCache> configCaches() {
         return List.copyOf(configCaches);
     }
@@ -174,6 +215,14 @@ public final class RuntimeHealthRegistry {
 
     public List<ClusterEventSubscriptionManager> eventSubscriptions() {
         return List.copyOf(eventSubscriptions);
+    }
+
+    public List<ActorEventSubscriberView> actorEventSubscribers() {
+        return List.copyOf(actorEventSubscribers);
+    }
+
+    public List<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions() {
+        return List.copyOf(ownerActorEventSubscriptions);
     }
 
     public List<ProfileInterestView> profileInterests() {
@@ -202,6 +251,14 @@ public final class RuntimeHealthRegistry {
 
     public List<PlayerAgentDrainService> playerAgentDrains() {
         return List.copyOf(playerAgentDrains);
+    }
+
+    public List<PlayerBusinessResponseView> playerBusinessResponses() {
+        return List.copyOf(playerBusinessResponses);
+    }
+
+    public List<AsyncShopPurchaseView> asyncShopPurchases() {
+        return List.copyOf(asyncShopPurchases);
     }
 
     public List<DrainableComponent> drainableComponents() {

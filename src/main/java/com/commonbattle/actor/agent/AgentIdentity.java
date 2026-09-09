@@ -9,6 +9,7 @@ import java.util.Objects;
 public record AgentIdentity(String type, String key) {
     public static final String PLAYER = "player";
     public static final String PROFILE = "profile";
+    public static final String FRIEND = "friend";
     public static final String SCENE = "scene";
     public static final String ALLIANCE = "alliance";
 
@@ -29,6 +30,10 @@ public record AgentIdentity(String type, String key) {
 
     public static AgentIdentity profile(long playerId) {
         return new AgentIdentity(PROFILE, Long.toString(playerId));
+    }
+
+    public static AgentIdentity friend(long playerId) {
+        return new AgentIdentity(FRIEND, Long.toString(playerId));
     }
 
     public static AgentIdentity scene(String sceneId) {

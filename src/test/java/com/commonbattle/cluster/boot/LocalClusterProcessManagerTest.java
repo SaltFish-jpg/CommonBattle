@@ -26,9 +26,9 @@ class LocalClusterProcessManagerTest {
 
         LocalClusterProcessGroup group = new LocalClusterProcessManager(launcher).start(plan);
 
-        assertEquals(List.of("center", "proxy", "game", "scene-small", "scene-large", "region"), launcher.started);
-        assertEquals(6, group.processes().size());
-        assertEquals(6, group.aliveCount());
+        assertEquals(List.of("center", "proxy", "game", "chat", "scene-small", "scene-large", "region"), launcher.started);
+        assertEquals(7, group.processes().size());
+        assertEquals(7, group.aliveCount());
     }
 
     @Test
@@ -43,7 +43,7 @@ class LocalClusterProcessManagerTest {
         LocalClusterProcessGroup group = new LocalClusterProcessManager(launcher).start(plan);
         group.close();
 
-        assertEquals(List.of("region", "scene-large", "scene-small", "game", "proxy", "center"), launcher.closed);
+        assertEquals(List.of("region", "scene-large", "scene-small", "chat", "game", "proxy", "center"), launcher.closed);
         assertEquals(0, group.aliveCount());
     }
 
@@ -71,6 +71,7 @@ class LocalClusterProcessManagerTest {
         ReadinessAfterAttempts readiness = new ReadinessAfterAttempts(Map.of(
                 "center", 2,
                 "game", 1,
+                "chat", 1,
                 "scene-small", 1,
                 "scene-large", 1,
                 "proxy", 1,
@@ -88,9 +89,9 @@ class LocalClusterProcessManagerTest {
                 new ClusterStartupPolicy(Duration.ofMillis(100), Duration.ofMillis(1))
         ).start(plan);
 
-        assertEquals(6, group.processes().size());
+        assertEquals(7, group.processes().size());
         assertEquals(2, readiness.attempts("center"));
-        assertEquals(List.of("center", "proxy", "game", "scene-small", "scene-large", "region"), launcher.started);
+        assertEquals(List.of("center", "proxy", "game", "chat", "scene-small", "scene-large", "region"), launcher.started);
     }
 
     @Test

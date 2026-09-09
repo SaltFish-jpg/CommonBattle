@@ -7,6 +7,10 @@ import com.commonbattle.game.session.PlayerCommand;
  * 生产环境通常在这里把结果编码成网关回包；测试或离线任务可记录到内存。
  */
 public interface PlayerBusinessResultSink {
+    default boolean canComplete(PlayerCommand command) {
+        return true;
+    }
+
     default void completed(PlayerCommand command, PlayerBusinessResponse response) {
         if (response.succeeded()) {
             succeeded(command, response.payload());

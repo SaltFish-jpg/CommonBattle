@@ -32,7 +32,7 @@ class InMemoryServiceRegistryTest {
 
         assertEquals(List.of(
                 new RegistryEvent(RegistryEventType.REGISTERED, game),
-                new RegistryEvent(RegistryEventType.UNREGISTERED, game)
+                new RegistryEvent(RegistryEventType.UNREGISTERED, game, 3)
         ), events);
     }
 
@@ -52,9 +52,47 @@ class InMemoryServiceRegistryTest {
 
         assertEquals(List.of(), registry.list(ServiceKind.GAME));
         assertEquals(List.of(
-                new RegistryEvent(RegistryEventType.REGISTERED, game),
-                new RegistryEvent(RegistryEventType.UNREGISTERED, game)
+                new RegistryEvent(RegistryEventType.REGISTERED, game, 1),
+                new RegistryEvent(RegistryEventType.UNREGISTERED, game, 2)
         ), events);
+    }
+
+    @Test
+    void snapshotAndReplayUseMonotonicRegistryVersion() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1");
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1");
+
+        registry.register(game);
+        registry.register(scene);
+        registry.unregister(game.id());
+
+        RegistrySnapshot sceneSnapshot = registry.snapshot(ServiceKind.SCENE);
+        List<RegistryEvent> replay = registry.replay(ServiceKind.GAME, 1);
+
+        assertEquals(3, registry.version());
+        assertEquals(3, sceneSnapshot.version());
+        assertEquals(List.of(scene), sceneSnapshot.services());
+        assertEquals(List.of(new RegistryEvent(RegistryEventType.UNREGISTERED, game, 3)), replay);
+    }
+
+    @Test
+    void historyLimitCompactsOldRegistryEvents() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry(Clock.systemUTC(), 2);
+        ServiceDescriptor game1 = descriptor(ServiceKind.GAME, "game-1");
+        ServiceDescriptor game2 = descriptor(ServiceKind.GAME, "game-2");
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1");
+
+        registry.register(game1);
+        registry.register(game2);
+        registry.register(scene);
+
+        assertEquals(3, registry.version());
+        assertEquals(1, registry.minReplayVersion());
+        assertEquals(List.of(), registry.replay(ServiceKind.GAME, 0));
+        assertEquals(1, registry.stats().compactedReplayRequests());
+        assertEquals(List.of(new RegistryEvent(RegistryEventType.REGISTERED, game2, 2)), registry.replay(ServiceKind.GAME, 1));
+        assertEquals(2, registry.stats().retainedEvents());
     }
 
     @Test

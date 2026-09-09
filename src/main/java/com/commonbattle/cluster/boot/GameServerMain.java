@@ -10,6 +10,7 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
+import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseRenewer;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
@@ -29,12 +30,19 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.profile.InMemoryProfileSnapshotRepository;
 import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
 import com.commonbattle.game.profile.ProfileSnapshotRepository;
 import com.commonbattle.game.profile.ReliableProfileEventPublisher;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.shop.ShopStockPayloadCodecs;
+import com.commonbattle.game.social.AllianceSnapshotEndpoint;
+import com.commonbattle.game.social.AllianceSnapshotRepository;
+import com.commonbattle.game.social.FriendSnapshotEndpoint;
+import com.commonbattle.game.social.FriendSnapshotRepository;
+import com.commonbattle.game.social.InMemoryAllianceSnapshotRepository;
+import com.commonbattle.game.social.InMemoryFriendSnapshotRepository;
 
 import java.time.Clock;
 import java.util.List;
@@ -57,11 +65,11 @@ public final class GameServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
                             AgentMigrationPayloadCodecs.registerTo(
                                     AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
                             )
-                    ))
+                    )))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
@@ -72,12 +80,22 @@ public final class GameServerMain {
             gateway.addTargetSelector(new SceneEnterTargetSelector());
             ProfileSnapshotRepository profileSnapshots = new InMemoryProfileSnapshotRepository();
             new ProfileSnapshotEndpoint(profileSnapshots).bind(gateway);
-            RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
+            AllianceSnapshotRepository allianceSnapshots = new InMemoryAllianceSnapshotRepository();
+            new AllianceSnapshotEndpoint(allianceSnapshots).bind(gateway);
+            FriendSnapshotRepository friendSnapshots = new InMemoryFriendSnapshotRepository();
+            new FriendSnapshotEndpoint(friendSnapshots).bind(gateway);
+            RemoteServiceRegistry registry = new RemoteServiceRegistry(
+                    local.id(),
+                    gateway,
+                    directory,
+                    config.registrySubscriptionLeaseTtl()
+            );
+            BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
             BootAgentMigrationTasks.configure(runtime, config, Clock.systemUTC());
             node.start(
-                    List.of(ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+                    List.of(ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
@@ -85,7 +103,16 @@ public final class GameServerMain {
                     new GameConfigValidator(),
                     Clock.systemUTC()
             ));
-            ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(local.id(), gateway);
+            ClusterVersionedEventBus eventBus = new ClusterVersionedEventBus(
+                    local.id(),
+                    gateway,
+                    config.eventSubscriptionLeaseTtl()
+            );
+            ClusterEventSubscriptionLeaseRenewer eventSubscriptionLeaseRenewer = runtime.add(
+                    "eventSubscriptionLeaseRenewer",
+                    new ClusterEventSubscriptionLeaseRenewer(eventBus, config.eventSubscriptionLeaseRenewInterval())
+            );
+            eventSubscriptionLeaseRenewer.start();
             ClusterEventSubscriptionManager eventSubscriptions = runtime.add(
                     "eventSubscriptions",
                     new ClusterEventSubscriptionManager(eventBus)
@@ -97,6 +124,10 @@ public final class GameServerMain {
             );
             ReliableProfileEventPublisher profileEvents = new ReliableProfileEventPublisher(
                     profileSnapshots,
+                    playerEventOutbox,
+                    eventBus
+            );
+            ReliableVersionedEventPublisher friendEvents = new ReliableVersionedEventPublisher(
                     playerEventOutbox,
                     eventBus
             );
@@ -127,8 +158,10 @@ public final class GameServerMain {
                     gateway,
                     configCache,
                     profileSnapshots,
+                    friendSnapshots,
                     playerDomainEvents,
                     profileEvents,
+                    friendEvents,
                     Clock.systemUTC()
             );
             runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));

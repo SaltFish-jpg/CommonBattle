@@ -47,8 +47,8 @@ public record ShopPurchaseResult(
         return status == ShopPurchaseStatus.SUCCESS;
     }
 
-    static ShopPurchaseResult rejected(ShopPurchaseStatus status, String sku, int quantity,
-                                       int lifetimePurchased, int dailyPurchased) {
+    public static ShopPurchaseResult rejected(ShopPurchaseStatus status, String sku, int quantity,
+                                              int lifetimePurchased, int dailyPurchased) {
         return new ShopPurchaseResult(status, sku, quantity, EMPTY_BAG_RESULT, EMPTY_BAG_RESULT,
                 lifetimePurchased, dailyPurchased, false);
     }

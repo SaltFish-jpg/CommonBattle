@@ -8,6 +8,7 @@ import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.network.ClusterEnvelope;
 import com.commonbattle.cluster.network.ClusterTransport;
 import com.commonbattle.runtime.DrainableComponent;
@@ -32,7 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 基于服务目录和跨服传输的 RPC 网关。
  * 请求按服务类型路由到目标服务；响应按 requestId 回到调用方，再由 ActorRpcClient 投递回所属 Actor 邮箱。
  */
-public final class ClusterRpcGateway implements RpcGateway, AutoCloseable, DrainableComponent {
+public final class ClusterRpcGateway implements OptionedRpcGateway, AutoCloseable, DrainableComponent {
     private static final String RPC_SUCCESS = "$rpc.success";
     private static final String RPC_FAILURE = "$rpc.failure";
     private static final String IDEMPOTENCY_KEY = "rpc.idempotency_key";
@@ -197,7 +198,7 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable, Drain
                 TimeUnit.MILLISECONDS
         );
         try {
-            ServiceDescriptor target = resolveTarget(request);
+            ServiceDescriptor target = resolveTarget(request, options);
             ClusterEnvelope envelope = new ClusterEnvelope(
                     requestId,
                     local.id(),
@@ -235,14 +236,19 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable, Drain
         return metrics.snapshot(idempotencyStore.size());
     }
 
-    private ServiceDescriptor resolveTarget(RpcRequest<?> request) {
+    public RpcCallOptions defaultCallOptions() {
+        return RpcCallOptions.of(governance.defaultTimeout());
+    }
+
+    private ServiceDescriptor resolveTarget(RpcRequest<?> request, RpcCallOptions options) {
         if (ServiceId.isWireName(request.target())) {
             ServiceId serviceId = ServiceId.parse(request.target());
             return directory.routable(serviceId)
+                    .filter(service -> ServiceMetadata.matches(service, options.requiredTargetMetadata()))
                     .orElseThrow(() -> new RpcNoRoutableServiceException(serviceId.kind(), request.operation()));
         }
         ServiceKind kind = ServiceKind.valueOf(request.target());
-        List<ServiceDescriptor> routable = directory.routable(kind);
+        List<ServiceDescriptor> routable = servicesMatching(directory.routable(kind), options.requiredTargetMetadata());
         List<ServiceDescriptor> supported = routable.stream()
                 .filter(service -> service.supports(request.operation()))
                 .toList();
@@ -256,6 +262,18 @@ public final class ClusterRpcGateway implements RpcGateway, AutoCloseable, Drain
             return select(supported);
         }
         return select(kind, request.operation(), routable);
+    }
+
+    private static List<ServiceDescriptor> servicesMatching(
+            List<ServiceDescriptor> services,
+            Map<String, String> requiredMetadata
+    ) {
+        if (requiredMetadata.isEmpty()) {
+            return services;
+        }
+        return services.stream()
+                .filter(service -> ServiceMetadata.matches(service, requiredMetadata))
+                .toList();
     }
 
     private ServiceDescriptor nextHop(ServiceDescriptor target) {

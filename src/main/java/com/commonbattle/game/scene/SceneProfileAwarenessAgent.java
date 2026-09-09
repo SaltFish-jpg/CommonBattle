@@ -7,7 +7,10 @@ import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.profile.ProfileReadMode;
+import com.commonbattle.game.profile.ProfileReadResult;
 import com.commonbattle.game.profile.ProfileRuntime;
+import com.commonbattle.game.event.SubscriptionDecision;
+import com.commonbattle.game.profile.PlayerProfileSnapshot;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -92,15 +95,41 @@ public final class SceneProfileAwarenessAgent {
     }
 
     public void onProfileChanged(ProfileChangedEvent event) {
-        messages.tellLocal(self, ignored -> {
-            if (onlineInterests.containsKey(event.playerId())) {
-                profiles.apply(event);
+        messages.tellLocal(self, ignored -> handleProfileChanged(event));
+    }
+
+    public void handleProfileChanged(ProfileChangedEvent event) {
+        Objects.requireNonNull(event, "event");
+        if (onlineInterests.containsKey(event.playerId())) {
+            SubscriptionDecision decision = profiles.apply(event);
+            if (decision == SubscriptionDecision.GAP) {
+                profiles.requestRepair(event.playerId());
             }
-        });
+        }
+    }
+
+    public void refresh(PlayerProfileSnapshot snapshot) {
+        messages.tellLocal(self, ignored -> handleSnapshot(snapshot));
+    }
+
+    public void handleSnapshot(PlayerProfileSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (!onlineInterests.containsKey(snapshot.playerId())) {
+            return;
+        }
+        if (snapshot.revision() < profiles.revisionOf(snapshot.playerId())) {
+            return;
+        }
+        profiles.refresh(snapshot);
     }
 
     public Optional<CachedProfile> profileOf(long playerId) {
         return profiles.read(playerId, ProfileReadMode.LOCAL_FAST).profile();
+    }
+
+    public Optional<CachedProfile> freshProfileOf(long playerId, long minimumRevision) {
+        ProfileReadResult result = profiles.readAtLeast(playerId, minimumRevision);
+        return result.fresh() ? result.profile() : Optional.empty();
     }
 
     public ProfileRuntime profileRuntime() {

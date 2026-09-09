@@ -226,6 +226,36 @@ class ProfileInterestSubscriptionTest {
         }
     }
 
+    @Test
+    void liveRevisionGapRequestsProfileSnapshotRepair() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            LocalProfileCache sceneCache = new LocalProfileCache();
+            RecordingExecutor repairExecutor = new RecordingExecutor();
+            sceneCache.apply(profileEvent(10001L, 1, "avatar_1"));
+            fixture.repository().save(profileEvent(10001L, 3, "avatar_3").snapshot());
+
+            try (ProfileInterestSubscription interests = new ProfileInterestSubscription(
+                    fixture.sceneEvents(),
+                    sceneCache,
+                    new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1)),
+                    repairExecutor
+            )) {
+                interests.watch(10001L);
+                fixture.gameEvents().publish(profileEvent(10001L, 3, "avatar_gap"));
+
+                assertTrue(sceneCache.isStale(10001L));
+                assertEquals("avatar_gap", sceneCache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+                assertEquals(1, repairExecutor.pending());
+                repairExecutor.runNext();
+
+                assertFalse(sceneCache.isStale(10001L));
+                assertEquals("avatar_3", sceneCache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+                assertEquals(1, interests.stats().repairRequests());
+                assertEquals(0, interests.stats().repairFailures());
+            }
+        }
+    }
+
     private static ProfileChangedEvent profileEvent(long playerId, long revision, String avatar) {
         return new ProfileChangedEvent(
                 playerId,

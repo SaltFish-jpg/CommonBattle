@@ -2,6 +2,7 @@ package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceKind;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,8 @@ class ClusterNodeConfigTest {
                 .validate(ServiceKind.CENTER).throwIfInvalid());
         assertDoesNotThrow(() -> ClusterNodeConfig.fromClasspath("cluster/game.properties")
                 .validate(ServiceKind.GAME).throwIfInvalid());
+        assertDoesNotThrow(() -> ClusterNodeConfig.fromClasspath("cluster/chat.properties")
+                .validate(ServiceKind.CHAT).throwIfInvalid());
         assertDoesNotThrow(() -> ClusterNodeConfig.fromClasspath("cluster/region.properties")
                 .validate(ServiceKind.REGION).throwIfInvalid());
         assertDoesNotThrow(() -> ClusterNodeConfig.fromClasspath("cluster/proxy.properties")
@@ -110,6 +113,8 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.health.max.scene.active.scenes", "180");
         properties.setProperty("cluster.health.max.scene.active.players", "3000");
         properties.setProperty("cluster.health.max.scene.shard.hotspot.players", "500");
+        properties.setProperty("cluster.health.max.player.business.pending.responses", "900");
+        properties.setProperty("cluster.health.max.player.business.pending.age.millis", "7000");
 
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
 
@@ -119,6 +124,8 @@ class ClusterNodeConfigTest {
         assertEquals(180, config.runtimeHealthPolicy().maxSceneActiveScenes());
         assertEquals(3000, config.runtimeHealthPolicy().maxSceneActivePlayers());
         assertEquals(500, config.runtimeHealthPolicy().maxSceneShardHotspotPlayers());
+        assertEquals(900, config.runtimeHealthPolicy().maxPlayerBusinessPendingResponses());
+        assertEquals(7000, config.runtimeHealthPolicy().maxPlayerBusinessPendingResponseAgeMillis());
     }
 
     @Test
@@ -146,6 +153,7 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.auto.save.enabled", "false");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "15000");
         properties.setProperty("cluster.player.auto.save.interval.millis", "45000");
+        properties.setProperty("cluster.player.business.response.timeout.millis", "3500");
         properties.setProperty("game.server.open.time", "2026-08-01T00:00:00Z");
 
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
@@ -158,6 +166,7 @@ class ClusterNodeConfigTest {
         assertFalse(config.playerAutoSaveEnabled());
         assertEquals(15_000, config.playerAutoSaveInitialDelay().toMillis());
         assertEquals(45_000, config.playerAutoSaveInterval().toMillis());
+        assertEquals(3_500, config.playerBusinessResponseTimeout().toMillis());
         assertEquals(Instant.parse("2026-08-01T00:00:00Z"), config.gameServerOpenTime());
     }
 
@@ -231,6 +240,14 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.registry.lease.ttl.millis", "12000");
         properties.setProperty("cluster.registry.heartbeat.interval.millis", "3000");
         properties.setProperty("cluster.registry.lease.scan.interval.millis", "500");
+        properties.setProperty("cluster.registry.subscription.lease.ttl.millis", "11000");
+        properties.setProperty("cluster.registry.subscription.lease.scan.interval.millis", "700");
+        properties.setProperty("cluster.registry.history.limit", "64");
+        properties.setProperty("cluster.registry.recovery.enabled", "false");
+        properties.setProperty("cluster.registry.recovery.interval.millis", "7000");
+        properties.setProperty("cluster.event.subscription.lease.ttl.millis", "13000");
+        properties.setProperty("cluster.event.subscription.lease.renew.interval.millis", "4000");
+        properties.setProperty("cluster.event.subscription.lease.scan.interval.millis", "900");
         properties.setProperty("cluster.ops.host", "0.0.0.0");
         properties.setProperty("cluster.ops.port", "19101");
 
@@ -239,8 +256,113 @@ class ClusterNodeConfigTest {
         org.junit.jupiter.api.Assertions.assertEquals(12000, config.registryLeaseTtl().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(3000, config.registryHeartbeatInterval().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(500, config.registryLeaseScanInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(11000, config.registrySubscriptionLeaseTtl().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(700, config.registrySubscriptionLeaseScanInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(64, config.registryHistoryLimit());
+        assertFalse(config.registryRecoveryEnabled());
+        org.junit.jupiter.api.Assertions.assertEquals(7000, config.registryRecoveryInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(13000, config.eventSubscriptionLeaseTtl().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(4000, config.eventSubscriptionLeaseRenewInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(900, config.eventSubscriptionLeaseScanInterval().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals("0.0.0.0", config.opsEndpoint().host());
         org.junit.jupiter.api.Assertions.assertEquals(19101, config.opsEndpoint().port());
+    }
+
+    @Test
+    void serviceMetadataCanBeConfiguredForRouting() {
+        Properties properties = base();
+        properties.setProperty("cluster.route.tag", "gray");
+        properties.setProperty("cluster.deployment.group", "canary-1");
+        properties.setProperty("cluster.metadata.zone.partition", "east");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals("gray", config.serviceMetadata().get(ServiceMetadata.ROUTE_TAG));
+        assertEquals("canary-1", config.serviceMetadata().get(ServiceMetadata.DEPLOYMENT_GROUP));
+        assertEquals("east", config.serviceMetadata().get("zone.partition"));
+    }
+
+    @Test
+    void playerGrayRouteConfigCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.rpc.gray.enabled", "true");
+        properties.setProperty("cluster.rpc.gray.stable.tag", "stable");
+        properties.setProperty("cluster.rpc.gray.gray.tag", "gray");
+        properties.setProperty("cluster.rpc.gray.percent", "15");
+        properties.setProperty("cluster.rpc.gray.players", "10001,10002");
+        properties.setProperty("cluster.rpc.gray.operations", "scene.enter,scene.leave");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertTrue(config.playerGrayRouteConfig().enabled());
+        assertEquals("stable", config.playerGrayRouteConfig().stableTag());
+        assertEquals("gray", config.playerGrayRouteConfig().grayTag());
+        assertEquals(15, config.playerGrayRouteConfig().grayPercent());
+        assertTrue(config.playerGrayRouteConfig().playerWhitelist().contains(10001L));
+        assertTrue(config.playerGrayRouteConfig().operations().contains("scene.enter"));
+    }
+
+    @Test
+    void validationRejectsInvalidServiceMetadataConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.route.tag", "gray");
+        properties.setProperty("cluster.metadata.service.route.tag", "stable");
+        properties.setProperty("cluster.metadata.", "bad");
+        properties.setProperty("cluster.metadata.zone.partition", "");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.route.tag"));
+        assertTrue(keys.contains("cluster.metadata."));
+        assertTrue(keys.contains("cluster.metadata.zone.partition"));
+    }
+
+    @Test
+    void validationRejectsInvalidPlayerGrayRouteConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.rpc.gray.enabled", "maybe");
+        properties.setProperty("cluster.rpc.gray.stable.tag", "");
+        properties.setProperty("cluster.rpc.gray.percent", "101");
+        properties.setProperty("cluster.rpc.gray.players", "10001,bad");
+        properties.setProperty("cluster.rpc.gray.operations", "scene.enter,,scene.leave");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.rpc.gray.enabled"));
+        assertTrue(keys.contains("cluster.rpc.gray.stable.tag"));
+        assertTrue(keys.contains("cluster.rpc.gray.percent"));
+        assertTrue(keys.contains("cluster.rpc.gray.players"));
+        assertTrue(keys.contains("cluster.rpc.gray.operations"));
+    }
+
+    @Test
+    void validationRejectsInvalidRegistryRecoveryConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.registry.recovery.enabled", "maybe");
+        properties.setProperty("cluster.registry.recovery.interval.millis", "0");
+        properties.setProperty("cluster.registry.history.limit", "-1");
+        properties.setProperty("cluster.registry.subscription.lease.ttl.millis", "0");
+        properties.setProperty("cluster.registry.subscription.lease.scan.interval.millis", "0");
+        properties.setProperty("cluster.event.subscription.lease.ttl.millis", "0");
+        properties.setProperty("cluster.event.subscription.lease.renew.interval.millis", "0");
+        properties.setProperty("cluster.event.subscription.lease.scan.interval.millis", "0");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.registry.recovery.enabled"));
+        assertTrue(keys.contains("cluster.registry.recovery.interval.millis"));
+        assertTrue(keys.contains("cluster.registry.history.limit"));
+        assertTrue(keys.contains("cluster.registry.subscription.lease.ttl.millis"));
+        assertTrue(keys.contains("cluster.registry.subscription.lease.scan.interval.millis"));
+        assertTrue(keys.contains("cluster.event.subscription.lease.ttl.millis"));
+        assertTrue(keys.contains("cluster.event.subscription.lease.renew.interval.millis"));
+        assertTrue(keys.contains("cluster.event.subscription.lease.scan.interval.millis"));
     }
 
     @Test

@@ -16,6 +16,7 @@ import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
 import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
+import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
@@ -39,11 +40,11 @@ public final class RegionServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
                             AgentMigrationPayloadCodecs.registerTo(
                                     AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
                             )
-                    ))
+                    )))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
@@ -51,11 +52,17 @@ public final class RegionServerMain {
             ));
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
                     new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
-            RemoteServiceRegistry registry = new RemoteServiceRegistry(local.id(), gateway, directory);
+            RemoteServiceRegistry registry = new RemoteServiceRegistry(
+                    local.id(),
+                    gateway,
+                    directory,
+                    config.registrySubscriptionLeaseTtl()
+            );
+            BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
             node.start(
-                    List.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY),
+                    List.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY),
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );

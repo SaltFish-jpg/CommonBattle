@@ -9,10 +9,14 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventOperations;
 import com.commonbattle.cluster.registry.RegistryOperations;
 import com.commonbattle.game.config.GameConfigOperations;
+import com.commonbattle.game.agent.BusinessAgentRpcOperations;
+import com.commonbattle.game.chat.ChatOperations;
 import com.commonbattle.game.player.PlayerBusinessRpcOperations;
 import com.commonbattle.game.profile.ProfileSnapshotOperations;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.shop.ShopStockOperations;
+import com.commonbattle.game.social.AllianceSnapshotOperations;
+import com.commonbattle.game.social.FriendSnapshotOperations;
 
 import java.util.Map;
 import java.util.Set;
@@ -22,7 +26,7 @@ final class ClusterDescriptors {
     }
 
     static ServiceDescriptor fromConfig(ClusterNodeConfig config) {
-        return descriptor(config.serviceId(), config.endpoint());
+        return withConfigMetadata(descriptor(config.serviceId(), config.endpoint()), config);
     }
 
     static ServiceDescriptor center(ClusterNodeConfig config) {
@@ -33,13 +37,25 @@ final class ClusterDescriptors {
         return new ServiceDescriptor(serviceId, endpoint, topics(serviceId.kind()), Map.of());
     }
 
+    static ServiceDescriptor withConfigMetadata(ServiceDescriptor descriptor, ClusterNodeConfig config) {
+        if (config.serviceMetadata().isEmpty()) {
+            return descriptor;
+        }
+        java.util.Map<String, String> metadata = new java.util.HashMap<>(descriptor.metadata());
+        metadata.putAll(config.serviceMetadata());
+        return descriptor.withMetadata(metadata);
+    }
+
     private static Set<String> topics(ServiceKind kind) {
         return switch (kind) {
             case CENTER -> Set.of(
                     RegistryOperations.REGISTER,
+                    RegistryOperations.HEARTBEAT,
                     RegistryOperations.UNREGISTER,
                     RegistryOperations.LIST,
                     RegistryOperations.SUBSCRIBE,
+                    RegistryOperations.UNSUBSCRIBE,
+                    RegistryOperations.REPLAY,
                     AgentDirectoryOperations.CLAIM,
                     AgentDirectoryOperations.MOVE,
                     AgentDirectoryOperations.UNBIND,
@@ -56,11 +72,25 @@ final class ClusterDescriptors {
             case GAME -> Set.of(
                     "game.resume",
                     "game.heartbeat",
+                    AllianceSnapshotOperations.GET,
+                    FriendSnapshotOperations.GET,
+                    BusinessAgentRpcOperations.DISPATCH,
                     PlayerBusinessRpcOperations.DISPATCH,
                     ProfileSnapshotOperations.GET,
                     AgentMigrationOperations.ACCEPT
             );
-            case SCENE -> Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE);
+            case CHAT -> Set.of(
+                    ChatOperations.JOIN_CHANNEL,
+                    ChatOperations.LEAVE_CHANNEL,
+                    ChatOperations.SEND_CHANNEL,
+                    BusinessAgentRpcOperations.DISPATCH
+            );
+            case SCENE -> Set.of(
+                    SceneOperations.ENTER,
+                    SceneOperations.LEAVE,
+                    SceneOperations.MESSAGE,
+                    BusinessAgentRpcOperations.DISPATCH
+            );
             case PROXY -> Set.of("proxy.forward", "proxy.heartbeat");
         };
     }

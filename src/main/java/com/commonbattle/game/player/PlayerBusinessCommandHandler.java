@@ -36,6 +36,10 @@ public final class PlayerBusinessCommandHandler implements PlayerCommandHandler 
                 throw new IllegalArgumentException("player command operation does not match payload");
             }
             PlayerGameAgent agent = Objects.requireNonNull(agents.apply(command.playerId()), "player agent");
+            if (businessCommand instanceof AsyncPlayerBusinessCommand<?> asyncCommand) {
+                asyncCommand.executeAsync(agent, command, results);
+                return;
+            }
             Object response = agent.executeBusiness(businessCommand);
             results.completed(command, PlayerBusinessResponse.success(command, response));
         } catch (RuntimeException | Error e) {

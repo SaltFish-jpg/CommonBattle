@@ -25,6 +25,6 @@ public record AllianceMemberChangedEvent(
 
     @Override
     public String ownerKey() {
-        return "alliance:" + allianceId;
+        return AllianceOwnerKeyParser.ownerKey(allianceId);
     }
 }

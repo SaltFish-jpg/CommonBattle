@@ -26,8 +26,11 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "actorSystem", actorSystem(snapshot)).append(',');
         object(json, "rpc", rpc(snapshot)).append(',');
         object(json, "rpcResilience", rpcResilience(snapshot)).append(',');
+        object(json, "rpcRoutes", rpcRoutes(snapshot)).append(',');
         object(json, "actorRpc", actorRpc(snapshot)).append(',');
         object(json, "commands", commands(snapshot)).append(',');
+        object(json, "businessResponses", businessResponses(snapshot)).append(',');
+        object(json, "asyncShopPurchases", asyncShopPurchases(snapshot)).append(',');
         object(json, "agents", agents(snapshot)).append(',');
         object(json, "playerAgents", playerAgents(snapshot)).append(',');
         object(json, "agentMigrations", agentMigrations(snapshot)).append(',');
@@ -39,12 +42,17 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "outbox", outbox(snapshot)).append(',');
         object(json, "cluster", cluster(snapshot)).append(',');
         object(json, "registryLeases", registryLeases(snapshot)).append(',');
+        object(json, "registryHistory", registryHistory(snapshot)).append(',');
+        object(json, "registrySubscriptions", registrySubscriptions(snapshot)).append(',');
+        object(json, "remoteRegistryRecoveries", remoteRegistryRecoveries(snapshot)).append(',');
         object(json, "serviceDescriptorPublishers", serviceDescriptorPublishers(snapshot)).append(',');
         object(json, "networkTransports", networkTransports(snapshot)).append(',');
         object(json, "configCaches", configCaches(snapshot)).append(',');
         object(json, "configRecoveries", configRecoveries(snapshot)).append(',');
         object(json, "eventCenters", eventCenters(snapshot)).append(',');
         object(json, "eventSubscriptions", eventSubscriptions(snapshot)).append(',');
+        object(json, "actorEventSubscribers", actorEventSubscribers(snapshot)).append(',');
+        object(json, "ownerActorEventSubscriptions", ownerActorEventSubscriptions(snapshot)).append(',');
         object(json, "profileInterests", profileInterests(snapshot)).append(',');
         object(json, "profileRuntimes", profileRuntimes(snapshot)).append(',');
         object(json, "sceneRuntimes", sceneRuntimes(snapshot)).append(',');
@@ -108,6 +116,18 @@ public final class RuntimeHealthJsonFormatter {
         return json;
     }
 
+    private static StringBuilder rpcRoutes(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "viewCount", snapshot.rpcRoutes().viewCount()).append(',');
+        number(json, "calls", snapshot.rpcRoutes().calls()).append(',');
+        number(json, "routedCalls", snapshot.rpcRoutes().routedCalls()).append(',');
+        number(json, "unroutedCalls", snapshot.rpcRoutes().unroutedCalls()).append(',');
+        object(json, "routeTagCalls", stringNumberMap(snapshot.rpcRoutes().routeTagCalls()));
+        json.append('}');
+        return json;
+    }
+
     private static StringBuilder actorRpc(RuntimeHealthSnapshot snapshot) {
         StringBuilder json = new StringBuilder();
         json.append('{');
@@ -128,6 +148,43 @@ public final class RuntimeHealthJsonFormatter {
         json.deleteCharAt(json.length() - 1);
         number(json.append(','), "acceptingDispatchers", snapshot.commands().acceptingDispatchers()).append(',');
         number(json, "drainingDispatchers", snapshot.commands().drainingDispatchers());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder businessResponses(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "hubCount", snapshot.businessResponses().hubCount()).append(',');
+        number(json, "pendingResponses", snapshot.businessResponses().pendingResponses()).append(',');
+        number(json, "submittedResponses", snapshot.businessResponses().submittedResponses()).append(',');
+        number(json, "completedResponses", snapshot.businessResponses().completedResponses()).append(',');
+        number(json, "cancelledResponses", snapshot.businessResponses().cancelledResponses()).append(',');
+        number(json, "timedOutResponses", snapshot.businessResponses().timedOutResponses()).append(',');
+        number(json, "fallbackResponses", snapshot.businessResponses().fallbackResponses()).append(',');
+        number(json, "sharedWaiters", snapshot.businessResponses().sharedWaiters()).append(',');
+        number(json, "replayedResponses", snapshot.businessResponses().replayedResponses()).append(',');
+        number(json, "cachedResponses", snapshot.businessResponses().cachedResponses()).append(',');
+        number(json, "oldestPendingAgeMillis", snapshot.businessResponses().oldestPendingAgeMillis());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder asyncShopPurchases(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "viewCount", snapshot.asyncShopPurchases().viewCount()).append(',');
+        number(json, "startedPurchases", snapshot.asyncShopPurchases().startedPurchases()).append(',');
+        number(json, "immediatePurchases", snapshot.asyncShopPurchases().immediatePurchases()).append(',');
+        number(json, "stockReservations", snapshot.asyncShopPurchases().stockReservations()).append(',');
+        number(json, "reservedCallbacks", snapshot.asyncShopPurchases().reservedCallbacks()).append(',');
+        number(json, "outOfStockCallbacks", snapshot.asyncShopPurchases().outOfStockCallbacks()).append(',');
+        number(json, "rpcFailures", snapshot.asyncShopPurchases().rpcFailures()).append(',');
+        number(json, "lateCallbacks", snapshot.asyncShopPurchases().lateCallbacks()).append(',');
+        number(json, "completedPurchases", snapshot.asyncShopPurchases().completedPurchases()).append(',');
+        number(json, "rejectedPurchases", snapshot.asyncShopPurchases().rejectedPurchases()).append(',');
+        number(json, "releasedReservations", snapshot.asyncShopPurchases().releasedReservations()).append(',');
+        number(json, "releaseFailures", snapshot.asyncShopPurchases().releaseFailures());
         json.append('}');
         return json;
     }
@@ -250,7 +307,10 @@ public final class RuntimeHealthJsonFormatter {
     private static StringBuilder cluster(RuntimeHealthSnapshot snapshot) {
         StringBuilder json = enumMap(snapshot.cluster().counts(), ServiceKind.values());
         json.deleteCharAt(json.length() - 1);
-        object(json.append(','), "draining", enumMap(snapshot.cluster().drainingCounts(), ServiceKind.values()));
+        object(json.append(','), "draining", enumMap(snapshot.cluster().drainingCounts(), ServiceKind.values())).append(',');
+        object(json, "versions", enumMap(snapshot.cluster().versions(), ServiceKind.values())).append(',');
+        object(json, "routeTags", serviceKindStringNumberMap(snapshot.cluster().routeTagCounts())).append(',');
+        object(json, "deploymentGroups", serviceKindStringNumberMap(snapshot.cluster().deploymentGroupCounts()));
         json.append('}');
         return json;
     }
@@ -264,6 +324,48 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "failedRenewals", snapshot.registryLeases().failedRenewals()).append(',');
         number(json, "reapers", snapshot.registryLeases().reapers()).append(',');
         number(json, "expiredServices", snapshot.registryLeases().expiredServices());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder registryHistory(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "viewCount", snapshot.registryHistory().viewCount()).append(',');
+        number(json, "currentVersion", snapshot.registryHistory().currentVersion()).append(',');
+        number(json, "minReplayVersion", snapshot.registryHistory().minReplayVersion()).append(',');
+        number(json, "retainedEvents", snapshot.registryHistory().retainedEvents()).append(',');
+        number(json, "historyLimit", snapshot.registryHistory().historyLimit()).append(',');
+        number(json, "compactedReplayRequests", snapshot.registryHistory().compactedReplayRequests());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder remoteRegistryRecoveries(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "schedulerCount", snapshot.remoteRegistryRecoveries().schedulerCount()).append(',');
+        number(json, "runs", snapshot.remoteRegistryRecoveries().runs()).append(',');
+        number(json, "succeededRuns", snapshot.remoteRegistryRecoveries().succeededRuns()).append(',');
+        number(json, "failedRuns", snapshot.remoteRegistryRecoveries().failedRuns()).append(',');
+        number(json, "skippedRuns", snapshot.remoteRegistryRecoveries().skippedRuns()).append(',');
+        number(json, "recoveredKinds", snapshot.remoteRegistryRecoveries().recoveredKinds()).append(',');
+        number(json, "inFlight", snapshot.remoteRegistryRecoveries().inFlight());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder registrySubscriptions(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "viewCount", snapshot.registrySubscriptions().viewCount()).append(',');
+        number(json, "subscribedKinds", snapshot.registrySubscriptions().subscribedKinds()).append(',');
+        number(json, "subscribers", snapshot.registrySubscriptions().subscribers()).append(',');
+        number(json, "references", snapshot.registrySubscriptions().references()).append(',');
+        number(json, "subscribeRequests", snapshot.registrySubscriptions().subscribeRequests()).append(',');
+        number(json, "unsubscribeRequests", snapshot.registrySubscriptions().unsubscribeRequests()).append(',');
+        number(json, "cleanedSubscribers", snapshot.registrySubscriptions().cleanedSubscribers()).append(',');
+        number(json, "expiredSubscriptions", snapshot.registrySubscriptions().expiredSubscriptions());
         json.append('}');
         return json;
     }
@@ -351,6 +453,8 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "subscribers", snapshot.eventCenters().subscribers()).append(',');
         number(json, "publishedEvents", snapshot.eventCenters().publishedEvents()).append(',');
         number(json, "droppedEvents", snapshot.eventCenters().droppedEvents()).append(',');
+        number(json, "deliveryFailures", snapshot.eventCenters().deliveryFailures()).append(',');
+        number(json, "expiredSubscriptions", snapshot.eventCenters().expiredSubscriptions()).append(',');
         object(json, "topics", eventCenterTopics(snapshot));
         json.append('}');
         return json;
@@ -380,8 +484,42 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "subscribers", topic.subscribers()).append(',');
         number(json, "publishedEvents", topic.publishedEvents()).append(',');
         number(json, "droppedEvents", topic.droppedEvents()).append(',');
+        number(json, "deliveryFailures", topic.deliveryFailures()).append(',');
+        number(json, "expiredSubscriptions", topic.expiredSubscriptions()).append(',');
         number(json, "minRetainedRevision", topic.minRetainedRevision()).append(',');
         number(json, "maxRetainedRevision", topic.maxRetainedRevision());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder actorEventSubscribers(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "subscriberCount", snapshot.actorEventSubscribers().subscriberCount()).append(',');
+        number(json, "receivedEvents", snapshot.actorEventSubscribers().receivedEvents()).append(',');
+        number(json, "enqueuedEvents", snapshot.actorEventSubscribers().enqueuedEvents()).append(',');
+        number(json, "rejectedEvents", snapshot.actorEventSubscribers().rejectedEvents()).append(',');
+        number(json, "handledEvents", snapshot.actorEventSubscribers().handledEvents()).append(',');
+        number(json, "failedEvents", snapshot.actorEventSubscribers().failedEvents());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder ownerActorEventSubscriptions(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "subscriptionCount", snapshot.ownerActorEventSubscriptions().subscriptionCount()).append(',');
+        number(json, "watchedOwners", snapshot.ownerActorEventSubscriptions().watchedOwners()).append(',');
+        number(json, "watchReferences", snapshot.ownerActorEventSubscriptions().watchReferences()).append(',');
+        number(json, "watchRequests", snapshot.ownerActorEventSubscriptions().watchRequests()).append(',');
+        number(json, "unwatchRequests", snapshot.ownerActorEventSubscriptions().unwatchRequests()).append(',');
+        number(json, "subscribeRequests", snapshot.ownerActorEventSubscriptions().subscribeRequests()).append(',');
+        number(json, "unsubscribeRequests", snapshot.ownerActorEventSubscriptions().unsubscribeRequests()).append(',');
+        number(json, "replayAttempts", snapshot.ownerActorEventSubscriptions().replayAttempts()).append(',');
+        number(json, "replayFailures", snapshot.ownerActorEventSubscriptions().replayFailures()).append(',');
+        number(json, "repairRequests", snapshot.ownerActorEventSubscriptions().repairRequests()).append(',');
+        number(json, "repairOwnerCount", snapshot.ownerActorEventSubscriptions().repairOwnerCount()).append(',');
+        number(json, "repairFailures", snapshot.ownerActorEventSubscriptions().repairFailures());
         json.append('}');
         return json;
     }
@@ -411,6 +549,7 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "localStale", snapshot.profileRuntimes().localStale()).append(',');
         number(json, "localMisses", snapshot.profileRuntimes().localMisses()).append(',');
         number(json, "refreshes", snapshot.profileRuntimes().refreshes()).append(',');
+        number(json, "remoteStale", snapshot.profileRuntimes().remoteStale()).append(',');
         number(json, "remoteMisses", snapshot.profileRuntimes().remoteMisses()).append(',');
         number(json, "localFallbacks", snapshot.profileRuntimes().localFallbacks());
         json.append('}');
@@ -424,7 +563,11 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "activeScenes", snapshot.sceneRuntimes().activeScenes()).append(',');
         number(json, "activePlayers", snapshot.sceneRuntimes().activePlayers()).append(',');
         number(json, "shardCount", snapshot.sceneRuntimes().shardCount()).append(',');
-        number(json, "maxShardPlayers", snapshot.sceneRuntimes().maxShardPlayers());
+        number(json, "maxShardPlayers", snapshot.sceneRuntimes().maxShardPlayers()).append(',');
+        number(json, "playerInterests", snapshot.sceneRuntimes().playerInterests()).append(',');
+        number(json, "allianceReferences", snapshot.sceneRuntimes().allianceReferences()).append(',');
+        number(json, "duplicateEnters", snapshot.sceneRuntimes().duplicateEnters()).append(',');
+        number(json, "missingLeaves", snapshot.sceneRuntimes().missingLeaves());
         json.append('}');
         return json;
     }
@@ -491,6 +634,50 @@ public final class RuntimeHealthJsonFormatter {
             }
             first = false;
             number(json, String.valueOf(entry.getKey()), entry.getValue());
+        }
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder stringNumberMap(Map<String, Long> values) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        boolean first = true;
+        for (Map.Entry<String, Long> entry : values.entrySet()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            number(json, entry.getKey(), entry.getValue());
+        }
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder serviceKindStringNumberMap(Map<ServiceKind, Map<String, Integer>> values) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        ServiceKind[] kinds = ServiceKind.values();
+        for (int i = 0; i < kinds.length; i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            object(json, kinds[i].name(), stringIntegerMap(values.getOrDefault(kinds[i], Map.of())));
+        }
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder stringIntegerMap(Map<String, Integer> values) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        boolean first = true;
+        for (Map.Entry<String, Integer> entry : values.entrySet()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            number(json, entry.getKey(), entry.getValue());
         }
         json.append('}');
         return json;

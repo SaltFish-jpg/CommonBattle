@@ -6,5 +6,8 @@ package com.commonbattle.game.player;
  */
 @FunctionalInterface
 public interface PlayerBusinessResponseRegistration {
+    PlayerBusinessResponseRegistration NOOP = () -> {
+    };
+
     void cancel();
 }

@@ -18,6 +18,9 @@ public record EventUnsubscribeRequest(ServiceId subscriber, String topic, Set<St
     }
 
     public EventUnsubscribeRequest {
+        java.util.Objects.requireNonNull(subscriber, "subscriber");
+        java.util.Objects.requireNonNull(topic, "topic");
+        java.util.Objects.requireNonNull(ownerKeys, "ownerKeys");
         ownerKeys = Set.copyOf(ownerKeys);
     }
 }

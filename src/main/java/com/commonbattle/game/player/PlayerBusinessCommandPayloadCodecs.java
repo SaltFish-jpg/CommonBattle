@@ -27,6 +27,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
         registry.register(new ClaimActivityCommandCodec());
         registry.register(new UseExpItemsCommandCodec());
         registry.register(new BuyShopItemCommandCodec());
+        registry.register(new BuyShopItemAsyncCommandCodec());
         registry.register(new BattleStageClearCommandCodec());
         registry.register(new BattleStageSweepCommandCodec());
         registry.register(new ClaimTaskCommandCodec());
@@ -357,6 +358,58 @@ public final class PlayerBusinessCommandPayloadCodecs {
                     }
                 }
                 return new BuyShopItemCommand(orderId, sku, quantity);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player business command", e);
+            }
+        }
+    }
+
+    private static final class BuyShopItemAsyncCommandCodec implements PayloadCodec<BuyShopItemAsyncCommand> {
+        @Override
+        public String typeName() {
+            return BuyShopItemAsyncCommand.class.getName();
+        }
+
+        @Override
+        public Class<BuyShopItemAsyncCommand> javaType() {
+            return BuyShopItemAsyncCommand.class;
+        }
+
+        @Override
+        public byte[] encode(BuyShopItemAsyncCommand payload) {
+            int size = CodedOutputStream.computeStringSize(1, payload.sku())
+                    + CodedOutputStream.computeInt32Size(2, payload.quantity())
+                    + CodedOutputStream.computeStringSize(3, payload.orderId());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeString(1, payload.sku());
+                output.writeInt32(2, payload.quantity());
+                output.writeString(3, payload.orderId());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player business command", e);
+            }
+        }
+
+        @Override
+        public BuyShopItemAsyncCommand decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            String sku = "";
+            int quantity = 0;
+            String orderId = "";
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> sku = input.readString();
+                        case 2 -> quantity = input.readInt32();
+                        case 3 -> orderId = input.readString();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new BuyShopItemAsyncCommand(orderId, sku, quantity);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode player business command", e);
             }

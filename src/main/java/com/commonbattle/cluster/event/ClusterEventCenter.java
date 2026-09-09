@@ -8,6 +8,9 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcResponder;
 import com.commonbattle.game.event.VersionedEvent;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,11 +32,16 @@ public final class ClusterEventCenter {
     private final ServiceDescriptor local;
     private final ClusterTransport transport;
     private final ClusterEventHistoryPolicy historyPolicy;
+    private final Clock clock;
+    private final Duration subscriptionLeaseTtl;
     private final Map<String, Set<ServiceId>> topicSubscribers = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Set<ServiceId>>> ownerSubscribers = new ConcurrentHashMap<>();
+    private final Map<SubscriptionKey, Map<ServiceId, Instant>> subscriptionLeases = new ConcurrentHashMap<>();
     private final Map<String, ArrayDeque<VersionedEvent>> history = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> publishedByTopic = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> droppedByTopic = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> deliveryFailuresByTopic = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> expiredSubscriptionsByTopic = new ConcurrentHashMap<>();
 
     public ClusterEventCenter(ServiceDescriptor local, ClusterTransport transport, ClusterRpcGateway gateway) {
         this(local, transport, gateway, DEFAULT_HISTORY_LIMIT);
@@ -54,9 +62,22 @@ public final class ClusterEventCenter {
             ClusterRpcGateway gateway,
             ClusterEventHistoryPolicy historyPolicy
     ) {
+        this(local, transport, gateway, historyPolicy, Clock.systemUTC(), Duration.ofSeconds(15));
+    }
+
+    public ClusterEventCenter(
+            ServiceDescriptor local,
+            ClusterTransport transport,
+            ClusterRpcGateway gateway,
+            ClusterEventHistoryPolicy historyPolicy,
+            Clock clock,
+            Duration subscriptionLeaseTtl
+    ) {
         this.local = Objects.requireNonNull(local, "local");
         this.transport = Objects.requireNonNull(transport, "transport");
         this.historyPolicy = Objects.requireNonNull(historyPolicy, "historyPolicy");
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.subscriptionLeaseTtl = positive(subscriptionLeaseTtl, "subscriptionLeaseTtl");
         Objects.requireNonNull(gateway, "gateway");
         gateway.handle(ClusterEventOperations.SUBSCRIBE, this::subscribe);
         gateway.handle(ClusterEventOperations.UNSUBSCRIBE, this::unsubscribe);
@@ -87,6 +108,8 @@ public final class ClusterEventCenter {
         topics.addAll(ownerSubscribers.keySet());
         topics.addAll(publishedByTopic.keySet());
         topics.addAll(droppedByTopic.keySet());
+        topics.addAll(deliveryFailuresByTopic.keySet());
+        topics.addAll(expiredSubscriptionsByTopic.keySet());
         Map<String, ClusterEventTopicStats> topicStats = new HashMap<>();
         for (String topic : topics) {
             topicStats.put(topic, topicStats(topic));
@@ -103,6 +126,7 @@ public final class ClusterEventCenter {
         if (payload.ownerKeys().isEmpty()) {
             topicSubscribers.computeIfAbsent(payload.topic(), ignored -> ConcurrentHashMap.newKeySet())
                     .add(payload.subscriber());
+            renewLease(new SubscriptionKey(payload.topic(), ""), payload.subscriber(), payload.leaseTtl());
         } else {
             Map<String, Set<ServiceId>> topicOwners = ownerSubscribers.computeIfAbsent(
                     payload.topic(),
@@ -110,6 +134,8 @@ public final class ClusterEventCenter {
             );
             payload.ownerKeys().forEach(ownerKey -> topicOwners.computeIfAbsent(ownerKey, ignored -> ConcurrentHashMap.newKeySet())
                     .add(payload.subscriber()));
+            payload.ownerKeys().forEach(ownerKey ->
+                    renewLease(new SubscriptionKey(payload.topic(), ownerKey), payload.subscriber(), payload.leaseTtl()));
         }
         responder.success("subscribed");
     }
@@ -118,11 +144,13 @@ public final class ClusterEventCenter {
         EventUnsubscribeRequest payload = (EventUnsubscribeRequest) request.payload();
         if (payload.ownerKeys().isEmpty()) {
             topicSubscribers.getOrDefault(payload.topic(), Set.of()).remove(payload.subscriber());
-            ownerSubscribers.getOrDefault(payload.topic(), Map.of()).values()
-                    .forEach(subscribers -> subscribers.remove(payload.subscriber()));
+            removeLease(new SubscriptionKey(payload.topic(), ""), payload.subscriber());
         } else {
             Map<String, Set<ServiceId>> topicOwners = ownerSubscribers.getOrDefault(payload.topic(), Map.of());
-            payload.ownerKeys().forEach(ownerKey -> topicOwners.getOrDefault(ownerKey, Set.of()).remove(payload.subscriber()));
+            payload.ownerKeys().forEach(ownerKey -> {
+                topicOwners.getOrDefault(ownerKey, Set.of()).remove(payload.subscriber());
+                removeLease(new SubscriptionKey(payload.topic(), ownerKey), payload.subscriber());
+            });
         }
         responder.success("unsubscribed");
     }
@@ -155,7 +183,26 @@ public final class ClusterEventCenter {
         var event = payload.event();
         publishedByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
         record(event);
-        subscribers(event.topic(), event.ownerKey()).forEach(subscriber -> send(subscriber, event));
+        subscribers(event.topic(), event.ownerKey()).forEach(subscriber -> sendSafely(subscriber, event));
+    }
+
+    public int expireSubscriptions(Instant now) {
+        Objects.requireNonNull(now, "now");
+        int expired = 0;
+        for (Map.Entry<SubscriptionKey, Map<ServiceId, Instant>> leaseEntry : subscriptionLeases.entrySet()) {
+            SubscriptionKey key = leaseEntry.getKey();
+            Map<ServiceId, Instant> leases = leaseEntry.getValue();
+            for (Map.Entry<ServiceId, Instant> subscriberLease : List.copyOf(leases.entrySet())) {
+                if (!subscriberLease.getValue().isAfter(now)
+                        && leases.remove(subscriberLease.getKey(), subscriberLease.getValue())) {
+                    removeSubscriber(key, subscriberLease.getKey());
+                    expired++;
+                    expiredSubscriptionsByTopic.computeIfAbsent(key.topic(), ignored -> new AtomicLong())
+                            .incrementAndGet();
+                }
+            }
+        }
+        return expired;
     }
 
     private void send(ServiceId subscriber, VersionedEvent event) {
@@ -166,6 +213,38 @@ public final class ClusterEventCenter {
                 ClusterEventOperations.DELIVER,
                 new EventDeliverRequest(event)
         ));
+    }
+
+    private void sendSafely(ServiceId subscriber, VersionedEvent event) {
+        try {
+            send(subscriber, event);
+        } catch (RuntimeException e) {
+            deliveryFailuresByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
+        }
+    }
+
+    private void renewLease(SubscriptionKey key, ServiceId subscriber, Duration requestedTtl) {
+        Duration ttl = requestedTtl.isZero() ? subscriptionLeaseTtl : requestedTtl;
+        subscriptionLeases.computeIfAbsent(key, ignored -> new ConcurrentHashMap<>())
+                .put(subscriber, clock.instant().plus(ttl));
+    }
+
+    private void removeLease(SubscriptionKey key, ServiceId subscriber) {
+        Map<ServiceId, Instant> leases = subscriptionLeases.get(key);
+        if (leases == null) {
+            return;
+        }
+        leases.remove(subscriber);
+    }
+
+    private void removeSubscriber(SubscriptionKey key, ServiceId subscriber) {
+        if (key.ownerKey().isBlank()) {
+            topicSubscribers.getOrDefault(key.topic(), Set.of()).remove(subscriber);
+            return;
+        }
+        ownerSubscribers.getOrDefault(key.topic(), Map.of())
+                .getOrDefault(key.ownerKey(), Set.of())
+                .remove(subscriber);
     }
 
     private void record(VersionedEvent event) {
@@ -223,6 +302,8 @@ public final class ClusterEventCenter {
                 subscribers(topic).size(),
                 publishedByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 droppedByTopic.getOrDefault(topic, new AtomicLong()).get(),
+                deliveryFailuresByTopic.getOrDefault(topic, new AtomicLong()).get(),
+                expiredSubscriptionsByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 minRevision == Long.MAX_VALUE ? 0 : minRevision,
                 maxRevision
         );
@@ -232,5 +313,20 @@ public final class ClusterEventCenter {
         Set<ServiceId> subscribers = new HashSet<>(topicSubscribers.getOrDefault(topic, Set.of()));
         subscribers.addAll(ownerSubscribers.getOrDefault(topic, Map.of()).getOrDefault(ownerKey, Set.of()));
         return subscribers;
+    }
+
+    private static Duration positive(Duration duration, String name) {
+        Objects.requireNonNull(duration, name);
+        if (duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return duration;
+    }
+
+    private record SubscriptionKey(String topic, String ownerKey) {
+        private SubscriptionKey {
+            Objects.requireNonNull(topic, "topic");
+            Objects.requireNonNull(ownerKey, "ownerKey");
+        }
     }
 }

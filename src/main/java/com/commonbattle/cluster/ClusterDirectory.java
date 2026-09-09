@@ -15,12 +15,14 @@ public final class ClusterDirectory implements AutoCloseable {
     private final ServiceRegistry registry;
     private final Map<ServiceKind, CopyOnWriteArrayList<ServiceDescriptor>> services =
             new EnumMap<>(ServiceKind.class);
+    private final Map<ServiceKind, Long> versions = new EnumMap<>(ServiceKind.class);
     private final List<AutoCloseable> subscriptions = new CopyOnWriteArrayList<>();
 
     public ClusterDirectory(ServiceRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
         for (ServiceKind kind : ServiceKind.values()) {
             services.put(kind, new CopyOnWriteArrayList<>());
+            versions.put(kind, 0L);
         }
     }
 
@@ -53,6 +55,23 @@ public final class ClusterDirectory implements AutoCloseable {
         accept(new RegistryEvent(RegistryEventType.REGISTERED, Objects.requireNonNull(service, "service")));
     }
 
+    public void replace(ServiceKind kind, List<ServiceDescriptor> snapshot, long version) {
+        Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (version < 0) {
+            throw new IllegalArgumentException("version must not be negative");
+        }
+        CopyOnWriteArrayList<ServiceDescriptor> byKind = services.get(kind);
+        byKind.clear();
+        byKind.addAll(snapshot);
+        versions.put(kind, version);
+    }
+
+    public long version(ServiceKind kind) {
+        Objects.requireNonNull(kind, "kind");
+        return versions.get(kind);
+    }
+
     public void accept(RegistryEvent event) {
         onEvent(event);
     }
@@ -65,11 +84,29 @@ public final class ClusterDirectory implements AutoCloseable {
 
     private void onEvent(RegistryEvent event) {
         CopyOnWriteArrayList<ServiceDescriptor> byKind = services.get(event.service().id().kind());
+        if (isStale(event)) {
+            return;
+        }
         if (event.type() == RegistryEventType.REGISTERED) {
             byKind.removeIf(service -> service.id().equals(event.service().id()));
             byKind.add(event.service());
         } else {
             byKind.removeIf(service -> service.id().equals(event.service().id()));
+        }
+        recordVersion(event);
+    }
+
+    private boolean isStale(RegistryEvent event) {
+        if (event.version() == 0) {
+            return false;
+        }
+        ServiceKind kind = event.service().id().kind();
+        return event.version() <= versions.get(kind);
+    }
+
+    private void recordVersion(RegistryEvent event) {
+        if (event.version() > 0) {
+            versions.put(event.service().id().kind(), event.version());
         }
     }
 

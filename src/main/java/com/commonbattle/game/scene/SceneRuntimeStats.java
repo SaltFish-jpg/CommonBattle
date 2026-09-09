@@ -8,16 +8,25 @@ public record SceneRuntimeStats(
         int activeScenes,
         int activePlayers,
         int shardCount,
-        int maxShardPlayers
+        int maxShardPlayers,
+        int playerInterests,
+        int allianceReferences,
+        long duplicateEnters,
+        long missingLeaves
 ) {
+    public SceneRuntimeStats(int activeScenes, int activePlayers, int shardCount, int maxShardPlayers) {
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0);
+    }
+
     public SceneRuntimeStats {
-        if (activeScenes < 0 || activePlayers < 0 || shardCount < 0 || maxShardPlayers < 0) {
+        if (activeScenes < 0 || activePlayers < 0 || shardCount < 0 || maxShardPlayers < 0
+                || playerInterests < 0 || allianceReferences < 0 || duplicateEnters < 0 || missingLeaves < 0) {
             throw new IllegalArgumentException("scene runtime stats must not be negative");
         }
     }
 
     public static SceneRuntimeStats empty() {
-        return new SceneRuntimeStats(0, 0, 0, 0);
+        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats plus(SceneRuntimeStats other) {
@@ -25,7 +34,11 @@ public record SceneRuntimeStats(
                 activeScenes + other.activeScenes,
                 activePlayers + other.activePlayers,
                 shardCount + other.shardCount,
-                Math.max(maxShardPlayers, other.maxShardPlayers)
+                Math.max(maxShardPlayers, other.maxShardPlayers),
+                playerInterests + other.playerInterests,
+                allianceReferences + other.allianceReferences,
+                duplicateEnters + other.duplicateEnters,
+                missingLeaves + other.missingLeaves
         );
     }
 }

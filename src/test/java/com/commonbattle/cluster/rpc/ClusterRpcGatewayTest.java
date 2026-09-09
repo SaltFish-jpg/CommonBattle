@@ -30,6 +30,7 @@ import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -587,6 +588,161 @@ class ClusterRpcGatewayTest {
         ), callback);
 
         assertEquals("v2", callback.response.get());
+    }
+
+    @Test
+    void rpcTargetResolutionCanRequireRouteTagForGrayRelease() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor stableScene = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.SCENE, "scene-stable", 9002, Set.of(SceneOperations.ENTER)),
+                "stable"
+        );
+        ServiceDescriptor grayScene = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.SCENE, "scene-gray", 9003, Set.of(SceneOperations.ENTER)),
+                "gray"
+        );
+        registry.register(stableScene);
+        registry.register(grayScene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory stableDirectory = new ClusterDirectory(registry);
+        stableDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory grayDirectory = new ClusterDirectory(registry);
+        grayDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway stableGateway = new ClusterRpcGateway(stableScene, stableDirectory, topology, transport);
+        stableGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("stable"));
+        ClusterRpcGateway grayGateway = new ClusterRpcGateway(grayScene, grayDirectory, topology, transport);
+        grayGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("gray"));
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        RecordingCallback callback = new RecordingCallback();
+
+        gameGateway.call(request(), callback, RpcCallOptions.of(Duration.ofSeconds(1))
+                .withRequiredTargetMetadata(ServiceMetadata.ROUTE_TAG, "gray"));
+
+        assertEquals("gray", callback.response.get());
+    }
+
+    @Test
+    void routedGatewayAppliesPlayerGrayRoutePolicyToSceneRpc() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor stableScene = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.SCENE, "scene-stable", 9002, Set.of(SceneOperations.ENTER)),
+                "stable"
+        );
+        ServiceDescriptor grayScene = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.SCENE, "scene-gray", 9003, Set.of(SceneOperations.ENTER)),
+                "gray"
+        );
+        registry.register(stableScene);
+        registry.register(grayScene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory stableDirectory = new ClusterDirectory(registry);
+        stableDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory grayDirectory = new ClusterDirectory(registry);
+        grayDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway stableGateway = new ClusterRpcGateway(stableScene, stableDirectory, topology, transport);
+        stableGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("stable"));
+        ClusterRpcGateway grayGateway = new ClusterRpcGateway(grayScene, grayDirectory, topology, transport);
+        grayGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.success("gray"));
+        ClusterRpcGateway clusterGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        RoutedRpcGateway gameGateway = new RoutedRpcGateway(
+                clusterGateway,
+                clusterGateway.defaultCallOptions(),
+                new PlayerGrayRoutePolicy(new PlayerGrayRouteConfig(
+                        true,
+                        "stable",
+                        "gray",
+                        0,
+                        Set.of(10001L),
+                        Set.of(SceneOperations.ENTER)
+                ))
+        );
+        RecordingCallback grayCallback = new RecordingCallback();
+        RecordingCallback stableCallback = new RecordingCallback();
+
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(10001L, "room-9"),
+                String.class
+        ), grayCallback);
+        gameGateway.call(new RpcRequest<>(
+                ServiceKind.SCENE.name(),
+                SceneOperations.ENTER,
+                new EnterSceneRequest(20002L, "room-9"),
+                String.class
+        ), stableCallback);
+
+        assertEquals("gray", grayCallback.response.get());
+        assertEquals("stable", stableCallback.response.get());
+    }
+
+    @Test
+    void rpcTargetResolutionDoesNotFallbackWhenRequiredMetadataIsMissing() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor stableScene = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.SCENE, "scene-stable", 9002, Set.of(SceneOperations.ENTER)),
+                "stable"
+        );
+        registry.register(stableScene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        FailureCallback callback = new FailureCallback();
+
+        gameGateway.call(request(), callback, RpcCallOptions.of(Duration.ofSeconds(1))
+                .withRequiredTargetMetadata(ServiceMetadata.ROUTE_TAG, "gray"));
+
+        assertInstanceOf(RpcNoRoutableServiceException.class, callback.error.get());
+        assertEquals(0, gameGateway.stats().pendingRequests());
+        assertEquals(1, gameGateway.stats().failedRequests());
+    }
+
+    @Test
+    void exactServiceTargetStillHonorsRequiredMetadata() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor gameTwo = ServiceMetadata.withRouteTag(
+                descriptor(ServiceKind.GAME, "game-2", 9002, Set.of("agent.migration.accept")),
+                "stable"
+        );
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.watch(ServiceKind.GAME);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        FailureCallback callback = new FailureCallback();
+
+        gameOneGateway.call(RpcRequest.toService(
+                gameTwo.id(),
+                "agent.migration.accept",
+                "payload",
+                String.class
+        ), callback, RpcCallOptions.of(Duration.ofSeconds(1))
+                .withRequiredTargetMetadata(ServiceMetadata.ROUTE_TAG, "gray"));
+
+        assertInstanceOf(RpcNoRoutableServiceException.class, callback.error.get());
+        assertEquals(0, gameOneGateway.stats().pendingRequests());
+        assertEquals(1, gameOneGateway.stats().failedRequests());
     }
 
     @Test

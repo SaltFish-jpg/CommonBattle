@@ -7,6 +7,7 @@ package com.commonbattle.actor;
 public enum ActorTaskCategory {
     DEFAULT,
     PLAYER_COMMAND,
+    EVENT,
     RPC_CALLBACK,
     TIMER,
     OBSERVABILITY,

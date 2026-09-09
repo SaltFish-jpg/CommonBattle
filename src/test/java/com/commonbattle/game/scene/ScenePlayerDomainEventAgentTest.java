@@ -5,7 +5,9 @@ import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
+import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
+import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import org.junit.jupiter.api.Test;
 
@@ -66,11 +68,36 @@ class ScenePlayerDomainEventAgentTest {
         assertEquals(3, scene.revisionOf(10001L));
     }
 
+    @Test
+    void enterAndLeaveDrivePlayerDomainOwnerInterestOnce() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        ScenePlayerDomainEventAgent scene = createScene(executor, interests);
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.enter(10001L);
+        executor.runNext();
+        scene.leave(10001L);
+        executor.runNext();
+        scene.leave(10001L);
+        executor.runNext();
+
+        assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), interests.watched);
+        assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), interests.unwatched);
+    }
+
     private static ScenePlayerDomainEventAgent createScene(Executor executor) {
+        return createScene(executor, OwnerEventInterestControl.noop());
+    }
+
+    private static ScenePlayerDomainEventAgent createScene(Executor executor, OwnerEventInterestControl interests) {
         ActorSystem actors = new ActorSystem(executor, 64);
         return new ScenePlayerDomainEventAgent(
                 new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
-                actors.actor("scene-domain-events")
+                actors.actor("scene-domain-events"),
+                new PlayerDomainEventProcessor(),
+                interests
         );
     }
 
@@ -101,6 +128,21 @@ class ScenePlayerDomainEventAgentTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class RecordingOwnerInterests implements OwnerEventInterestControl {
+        private final List<String> watched = new ArrayList<>();
+        private final List<String> unwatched = new ArrayList<>();
+
+        @Override
+        public void watchOwner(String ownerKey) {
+            watched.add(ownerKey);
+        }
+
+        @Override
+        public void unwatchOwner(String ownerKey) {
+            unwatched.add(ownerKey);
         }
     }
 }

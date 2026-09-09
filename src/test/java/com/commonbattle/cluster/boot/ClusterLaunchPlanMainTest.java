@@ -20,7 +20,7 @@ class ClusterLaunchPlanMainTest {
 
         List<String> lines = ClusterLaunchPlanMain.render(plan);
 
-        assertEquals(6, lines.size());
+        assertEquals(7, lines.size());
         assertTrue(lines.getFirst().startsWith("center=java -cp target/classes "));
         assertTrue(lines.stream().anyMatch(line ->
                 line.startsWith("scene-large=")

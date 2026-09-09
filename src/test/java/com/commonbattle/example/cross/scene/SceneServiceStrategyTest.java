@@ -8,10 +8,20 @@ import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceMetadata;
+import com.commonbattle.game.event.OwnerEventInterestControl;
+import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
+import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.scene.SceneRuntimeStats;
+import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
+import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
+import com.commonbattle.game.social.AllianceMemberAction;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendOwnerKeyParser;
+import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import org.junit.jupiter.api.Test;
 
@@ -231,9 +241,12 @@ class SceneServiceStrategyTest {
                     actors.actor("scene-profile"),
                     interests
             );
+            RecordingOwnerInterests domainInterests = new RecordingOwnerInterests();
             ScenePlayerDomainEventAgent domainEvents = new ScenePlayerDomainEventAgent(
                     messages,
-                    actors.actor("scene-domain-events")
+                    actors.actor("scene-domain-events"),
+                    new PlayerDomainEventProcessor(),
+                    domainInterests
             );
             ProfileAwareSceneService service = new ProfileAwareSceneService(delegate, profiles, domainEvents);
 
@@ -246,8 +259,126 @@ class SceneServiceStrategyTest {
 
             assertEquals(List.of(10001L), interests.watched);
             assertEquals(List.of(10001L), interests.unwatched);
+            assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), domainInterests.watched);
+            assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), domainInterests.unwatched);
             assertEquals(false, domainEvents.stageClears(10001L).isPresent());
             assertEquals(true, service.domainEvents().isPresent());
+        }
+    }
+
+    @Test
+    void profileAwareWrapperCanDriveAllianceAwarenessOnEnterAndLeave() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            MultiSmallSceneService delegate = MultiSmallSceneService.create(
+                    actors,
+                    "r1",
+                    "scene-small-1",
+                    new ServiceEndpoint("127.0.0.1", 9100),
+                    200
+            );
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+            SceneProfileAwarenessAgent profiles = new SceneProfileAwarenessAgent(
+                    messages,
+                    actors.actor("scene-profile"),
+                    ProfileInterestControl.noop()
+            );
+            ScenePlayerDomainEventAgent domainEvents = new ScenePlayerDomainEventAgent(
+                    messages,
+                    actors.actor("scene-domain-events")
+            );
+            SceneAllianceAwarenessAgent allianceEvents = new SceneAllianceAwarenessAgent(
+                    messages,
+                    actors.actor("scene-alliance-events")
+            );
+            ProfileAwareSceneService service = new ProfileAwareSceneService(
+                    delegate,
+                    profiles,
+                    domainEvents,
+                    allianceEvents
+            );
+
+            service.enter(10001L, "room-1", 0, 0);
+            executor.runNext();
+            executor.runNext();
+            executor.runNext();
+            allianceEvents.onAllianceChanged(new AllianceMemberChangedEvent(
+                    100,
+                    10001L,
+                    AllianceMemberAction.JOIN,
+                    1
+            ));
+            executor.runNext();
+            assertEquals(100, allianceEvents.allianceOf(10001L).orElseThrow().allianceId());
+
+            service.leave(10001L, "room-1");
+            executor.runNext();
+            executor.runNext();
+            executor.runNext();
+
+            allianceEvents.onAllianceChanged(new AllianceMemberChangedEvent(
+                    200,
+                    10001L,
+                    AllianceMemberAction.JOIN,
+                    1
+            ));
+            executor.runNext();
+            assertEquals(false, allianceEvents.allianceOf(10001L).isPresent());
+            assertEquals(true, service.allianceEvents().isPresent());
+        }
+    }
+
+    @Test
+    void profileAwareWrapperCanDriveFriendAwarenessOnEnterAndLeave() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests friendInterests = new RecordingOwnerInterests();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            MultiSmallSceneService delegate = MultiSmallSceneService.create(
+                    actors,
+                    "r1",
+                    "scene-small-1",
+                    new ServiceEndpoint("127.0.0.1", 9100),
+                    200
+            );
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+            SceneProfileAwarenessAgent profiles = new SceneProfileAwarenessAgent(
+                    messages,
+                    actors.actor("scene-profile"),
+                    ProfileInterestControl.noop()
+            );
+            SceneFriendAwarenessAgent friendEvents = new SceneFriendAwarenessAgent(
+                    messages,
+                    actors.actor("scene-friend-events"),
+                    friendInterests
+            );
+            ProfileAwareSceneService service = new ProfileAwareSceneService(
+                    delegate,
+                    profiles,
+                    null,
+                    null,
+                    friendEvents
+            );
+
+            service.enter(10001L, "room-1", 0, 0);
+            executor.runNext();
+            executor.runNext();
+            friendEvents.onFriendChanged(new FriendChangedEvent(
+                    10001L,
+                    20002L,
+                    FriendRelationAction.ADD,
+                    1
+            ));
+            executor.runNext();
+            assertEquals(true, friendEvents.friendsOf(10001L).orElseThrow().contains(20002L));
+
+            service.leave(10001L, "room-1");
+            executor.runNext();
+            executor.runNext();
+
+            assertEquals(List.of(FriendOwnerKeyParser.ownerKey(10001L)), friendInterests.watched);
+            assertEquals(List.of(FriendOwnerKeyParser.ownerKey(10001L)), friendInterests.unwatched);
+            assertEquals(false, friendEvents.friendsOf(10001L).isPresent());
+            assertEquals(true, service.friendEvents().isPresent());
         }
     }
 
@@ -282,6 +413,21 @@ class SceneServiceStrategyTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class RecordingOwnerInterests implements OwnerEventInterestControl {
+        private final List<String> watched = new ArrayList<>();
+        private final List<String> unwatched = new ArrayList<>();
+
+        @Override
+        public void watchOwner(String ownerKey) {
+            watched.add(ownerKey);
+        }
+
+        @Override
+        public void unwatchOwner(String ownerKey) {
+            unwatched.add(ownerKey);
         }
     }
 }

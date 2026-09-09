@@ -34,6 +34,16 @@ import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.EventProgressRule;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.social.AllianceSnapshot;
+import com.commonbattle.game.social.AllianceSnapshotOperations;
+import com.commonbattle.game.social.AllianceSnapshotRequest;
+import com.commonbattle.game.social.AllianceSnapshotResponse;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
+import com.commonbattle.game.social.FriendSnapshot;
+import com.commonbattle.game.social.FriendSnapshotOperations;
+import com.commonbattle.game.social.FriendSnapshotRequest;
+import com.commonbattle.game.social.FriendSnapshotResponse;
 import com.commonbattle.game.task.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
@@ -205,6 +215,30 @@ class ClusterEventPayloadCodecsTest {
     }
 
     @Test
+    void friendChangedEventCanPassThroughClusterEnvelope() {
+        PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        FriendChangedEvent event = new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 5);
+        ClusterEnvelope envelope = new ClusterEnvelope(
+                22,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.CENTER, "r1", "center-1"),
+                ClusterEventOperations.PUBLISH,
+                new EventPublishRequest(event)
+        );
+
+        ClusterEnvelope decoded = codec.decode(codec.encode(envelope));
+
+        EventPublishRequest request = assertInstanceOf(EventPublishRequest.class, decoded.payload());
+        FriendChangedEvent decodedEvent = assertInstanceOf(FriendChangedEvent.class, request.event());
+        assertEquals(FriendChangedEvent.TOPIC, decodedEvent.topic());
+        assertEquals("friend:10001", decodedEvent.ownerKey());
+        assertEquals(20002L, decodedEvent.friendId());
+        assertEquals(FriendRelationAction.ADD, decodedEvent.action());
+        assertEquals(5, decodedEvent.revision());
+    }
+
+    @Test
     void gameConfigSnapshotRpcPayloadsCanPassThroughClusterEnvelope() {
         PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
         ProtoClusterCodec codec = new ProtoClusterCodec(registry);
@@ -286,7 +320,8 @@ class ClusterEventPayloadCodecsTest {
                 new EventSubscribeRequest(
                         ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
                         ProfileChangedEvent.TOPIC,
-                        Set.of("profile:10001", "profile:10002")
+                        Set.of("profile:10001", "profile:10002"),
+                        Duration.ofSeconds(12)
                 )
         );
 
@@ -295,6 +330,7 @@ class ClusterEventPayloadCodecsTest {
         EventSubscribeRequest requestPayload = assertInstanceOf(EventSubscribeRequest.class, decoded.payload());
         assertEquals(ProfileChangedEvent.TOPIC, requestPayload.topic());
         assertEquals(Set.of("profile:10001", "profile:10002"), requestPayload.ownerKeys());
+        assertEquals(Duration.ofSeconds(12), requestPayload.leaseTtl());
     }
 
     @Test
@@ -333,6 +369,64 @@ class ClusterEventPayloadCodecsTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals(7, responsePayload.snapshot().revision());
         assertEquals("avatar_2", responsePayload.snapshot().appearance().avatar());
+    }
+
+    @Test
+    void allianceSnapshotPayloadsCanPassThroughClusterEnvelope() {
+        PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        ClusterEnvelope request = new ClusterEnvelope(
+                7,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                AllianceSnapshotOperations.GET,
+                new AllianceSnapshotRequest(100)
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                7,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                "$rpc.success",
+                AllianceSnapshotResponse.found(new AllianceSnapshot(100, 3, Set.of(10001L, 10002L)))
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        AllianceSnapshotRequest requestPayload = assertInstanceOf(AllianceSnapshotRequest.class, decodedRequest.payload());
+        AllianceSnapshotResponse responsePayload = assertInstanceOf(AllianceSnapshotResponse.class, decodedResponse.payload());
+        assertEquals(100, requestPayload.allianceId());
+        assertEquals(3, responsePayload.snapshot().revision());
+        assertEquals(Set.of(10001L, 10002L), responsePayload.snapshot().members());
+    }
+
+    @Test
+    void friendSnapshotPayloadsCanPassThroughClusterEnvelope() {
+        PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        ClusterEnvelope request = new ClusterEnvelope(
+                8,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                FriendSnapshotOperations.GET,
+                new FriendSnapshotRequest(10001L)
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                8,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                "$rpc.success",
+                FriendSnapshotResponse.found(new FriendSnapshot(10001L, 3, Set.of(20002L, 30003L)))
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        FriendSnapshotRequest requestPayload = assertInstanceOf(FriendSnapshotRequest.class, decodedRequest.payload());
+        FriendSnapshotResponse responsePayload = assertInstanceOf(FriendSnapshotResponse.class, decodedResponse.payload());
+        assertEquals(10001L, requestPayload.playerId());
+        assertEquals(3, responsePayload.snapshot().revision());
+        assertEquals(Set.of(20002L, 30003L), responsePayload.snapshot().friends());
     }
 
     private static GameConfigPackage config(long version, int expPerItem) {

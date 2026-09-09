@@ -9,6 +9,7 @@ public enum ProfileReadStatus {
     LOCAL_STALE,
     LOCAL_MISS,
     REFRESHED,
+    REMOTE_STALE,
     REMOTE_MISS,
     LOCAL_FALLBACK
 }

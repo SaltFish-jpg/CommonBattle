@@ -63,6 +63,8 @@ class PlayerCommandDispatcherTest {
         PlayerCommandResult gap = fixture.dispatch(command(3));
 
         assertEquals(PlayerCommandStatus.DUPLICATE, duplicate.status());
+        assertEquals(PlayerCommandStatus.ACCEPTED, duplicate.originalStatus().orElseThrow());
+        assertEquals("duplicate:ACCEPTED", duplicate.reason());
         assertEquals(PlayerCommandStatus.GAP, gap.status());
         assertEquals(1, handled.get());
         assertEquals(0, fixture.executor.queued());

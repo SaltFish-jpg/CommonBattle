@@ -36,9 +36,11 @@ import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -50,6 +52,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerBusinessCommandGatewayTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
@@ -70,6 +73,54 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(PlayerBusinessResponseStatus.SUCCESS, callback.response.get().status());
         assertEquals(PlayerBusinessAck.OK, callback.response.get().payload());
         assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
+    void duplicateSubmitWhilePendingSharesMailboxResponse() {
+        Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback retry = new RecordingCallback();
+        PlayerCommand command = command(1);
+
+        fixture.commands.submit(command, first);
+        fixture.commands.submit(command, retry);
+
+        assertNull(first.response.get());
+        assertNull(retry.response.get());
+        assertEquals(1, fixture.responses.pendingResponses());
+        assertEquals(1, fixture.responses.stats().sharedWaiters());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.DUPLICATE));
+
+        fixture.executor.runAll();
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, retry.response.get().status());
+        assertEquals(PlayerBusinessAck.OK, first.response.get().payload());
+        assertEquals(PlayerBusinessAck.OK, retry.response.get().payload());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(1, fixture.responses.stats().completedResponses());
+    }
+
+    @Test
+    void duplicateSubmitAfterCompletionReplaysCachedResponse() {
+        Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback retry = new RecordingCallback();
+        PlayerCommand command = command(1);
+
+        fixture.commands.submit(command, first);
+        fixture.executor.runAll();
+        fixture.commands.submit(command, retry);
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, retry.response.get().status());
+        assertEquals(PlayerBusinessAck.OK, retry.response.get().payload());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(0, fixture.executor.queued());
+        assertEquals(1, fixture.responses.stats().completedResponses());
+        assertEquals(1, fixture.responses.stats().replayedResponses());
+        assertEquals(1, fixture.responses.stats().cachedResponses());
     }
 
     @Test
@@ -131,6 +182,31 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(0, fixture.responses.pendingResponses());
     }
 
+    @Test
+    void localSubmitTimesOutWhenMailboxDoesNotProduceResponseInTime() throws Exception {
+        Fixture fixture = Fixture.create(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                new NoopRpcGateway(),
+                Duration.ofMillis(10)
+        );
+        try {
+            RecordingCallback callback = new RecordingCallback();
+
+            fixture.commands.submit(command(1), callback);
+
+            assertTrue(await(() -> callback.response.get() != null));
+            assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+            assertEquals(0, fixture.responses.pendingResponses());
+            assertEquals(1, fixture.responses.stats().timedOutResponses());
+            fixture.executor.runAll();
+            assertEquals(1, fixture.responses.stats().fallbackResponses());
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+        } finally {
+            fixture.commands.close();
+        }
+    }
+
     private static PlayerCommand command(long sequence) {
         return new PlayerCommand(
                 10001L,
@@ -154,9 +230,14 @@ class PlayerBusinessCommandGatewayTest {
     private record Fixture(
             RecordingExecutor executor,
             PlayerBusinessResponseHub responses,
+            PlayerCommandDispatcher dispatcher,
             PlayerBusinessCommandGateway commands
     ) {
         private static Fixture create(ServiceId local, RpcGateway rpc) {
+            return create(local, rpc, PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT);
+        }
+
+        private static Fixture create(ServiceId local, RpcGateway rpc, Duration timeout) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef self = actors.actor("player-10001");
@@ -192,7 +273,8 @@ class PlayerBusinessCommandGatewayTest {
                     dispatcher,
                     new PlayerBusinessCommandHandler(playerId -> agent, responses)
             );
-            return new Fixture(executor, responses, new PlayerBusinessCommandGateway(dispatcher, rpc, responses));
+            return new Fixture(executor, responses, dispatcher,
+                    new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
     }
 
@@ -246,11 +328,31 @@ class PlayerBusinessCommandGatewayTest {
                 commands.removeFirst().run();
             }
         }
+
+        int queued() {
+            return commands.size();
+        }
     }
 
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
         }
+    }
+
+    private static boolean await(BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return true;
+            }
+            Thread.sleep(5);
+        }
+        return condition.getAsBoolean();
+    }
+
+    @FunctionalInterface
+    private interface BooleanSupplier {
+        boolean getAsBoolean();
     }
 }

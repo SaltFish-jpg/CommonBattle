@@ -7,6 +7,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.config.GameConfigView;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.shop.ShopStockAsyncClient;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -21,7 +22,7 @@ import java.util.function.Consumer;
  * Game 服玩家 Agent 管理器。
  * 登录、网关命令和本服业务入口都应通过它取得玩家 Agent，避免重复恢复、重复占用 owner 或漏注入事件发布器。
  */
-public final class PlayerGameAgentManager {
+public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     private final ActorSystem actors;
     private final AgentMessagePort messages;
     private final PlayerStateRepository repository;
@@ -33,6 +34,8 @@ public final class PlayerGameAgentManager {
     private final EventPublisher domainEventPublisher;
     private final PlayerDomainEventListener domainEventListener;
     private final PlayerStateSaveListener saveListener;
+    private final ShopStockAsyncClient shopStockAsyncClient;
+    private final AsyncShopPurchaseMetrics asyncShopPurchases = new AsyncShopPurchaseMetrics();
     private final Map<Long, PlayerGameAgentHandle> agents = new ConcurrentHashMap<>();
 
     public PlayerGameAgentManager(
@@ -88,6 +91,23 @@ public final class PlayerGameAgentManager {
             PlayerDomainEventListener domainEventListener,
             PlayerStateSaveListener saveListener
     ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, null);
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -100,6 +120,7 @@ public final class PlayerGameAgentManager {
         this.domainEventPublisher = domainEventPublisher;
         this.domainEventListener = domainEventListener;
         this.saveListener = Objects.requireNonNull(saveListener, "saveListener");
+        this.shopStockAsyncClient = shopStockAsyncClient;
     }
 
     public PlayerGameAgent getOrCreate(long playerId) {
@@ -127,6 +148,15 @@ public final class PlayerGameAgentManager {
 
     public List<Long> loadedPlayerIds() {
         return List.copyOf(agents.keySet());
+    }
+
+    public AsyncShopPurchaseView asyncShopPurchases() {
+        return asyncShopPurchases;
+    }
+
+    @Override
+    public AsyncShopPurchaseStats stats() {
+        return asyncShopPurchases.stats();
     }
 
     public boolean save(long playerId, Consumer<PlayerStateSnapshot> callback) {
@@ -236,7 +266,9 @@ public final class PlayerGameAgentManager {
                 domainEventPublisher,
                 snapshot.revision(),
                 snapshot.eventRevision(),
-                domainEventListener
+                domainEventListener,
+                shopStockAsyncClient,
+                asyncShopPurchases
         );
         return new PlayerGameAgentHandle(agent, snapshot, recovery.created());
     }

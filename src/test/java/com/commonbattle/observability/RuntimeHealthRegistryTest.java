@@ -23,12 +23,21 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
 import com.commonbattle.cluster.network.LocalClusterTransport;
+import com.commonbattle.cluster.registry.RemoteRegistryRecoveryStats;
+import com.commonbattle.cluster.registry.RemoteRegistryRecoveryView;
+import com.commonbattle.cluster.registry.RegistrySubscriptionStats;
+import com.commonbattle.cluster.registry.RegistrySubscriptionView;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RoutedRpcGateway;
+import com.commonbattle.cluster.rpc.RpcCallOptions;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
+import com.commonbattle.game.player.AsyncShopPurchaseStats;
+import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.PlayerBusinessResponseHub;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.profile.ProfileRuntime;
@@ -97,9 +106,20 @@ class RuntimeHealthRegistryTest {
                 CLOCK,
                 ZoneOffset.UTC
         );
+        PlayerBusinessResponseHub businessResponses = new PlayerBusinessResponseHub();
+        AsyncShopPurchaseView asyncShopPurchases = AsyncShopPurchaseStats::empty;
+        InMemoryServiceRegistry serviceRegistry = new InMemoryServiceRegistry(CLOCK, 16);
+        RemoteRegistryRecoveryView remoteRegistryRecovery = () -> RemoteRegistryRecoveryStats.empty();
+        RegistrySubscriptionView registrySubscriptions = () -> RegistrySubscriptionStats.empty();
+        RoutedRpcGateway routedRpc = new RoutedRpcGateway(
+                gateway,
+                RpcCallOptions.of(Duration.ofSeconds(1)),
+                (request, baseOptions) -> baseOptions
+        );
 
         registry.register(List.of(cache, configRecovery, actorRpc, lifecycles, migrations, migrationExecutor,
-                migrationRecovery, profileRuntime, sceneRuntime, shopService));
+                migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, asyncShopPurchases,
+                routedRpc, serviceRegistry, remoteRegistryRecovery, registrySubscriptions));
         registry.register(cache);
 
         try {
@@ -113,6 +133,12 @@ class RuntimeHealthRegistryTest {
             assertEquals(1, registry.profileRuntimes().size());
             assertEquals(1, registry.sceneRuntimes().size());
             assertEquals(1, registry.shopRuntimes().size());
+            assertEquals(1, registry.playerBusinessResponses().size());
+            assertEquals(1, registry.asyncShopPurchases().size());
+            assertEquals(1, registry.rpcRoutePolicies().size());
+            assertEquals(1, registry.registryHistories().size());
+            assertEquals(1, registry.registrySubscriptions().size());
+            assertEquals(1, registry.remoteRegistryRecoveries().size());
         } finally {
             migrationExecutor.close();
         }

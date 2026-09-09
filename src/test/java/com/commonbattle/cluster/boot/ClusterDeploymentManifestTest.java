@@ -18,8 +18,9 @@ class ClusterDeploymentManifestTest {
     void defaultManifestDescribesAllStandaloneServices() {
         ClusterDeploymentManifest manifest = ClusterDeploymentManifest.defaultManifest();
 
-        assertEquals(List.of("center", "game", "scene-small", "scene-large", "proxy", "region"),
+        assertEquals(List.of("center", "game", "chat", "scene-small", "scene-large", "proxy", "region"),
                 manifest.services().stream().map(ClusterDeploymentService::name).toList());
+        assertEquals(ServiceKind.CHAT, manifest.service("chat").orElseThrow().kind());
         assertEquals(ServiceKind.SCENE, manifest.service("scene-large").orElseThrow().kind());
         assertEquals("com.commonbattle.cluster.boot.SceneServerMain",
                 manifest.service("scene-small").orElseThrow().mainClassName());
@@ -55,17 +56,19 @@ class ClusterDeploymentManifestTest {
     void defaultManifestDocumentsRuntimeWatches() {
         ClusterDeploymentManifest manifest = ClusterDeploymentManifest.defaultManifest();
 
-        assertEquals(Set.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+        assertEquals(Set.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
                 manifest.service("center").orElseThrow().watches());
-        assertEquals(Set.of(ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+        assertEquals(Set.of(ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
                 manifest.service("game").orElseThrow().watches());
-        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.PROXY, ServiceKind.REGION),
+        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+                manifest.service("chat").orElseThrow().watches());
+        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.PROXY, ServiceKind.REGION),
                 manifest.service("scene-small").orElseThrow().watches());
-        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.PROXY, ServiceKind.REGION),
+        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.PROXY, ServiceKind.REGION),
                 manifest.service("scene-large").orElseThrow().watches());
-        assertEquals(Set.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.REGION),
+        assertEquals(Set.of(ServiceKind.CENTER, ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.REGION),
                 manifest.service("proxy").orElseThrow().watches());
-        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY),
+        assertEquals(Set.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY),
                 manifest.service("region").orElseThrow().watches());
     }
 
@@ -73,7 +76,7 @@ class ClusterDeploymentManifestTest {
     void defaultManifestComputesStartupOrderFromDependencies() {
         ClusterDeploymentManifest manifest = ClusterDeploymentManifest.defaultManifest();
 
-        assertEquals(List.of("center", "proxy", "game", "scene-small", "scene-large", "region"),
+        assertEquals(List.of("center", "proxy", "game", "chat", "scene-small", "scene-large", "region"),
                 manifest.startupOrder().stream().map(ClusterDeploymentService::name).toList());
         assertEquals(Set.of("center", "proxy"), manifest.service("game").orElseThrow().startsAfter());
         assertEquals(Set.of("center"), manifest.service("proxy").orElseThrow().startsAfter());

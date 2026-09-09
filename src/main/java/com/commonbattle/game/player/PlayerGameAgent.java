@@ -20,8 +20,15 @@ import com.commonbattle.game.player.event.GrowthLevelChangedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEvent;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.player.event.ShopItemPurchasedEvent;
+import com.commonbattle.game.shop.ActorMailboxShopStockClient;
+import com.commonbattle.game.shop.ActorShopStockCallback;
 import com.commonbattle.game.shop.ShopPurchaseResult;
 import com.commonbattle.game.shop.ShopService;
+import com.commonbattle.game.shop.ShopStockAsyncClient;
+import com.commonbattle.game.shop.ShopStockCallback;
+import com.commonbattle.game.shop.ShopStockReleaseResponse;
+import com.commonbattle.game.shop.ShopStockReserveResponse;
+import com.commonbattle.game.session.PlayerCommand;
 import com.commonbattle.game.task.TaskClaimResult;
 
 import java.time.Clock;
@@ -44,6 +51,8 @@ public final class PlayerGameAgent {
     private final Instant serverOpenTime;
     private final EventPublisher domainEventPublisher;
     private final PlayerDomainEventListener domainEventListener;
+    private final ShopStockAsyncClient shopStockAsyncClient;
+    private final AsyncShopPurchaseMetrics asyncShopPurchases;
     private long stateRevision;
     private long domainEventRevision;
 
@@ -140,7 +149,9 @@ public final class PlayerGameAgent {
                 null,
                 0,
                 0,
-                null
+                null,
+                null,
+                new AsyncShopPurchaseMetrics()
         );
     }
 
@@ -186,6 +197,23 @@ public final class PlayerGameAgent {
             long initialEventRevision,
             PlayerDomainEventListener domainEventListener
     ) {
+        this(messages, self, profile, configView, clock, serverOpenTime,
+                domainEventPublisher, initialStateRevision, initialEventRevision, domainEventListener, null);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient
+    ) {
         this(
                 messages,
                 self,
@@ -196,7 +224,39 @@ public final class PlayerGameAgent {
                 domainEventPublisher,
                 initialStateRevision,
                 initialEventRevision,
-                domainEventListener
+                domainEventListener,
+                shopStockAsyncClient,
+                new AsyncShopPurchaseMetrics()
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                runtimeResolver(configView),
+                clock,
+                serverOpenTime,
+                domainEventPublisher,
+                initialStateRevision,
+                initialEventRevision,
+                domainEventListener,
+                shopStockAsyncClient,
+                asyncShopPurchases
         );
     }
 
@@ -234,7 +294,9 @@ public final class PlayerGameAgent {
                 null,
                 0,
                 0,
-                null
+                null,
+                null,
+                new AsyncShopPurchaseMetrics()
         );
     }
 
@@ -258,7 +320,9 @@ public final class PlayerGameAgent {
                 null,
                 initialStateRevision,
                 0,
-                null
+                null,
+                null,
+                new AsyncShopPurchaseMetrics()
         );
     }
 
@@ -272,7 +336,9 @@ public final class PlayerGameAgent {
             EventPublisher domainEventPublisher,
             long initialStateRevision,
             long initialEventRevision,
-            PlayerDomainEventListener domainEventListener
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases
     ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
@@ -282,6 +348,8 @@ public final class PlayerGameAgent {
         this.serverOpenTime = Objects.requireNonNull(serverOpenTime, "serverOpenTime");
         this.domainEventPublisher = domainEventPublisher;
         this.domainEventListener = domainEventListener;
+        this.shopStockAsyncClient = shopStockAsyncClient;
+        this.asyncShopPurchases = Objects.requireNonNull(asyncShopPurchases, "asyncShopPurchases");
         loadRevision(initialStateRevision);
         loadDomainEventRevision(initialEventRevision);
     }
@@ -333,6 +401,76 @@ public final class PlayerGameAgent {
             }
             callback.accept(result);
         });
+    }
+
+    public void buyShopItemAsync(
+            PlayerCommand command,
+            String orderId,
+            String sku,
+            int quantity,
+            PlayerBusinessResultSink results
+    ) {
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(results, "results");
+        asyncShopPurchases.startedPurchase();
+        PlayerGameExecution execution = execution();
+        ShopService service = execution.runtime().requireShopService();
+        if (!service.requiresStockReservation(sku)) {
+            asyncShopPurchases.immediatePurchase();
+            completeShopPurchase(command, execution,
+                    service.purchaseAt(profile.bag(), profile.shop(), orderId, sku, quantity, clock.instant()), results);
+            return;
+        }
+        String reservationId = reservationId(command, orderId);
+        asyncShopPurchases.stockReservation();
+        new ActorMailboxShopStockClient(requireShopStockAsyncClient(), messages, self).reserve(
+                reservationId,
+                sku,
+                quantity,
+                new ActorShopStockCallback<>() {
+                    @Override
+                    public void success(com.commonbattle.actor.ActorContext context, ShopStockReserveResponse response) {
+                        if (!results.canComplete(command)) {
+                            asyncShopPurchases.lateCallback();
+                            if (response.reserved()) {
+                                releaseReservedStock(reservationId, sku, quantity);
+                            }
+                            return;
+                        }
+                        PlayerGameExecution callbackExecution = execution();
+                        ShopService callbackService = callbackExecution.runtime().requireShopService();
+                        if (!response.reserved()) {
+                            asyncShopPurchases.outOfStockCallback();
+                            completeShopPurchase(command, callbackExecution,
+                                    callbackService.outOfStock(profile.shop(), sku, quantity, clock.instant()), results);
+                            return;
+                        }
+                        asyncShopPurchases.reservedCallback();
+                        ShopPurchaseResult result = callbackService.purchaseReservedAt(
+                                profile.bag(),
+                                profile.shop(),
+                                orderId,
+                                sku,
+                                quantity,
+                                clock.instant()
+                        );
+                        if (!result.success()) {
+                            releaseReservedStock(reservationId, sku, quantity);
+                        }
+                        completeShopPurchase(command, callbackExecution, result, results);
+                    }
+
+                    @Override
+                    public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                        if (!results.canComplete(command)) {
+                            asyncShopPurchases.lateCallback();
+                            return;
+                        }
+                        asyncShopPurchases.rpcFailure();
+                        results.failed(command, error);
+                    }
+                }
+        );
     }
 
     public void clearBattleStage(String stageId, Consumer<BattleSettlementResult> callback) {
@@ -477,6 +615,54 @@ public final class PlayerGameAgent {
         if (domainEventListener != null) {
             domainEventListener.onEvent(profile, domainEventRevision, event);
         }
+    }
+
+    private ShopStockAsyncClient requireShopStockAsyncClient() {
+        if (shopStockAsyncClient == null) {
+            throw new IllegalStateException("shop stock async client is not available for this runtime");
+        }
+        return shopStockAsyncClient;
+    }
+
+    private void releaseReservedStock(String reservationId, String sku, int quantity) {
+        requireShopStockAsyncClient().release(
+                reservationId,
+                sku,
+                quantity,
+                new ShopStockCallback<>() {
+                    @Override
+                    public void success(ShopStockReleaseResponse response) {
+                        asyncShopPurchases.releasedReservation();
+                    }
+
+                    @Override
+                    public void failure(Throwable error) {
+                        asyncShopPurchases.releaseFailure();
+                    }
+                }
+        );
+    }
+
+    private void completeShopPurchase(
+            PlayerCommand command,
+            PlayerGameExecution execution,
+            ShopPurchaseResult result,
+            PlayerBusinessResultSink results
+    ) {
+        if (result.success()) {
+            asyncShopPurchases.completedPurchase();
+            execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+        } else {
+            asyncShopPurchases.rejectedPurchase();
+        }
+        results.completed(command, PlayerBusinessResponse.success(command, result));
+    }
+
+    private String reservationId(PlayerCommand command, String orderId) {
+        if (orderId != null && !orderId.isBlank()) {
+            return orderId;
+        }
+        return "player:" + command.playerId() + ":seq:" + command.sequence();
     }
 
     private static LongFunction<PlayerGameRuntime> fixedRuntimeResolver(

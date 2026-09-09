@@ -23,6 +23,7 @@ public record PlayerBusinessResponse(
     public static final String BAD_REQUEST = "BAD_REQUEST";
     public static final String BUSINESS_REJECTED = "BUSINESS_REJECTED";
     public static final String SYSTEM_ERROR = "SYSTEM_ERROR";
+    public static final String TIMEOUT = "TIMEOUT";
 
     public PlayerBusinessResponse {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -82,6 +83,9 @@ public record PlayerBusinessResponse(
     private static String failureCode(Throwable error) {
         if (error instanceof PlayerCommandDispatchException dispatch) {
             return dispatch.code();
+        }
+        if (error instanceof PlayerBusinessResponseTimeoutException) {
+            return TIMEOUT;
         }
         if (error instanceof IllegalArgumentException) {
             return BAD_REQUEST;

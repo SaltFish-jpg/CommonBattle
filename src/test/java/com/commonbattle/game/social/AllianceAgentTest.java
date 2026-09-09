@@ -65,6 +65,29 @@ class AllianceAgentTest {
         assertEquals(java.util.Set.of(10001L), snapshot.get().members());
     }
 
+    @Test
+    void joinWritesSnapshotBeforePublishingEvent() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        InMemoryAllianceSnapshotRepository snapshots = new InMemoryAllianceSnapshotRepository();
+        List<VersionedEvent> events = new ArrayList<>();
+        AllianceAgent alliance = new AllianceAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                actors.actor("alliance-100"),
+                100,
+                events::add,
+                snapshots
+        );
+
+        alliance.join(10001L);
+        executor.runNext();
+
+        AllianceMemberChangedEvent event = (AllianceMemberChangedEvent) events.getFirst();
+        AllianceSnapshot snapshot = snapshots.find(100).orElseThrow();
+        assertEquals(event.revision(), snapshot.revision());
+        assertEquals(java.util.Set.of(10001L), snapshot.members());
+    }
+
     private static final class RecordingExecutor implements Executor {
         private final List<Runnable> commands = new ArrayList<>();
 

@@ -19,6 +19,13 @@ public interface ProfileInterestControl {
         playerIds.forEach(this::unwatch);
     }
 
+    default void requestRepair(long playerId) {
+        requestRepairAll(java.util.Set.of(playerId));
+    }
+
+    default void requestRepairAll(Collection<Long> playerIds) {
+    }
+
     static ProfileInterestControl noop() {
         return Noop.INSTANCE;
     }
@@ -32,6 +39,10 @@ public interface ProfileInterestControl {
 
         @Override
         public void unwatch(long playerId) {
+        }
+
+        @Override
+        public void requestRepairAll(Collection<Long> playerIds) {
         }
     }
 }

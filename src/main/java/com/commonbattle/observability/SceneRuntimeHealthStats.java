@@ -10,10 +10,14 @@ public record SceneRuntimeHealthStats(
         int activeScenes,
         int activePlayers,
         int shardCount,
-        int maxShardPlayers
+        int maxShardPlayers,
+        int playerInterests,
+        int allianceReferences,
+        long duplicateEnters,
+        long missingLeaves
 ) {
     public static SceneRuntimeHealthStats empty() {
-        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0);
+        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static SceneRuntimeHealthStats from(int runtimeCount, SceneRuntimeStats stats) {
@@ -22,7 +26,11 @@ public record SceneRuntimeHealthStats(
                 stats.activeScenes(),
                 stats.activePlayers(),
                 stats.shardCount(),
-                stats.maxShardPlayers()
+                stats.maxShardPlayers(),
+                stats.playerInterests(),
+                stats.allianceReferences(),
+                stats.duplicateEnters(),
+                stats.missingLeaves()
         );
     }
 }

@@ -37,6 +37,14 @@ import com.commonbattle.game.player.event.EventProgressRule;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.AllianceSnapshot;
+import com.commonbattle.game.social.AllianceSnapshotRequest;
+import com.commonbattle.game.social.AllianceSnapshotResponse;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
+import com.commonbattle.game.social.FriendSnapshot;
+import com.commonbattle.game.social.FriendSnapshotRequest;
+import com.commonbattle.game.social.FriendSnapshotResponse;
 import com.commonbattle.game.shop.ShopItemDefinition;
 import com.commonbattle.game.task.TaskDefinition;
 import com.google.protobuf.CodedInputStream;
@@ -61,6 +69,7 @@ public final class ClusterEventPayloadCodecs {
     private static final Map<Class<?>, EventCodec<?>> EVENT_BY_CLASS = Map.of(
             ProfileChangedEvent.class, new ProfileChangedEventCodec(),
             AllianceMemberChangedEvent.class, new AllianceMemberChangedEventCodec(),
+            FriendChangedEvent.class, new FriendChangedEventCodec(),
             GameConfigChangedEvent.class, new GameConfigChangedEventCodec(),
             PlayerDomainVersionedEvent.class, new PlayerDomainVersionedEventCodec()
     );
@@ -78,6 +87,10 @@ public final class ClusterEventPayloadCodecs {
         registry.register(new EventReplayResultCodec());
         registry.register(new ProfileSnapshotRequestCodec());
         registry.register(new ProfileSnapshotResponseCodec());
+        registry.register(new AllianceSnapshotRequestCodec());
+        registry.register(new AllianceSnapshotResponseCodec());
+        registry.register(new FriendSnapshotRequestCodec());
+        registry.register(new FriendSnapshotResponseCodec());
         registry.register(new GameConfigSnapshotRequestCodec());
         registry.register(new GameConfigSnapshotCodec());
         return registry;
@@ -169,13 +182,18 @@ public final class ClusterEventPayloadCodecs {
 
         @Override
         public byte[] encode(EventSubscribeRequest payload) {
-            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys());
+            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys(), payload.leaseTtl());
         }
 
         @Override
         public EventSubscribeRequest decode(byte[] bytes) {
             Subscription subscription = decodeSubscription(bytes);
-            return new EventSubscribeRequest(subscription.subscriber(), subscription.topic(), subscription.ownerKeys());
+            return new EventSubscribeRequest(
+                    subscription.subscriber(),
+                    subscription.topic(),
+                    subscription.ownerKeys(),
+                    subscription.leaseTtl()
+            );
         }
     }
 
@@ -192,7 +210,7 @@ public final class ClusterEventPayloadCodecs {
 
         @Override
         public byte[] encode(EventUnsubscribeRequest payload) {
-            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys());
+            return encodeSubscription(payload.subscriber(), payload.topic(), payload.ownerKeys(), Duration.ZERO);
         }
 
         @Override
@@ -474,6 +492,200 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
+    private static final class AllianceSnapshotRequestCodec implements PayloadCodec<AllianceSnapshotRequest> {
+        @Override
+        public String typeName() {
+            return AllianceSnapshotRequest.class.getName();
+        }
+
+        @Override
+        public Class<AllianceSnapshotRequest> javaType() {
+            return AllianceSnapshotRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AllianceSnapshotRequest payload) {
+            int size = CodedOutputStream.computeInt64Size(1, payload.allianceId());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.allianceId());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode alliance snapshot request", e);
+            }
+        }
+
+        @Override
+        public AllianceSnapshotRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long allianceId = 1;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> allianceId = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new AllianceSnapshotRequest(allianceId);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode alliance snapshot request", e);
+            }
+        }
+    }
+
+    private static final class AllianceSnapshotResponseCodec implements PayloadCodec<AllianceSnapshotResponse> {
+        @Override
+        public String typeName() {
+            return AllianceSnapshotResponse.class.getName();
+        }
+
+        @Override
+        public Class<AllianceSnapshotResponse> javaType() {
+            return AllianceSnapshotResponse.class;
+        }
+
+        @Override
+        public byte[] encode(AllianceSnapshotResponse payload) {
+            byte[] snapshot = payload.snapshot() == null ? null : encodeAllianceSnapshot(payload.snapshot());
+            int size = CodedOutputStream.computeBoolSize(1, payload.found());
+            if (snapshot != null) {
+                size += CodedOutputStream.computeByteArraySize(2, snapshot);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeBool(1, payload.found());
+                if (snapshot != null) {
+                    output.writeByteArray(2, snapshot);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode alliance snapshot response", e);
+            }
+        }
+
+        @Override
+        public AllianceSnapshotResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            boolean found = false;
+            AllianceSnapshot snapshot = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> found = input.readBool();
+                        case 2 -> snapshot = decodeAllianceSnapshot(input.readByteArray());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new AllianceSnapshotResponse(found, snapshot);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode alliance snapshot response", e);
+            }
+        }
+    }
+
+    private static final class FriendSnapshotRequestCodec implements PayloadCodec<FriendSnapshotRequest> {
+        @Override
+        public String typeName() {
+            return FriendSnapshotRequest.class.getName();
+        }
+
+        @Override
+        public Class<FriendSnapshotRequest> javaType() {
+            return FriendSnapshotRequest.class;
+        }
+
+        @Override
+        public byte[] encode(FriendSnapshotRequest payload) {
+            int size = CodedOutputStream.computeInt64Size(1, payload.playerId());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.playerId());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode friend snapshot request", e);
+            }
+        }
+
+        @Override
+        public FriendSnapshotRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long playerId = 1;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> playerId = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new FriendSnapshotRequest(playerId);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode friend snapshot request", e);
+            }
+        }
+    }
+
+    private static final class FriendSnapshotResponseCodec implements PayloadCodec<FriendSnapshotResponse> {
+        @Override
+        public String typeName() {
+            return FriendSnapshotResponse.class.getName();
+        }
+
+        @Override
+        public Class<FriendSnapshotResponse> javaType() {
+            return FriendSnapshotResponse.class;
+        }
+
+        @Override
+        public byte[] encode(FriendSnapshotResponse payload) {
+            byte[] snapshot = payload.snapshot() == null ? null : encodeFriendSnapshot(payload.snapshot());
+            int size = CodedOutputStream.computeBoolSize(1, payload.found());
+            if (snapshot != null) {
+                size += CodedOutputStream.computeByteArraySize(2, snapshot);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeBool(1, payload.found());
+                if (snapshot != null) {
+                    output.writeByteArray(2, snapshot);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode friend snapshot response", e);
+            }
+        }
+
+        @Override
+        public FriendSnapshotResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            boolean found = false;
+            FriendSnapshot snapshot = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> found = input.readBool();
+                        case 2 -> snapshot = decodeFriendSnapshot(input.readByteArray());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new FriendSnapshotResponse(found, snapshot);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode friend snapshot response", e);
+            }
+        }
+    }
+
     private static final class GameConfigSnapshotRequestCodec implements PayloadCodec<GameConfigSnapshotRequest> {
         @Override
         public String typeName() {
@@ -683,6 +895,57 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
+    private static final class FriendChangedEventCodec implements EventCodec<FriendChangedEvent> {
+        @Override
+        public String typeName() {
+            return FriendChangedEvent.class.getName();
+        }
+
+        @Override
+        public byte[] encode(FriendChangedEvent event) {
+            int size = CodedOutputStream.computeInt64Size(1, event.playerId())
+                    + CodedOutputStream.computeInt64Size(2, event.friendId())
+                    + stringSize(3, event.action().name())
+                    + CodedOutputStream.computeInt64Size(4, event.revision());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, event.playerId());
+                output.writeInt64(2, event.friendId());
+                output.writeString(3, event.action().name());
+                output.writeInt64(4, event.revision());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode friend changed event", e);
+            }
+        }
+
+        @Override
+        public FriendChangedEvent decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long playerId = 0;
+            long friendId = 0;
+            FriendRelationAction action = FriendRelationAction.ADD;
+            long revision = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> playerId = input.readInt64();
+                        case 2 -> friendId = input.readInt64();
+                        case 3 -> action = FriendRelationAction.valueOf(input.readString());
+                        case 4 -> revision = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new FriendChangedEvent(playerId, friendId, action, revision);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode friend changed event", e);
+            }
+        }
+    }
+
     private static final class GameConfigChangedEventCodec implements EventCodec<GameConfigChangedEvent> {
         @Override
         public String typeName() {
@@ -805,7 +1068,7 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
-    private record Subscription(ServiceId subscriber, String topic, Set<String> ownerKeys) {
+    private record Subscription(ServiceId subscriber, String topic, Set<String> ownerKeys, Duration leaseTtl) {
     }
 
     private record KnownRevision(String ownerKey, long revision) {
@@ -1468,13 +1731,17 @@ public final class ClusterEventPayloadCodecs {
         }
     }
 
-    private static byte[] encodeSubscription(ServiceId subscriber, String topic, Set<String> ownerKeys) {
+    private static byte[] encodeSubscription(ServiceId subscriber, String topic, Set<String> ownerKeys, Duration leaseTtl) {
         int size = stringSize(1, subscriber.kind().name())
                 + stringSize(2, subscriber.region())
                 + stringSize(3, subscriber.node())
                 + stringSize(4, topic);
         for (String ownerKey : ownerKeys) {
             size += stringSize(5, ownerKey);
+        }
+        long leaseMillis = leaseTtl.toMillis();
+        if (leaseMillis > 0) {
+            size += CodedOutputStream.computeInt64Size(6, leaseMillis);
         }
         byte[] bytes = new byte[size];
         try {
@@ -1485,6 +1752,9 @@ public final class ClusterEventPayloadCodecs {
             output.writeString(4, topic);
             for (String ownerKey : ownerKeys) {
                 output.writeString(5, ownerKey);
+            }
+            if (leaseMillis > 0) {
+                output.writeInt64(6, leaseMillis);
             }
             output.flush();
             return bytes;
@@ -1500,6 +1770,7 @@ public final class ClusterEventPayloadCodecs {
         String node = "";
         String topic = "";
         Set<String> ownerKeys = new HashSet<>();
+        long leaseMillis = 0;
         try {
             int tag;
             while ((tag = input.readTag()) != 0) {
@@ -1509,10 +1780,16 @@ public final class ClusterEventPayloadCodecs {
                     case 3 -> node = input.readString();
                     case 4 -> topic = input.readString();
                     case 5 -> ownerKeys.add(input.readString());
+                    case 6 -> leaseMillis = input.readInt64();
                     default -> input.skipField(tag);
                 }
             }
-            return new Subscription(ServiceId.of(ServiceKind.valueOf(kind), region, node), topic, ownerKeys);
+            return new Subscription(
+                    ServiceId.of(ServiceKind.valueOf(kind), region, node),
+                    topic,
+                    ownerKeys,
+                    Duration.ofMillis(leaseMillis)
+            );
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode event subscription", e);
         }
@@ -1615,6 +1892,90 @@ public final class ClusterEventPayloadCodecs {
                     Instant.ofEpochSecond(epochSecond, nano));
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode profile snapshot", e);
+        }
+    }
+
+    private static byte[] encodeAllianceSnapshot(AllianceSnapshot snapshot) {
+        int size = CodedOutputStream.computeInt64Size(1, snapshot.allianceId())
+                + CodedOutputStream.computeInt64Size(2, snapshot.revision());
+        for (long playerId : snapshot.members()) {
+            size += CodedOutputStream.computeInt64Size(3, playerId);
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, snapshot.allianceId());
+            output.writeInt64(2, snapshot.revision());
+            for (long playerId : snapshot.members()) {
+                output.writeInt64(3, playerId);
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode alliance snapshot", e);
+        }
+    }
+
+    private static AllianceSnapshot decodeAllianceSnapshot(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long allianceId = 0;
+        long revision = 0;
+        Set<Long> members = new HashSet<>();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> allianceId = input.readInt64();
+                    case 2 -> revision = input.readInt64();
+                    case 3 -> members.add(input.readInt64());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new AllianceSnapshot(allianceId, revision, members);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode alliance snapshot", e);
+        }
+    }
+
+    private static byte[] encodeFriendSnapshot(FriendSnapshot snapshot) {
+        int size = CodedOutputStream.computeInt64Size(1, snapshot.playerId())
+                + CodedOutputStream.computeInt64Size(2, snapshot.revision());
+        for (long friendId : snapshot.friends()) {
+            size += CodedOutputStream.computeInt64Size(3, friendId);
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, snapshot.playerId());
+            output.writeInt64(2, snapshot.revision());
+            for (long friendId : snapshot.friends()) {
+                output.writeInt64(3, friendId);
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode friend snapshot", e);
+        }
+    }
+
+    private static FriendSnapshot decodeFriendSnapshot(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long playerId = 0;
+        long revision = 0;
+        Set<Long> friends = new HashSet<>();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> playerId = input.readInt64();
+                    case 2 -> revision = input.readInt64();
+                    case 3 -> friends.add(input.readInt64());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new FriendSnapshot(playerId, revision, friends);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode friend snapshot", e);
         }
     }
 

@@ -9,6 +9,8 @@ public final class RegistryOperations {
     public static final String UNREGISTER = "registry.unregister";
     public static final String LIST = "registry.list";
     public static final String SUBSCRIBE = "registry.subscribe";
+    public static final String UNSUBSCRIBE = "registry.unsubscribe";
+    public static final String REPLAY = "registry.replay";
     public static final String EVENT = "registry.event";
     public static final String ACK = "registry.ack";
 
