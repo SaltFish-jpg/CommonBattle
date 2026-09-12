@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -86,29 +87,58 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
     }
 
     public void submit(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback) {
-        dispatch(command, callback, true);
+        Objects.requireNonNull(callback, "callback");
+        submitDetailed(command, new PlayerBusinessResponseCallback() {
+            @Override
+            public void completed(PlayerBusinessResponse response) {
+                callback.success(response);
+            }
+        });
     }
 
     public void submitLocalOnly(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback) {
-        dispatch(command, callback, false);
+        Objects.requireNonNull(callback, "callback");
+        dispatch(command, new PlayerBusinessResponseCallback() {
+            @Override
+            public void completed(PlayerBusinessResponse response) {
+                callback.success(response);
+            }
+        }, false);
+    }
+
+    public void submitDetailed(PlayerCommand command, PlayerBusinessResponseCallback callback) {
+        dispatch(command, callback, true);
     }
 
     private void dispatch(
             PlayerCommand command,
-            RpcCallback<PlayerBusinessResponse> callback,
+            PlayerBusinessResponseCallback callback,
             boolean allowRemoteForward
     ) {
         Objects.requireNonNull(command, "command");
         Objects.requireNonNull(callback, "callback");
         PlayerBusinessResponseRegistration registration;
         AtomicReference<ScheduledFuture<?>> timeoutFuture = new AtomicReference<>();
+        AtomicBoolean completedSynchronously = new AtomicBoolean();
         try {
-            registration = responses.expect(command, response -> {
-                cancel(timeoutFuture.get());
-                callback.success(response);
+            registration = responses.expect(command, new PlayerBusinessResponseCallback() {
+                @Override
+                public void completed(PlayerBusinessResponse response) {
+                    completed(response, false);
+                }
+
+                @Override
+                public void completed(PlayerBusinessResponse response, boolean replayed) {
+                    completedSynchronously.set(true);
+                    cancel(timeoutFuture.get());
+                    callback.completed(response, replayed);
+                }
             });
         } catch (RuntimeException e) {
-            callback.failure(e);
+            callback.completed(PlayerBusinessResponse.failure(command, e));
+            return;
+        }
+        if (completedSynchronously.get()) {
             return;
         }
         timeoutFuture.set(scheduleTimeout(command));
@@ -118,7 +148,7 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
         } catch (RuntimeException e) {
             registration.cancel();
             cancel(timeoutFuture.get());
-            callback.failure(e);
+            callback.completed(PlayerBusinessResponse.failure(command, e));
             return;
         }
         if (result.status() == PlayerCommandStatus.ACCEPTED || result.waitForExistingResponse()) {
@@ -130,17 +160,17 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
             try {
                 forwardRemote(command, result, callback);
             } catch (RuntimeException e) {
-                callback.failure(e);
+                callback.completed(PlayerBusinessResponse.failure(command, e));
             }
             return;
         }
-        callback.success(PlayerBusinessResponse.failure(command, new PlayerCommandDispatchException(result)));
+        callback.completed(PlayerBusinessResponse.failure(command, new PlayerCommandDispatchException(result)));
     }
 
     private void forwardRemote(
             PlayerCommand command,
             PlayerCommandResult result,
-            RpcCallback<PlayerBusinessResponse> callback
+            PlayerBusinessResponseCallback callback
     ) {
         AgentLocation location = result.route()
                 .flatMap(route -> route.location())
@@ -152,7 +182,17 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
                         command,
                         PlayerBusinessResponse.class
                 ),
-                callback
+                new RpcCallback<>() {
+                    @Override
+                    public void success(PlayerBusinessResponse response) {
+                        callback.completed(response);
+                    }
+
+                    @Override
+                    public void failure(Throwable error) {
+                        callback.completed(PlayerBusinessResponse.failure(command, error));
+                    }
+                }
         );
     }
 

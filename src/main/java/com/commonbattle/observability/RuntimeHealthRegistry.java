@@ -27,15 +27,18 @@ import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutboxReplayScheduler;
 import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.chat.ChatRuntimeView;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
 import com.commonbattle.game.player.PlayerBusinessResponseView;
+import com.commonbattle.game.player.PlayerGatewayView;
 import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.game.profile.ProfileRuntimeView;
 import com.commonbattle.game.session.PlayerCommandAuditView;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
+import com.commonbattle.game.session.PlayerOutboundDeliveryView;
 import com.commonbattle.game.scene.SceneRuntimeView;
 import com.commonbattle.game.shop.ShopRuntimeView;
 import com.commonbattle.runtime.DrainableComponent;
@@ -73,12 +76,15 @@ public final class RuntimeHealthRegistry {
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileRuntimeView> profileRuntimes = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ChatRuntimeView> chatRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<SceneRuntimeView> sceneRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ShopRuntimeView> shopRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerGameAgentManager> playerAgentManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAutoSaveScheduler> playerAutoSaves = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAgentDrainService> playerAgentDrains = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerBusinessResponseView> playerBusinessResponses = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerOutboundDeliveryView> playerOutboundDeliveries = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerGatewayView> playerGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AsyncShopPurchaseView> asyncShopPurchases = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<DrainableComponent> drainableComponents = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ServiceDescriptorPublisher> serviceDescriptorPublishers = new CopyOnWriteArrayList<>();
@@ -122,12 +128,15 @@ public final class RuntimeHealthRegistry {
         addIf(component, OwnerActorEventSubscriptionView.class, ownerActorEventSubscriptions);
         addIf(component, ProfileInterestView.class, profileInterests);
         addIf(component, ProfileRuntimeView.class, profileRuntimes);
+        addIf(component, ChatRuntimeView.class, chatRuntimes);
         addIf(component, SceneRuntimeView.class, sceneRuntimes);
         addIf(component, ShopRuntimeView.class, shopRuntimes);
         addIf(component, PlayerGameAgentManager.class, playerAgentManagers);
         addIf(component, PlayerAutoSaveScheduler.class, playerAutoSaves);
         addIf(component, PlayerAgentDrainService.class, playerAgentDrains);
         addIf(component, PlayerBusinessResponseView.class, playerBusinessResponses);
+        addIf(component, PlayerOutboundDeliveryView.class, playerOutboundDeliveries);
+        addIf(component, PlayerGatewayView.class, playerGateways);
         addIf(component, AsyncShopPurchaseView.class, asyncShopPurchases);
         addIf(component, DrainableComponent.class, drainableComponents);
         addIf(component, ServiceDescriptorPublisher.class, serviceDescriptorPublishers);
@@ -233,6 +242,10 @@ public final class RuntimeHealthRegistry {
         return List.copyOf(profileRuntimes);
     }
 
+    public List<ChatRuntimeView> chatRuntimes() {
+        return List.copyOf(chatRuntimes);
+    }
+
     public List<SceneRuntimeView> sceneRuntimes() {
         return List.copyOf(sceneRuntimes);
     }
@@ -255,6 +268,14 @@ public final class RuntimeHealthRegistry {
 
     public List<PlayerBusinessResponseView> playerBusinessResponses() {
         return List.copyOf(playerBusinessResponses);
+    }
+
+    public List<PlayerOutboundDeliveryView> playerOutboundDeliveries() {
+        return List.copyOf(playerOutboundDeliveries);
+    }
+
+    public List<PlayerGatewayView> playerGateways() {
+        return List.copyOf(playerGateways);
     }
 
     public List<AsyncShopPurchaseView> asyncShopPurchases() {

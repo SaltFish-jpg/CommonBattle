@@ -7,4 +7,8 @@ package com.commonbattle.game.player;
 @FunctionalInterface
 public interface PlayerBusinessResponseCallback {
     void completed(PlayerBusinessResponse response);
+
+    default void completed(PlayerBusinessResponse response, boolean replayed) {
+        completed(response);
+    }
 }

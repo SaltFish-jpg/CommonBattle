@@ -25,6 +25,8 @@ public record RuntimeHealthSnapshot(
         ActorRpcHealthStats actorRpc,
         PlayerCommandStats commands,
         PlayerBusinessResponseHealthStats businessResponses,
+        PlayerOutboundDeliveryHealthStats playerOutboundDeliveries,
+        PlayerGatewayHealthStats playerGateways,
         AsyncShopPurchaseHealthStats asyncShopPurchases,
         AgentLifecycleStats agents,
         PlayerAgentHealthStats playerAgents,
@@ -50,6 +52,7 @@ public record RuntimeHealthSnapshot(
         OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptions,
         ProfileInterestHealthStats profileInterests,
         ProfileRuntimeHealthStats profileRuntimes,
+        ChatRuntimeHealthStats chatRuntimes,
         SceneRuntimeHealthStats sceneRuntimes,
         ShopRuntimeHealthStats shopRuntimes,
         PlayerCommandAuditHealthStats commandAudits

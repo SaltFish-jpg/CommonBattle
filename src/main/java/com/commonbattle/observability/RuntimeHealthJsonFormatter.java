@@ -30,6 +30,8 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "actorRpc", actorRpc(snapshot)).append(',');
         object(json, "commands", commands(snapshot)).append(',');
         object(json, "businessResponses", businessResponses(snapshot)).append(',');
+        object(json, "playerOutboundDeliveries", playerOutboundDeliveries(snapshot)).append(',');
+        object(json, "playerGateways", playerGateways(snapshot)).append(',');
         object(json, "asyncShopPurchases", asyncShopPurchases(snapshot)).append(',');
         object(json, "agents", agents(snapshot)).append(',');
         object(json, "playerAgents", playerAgents(snapshot)).append(',');
@@ -55,6 +57,7 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "ownerActorEventSubscriptions", ownerActorEventSubscriptions(snapshot)).append(',');
         object(json, "profileInterests", profileInterests(snapshot)).append(',');
         object(json, "profileRuntimes", profileRuntimes(snapshot)).append(',');
+        object(json, "chatRuntimes", chatRuntimes(snapshot)).append(',');
         object(json, "sceneRuntimes", sceneRuntimes(snapshot)).append(',');
         object(json, "shopRuntimes", shopRuntimes(snapshot)).append(',');
         object(json, "commandAudits", commandAudits(snapshot));
@@ -552,6 +555,71 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "remoteStale", snapshot.profileRuntimes().remoteStale()).append(',');
         number(json, "remoteMisses", snapshot.profileRuntimes().remoteMisses()).append(',');
         number(json, "localFallbacks", snapshot.profileRuntimes().localFallbacks());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder chatRuntimes(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "runtimeCount", snapshot.chatRuntimes().runtimeCount()).append(',');
+        number(json, "activeChannels", snapshot.chatRuntimes().activeChannels()).append(',');
+        number(json, "activeDirectSessions", snapshot.chatRuntimes().activeDirectSessions()).append(',');
+        number(json, "joinRequests", snapshot.chatRuntimes().joinRequests()).append(',');
+        number(json, "leaveRequests", snapshot.chatRuntimes().leaveRequests()).append(',');
+        number(json, "sendRequests", snapshot.chatRuntimes().sendRequests()).append(',');
+        number(json, "mutedRejects", snapshot.chatRuntimes().mutedRejects()).append(',');
+        number(json, "blockedRejects", snapshot.chatRuntimes().blockedRejects()).append(',');
+        number(json, "retainedMessages", snapshot.chatRuntimes().retainedMessages()).append(',');
+        number(json, "droppedHistoryMessages", snapshot.chatRuntimes().droppedHistoryMessages()).append(',');
+        number(json, "acceptedDeliveryRecipients", snapshot.chatRuntimes().acceptedDeliveryRecipients()).append(',');
+        number(json, "droppedDeliveryRecipients", snapshot.chatRuntimes().droppedDeliveryRecipients()).append(',');
+        number(json, "failedDeliveryRecipients", snapshot.chatRuntimes().failedDeliveryRecipients());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerOutboundDeliveries(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "runtimeCount", snapshot.playerOutboundDeliveries().runtimeCount()).append(',');
+        number(json, "activeConnections", snapshot.playerOutboundDeliveries().activeConnections()).append(',');
+        number(json, "offlinePlayers", snapshot.playerOutboundDeliveries().offlinePlayers()).append(',');
+        number(json, "pendingOfflineMessages", snapshot.playerOutboundDeliveries().pendingOfflineMessages()).append(',');
+        number(json, "pendingAckPlayers", snapshot.playerOutboundDeliveries().pendingAckPlayers()).append(',');
+        number(json, "pendingAckMessages", snapshot.playerOutboundDeliveries().pendingAckMessages()).append(',');
+        number(json, "oldestPendingAckAgeMillis", snapshot.playerOutboundDeliveries().oldestPendingAckAgeMillis()).append(',');
+        number(json, "onlineDeliveries", snapshot.playerOutboundDeliveries().onlineDeliveries()).append(',');
+        number(json, "offlineQueuedDeliveries", snapshot.playerOutboundDeliveries().offlineQueuedDeliveries()).append(',');
+        number(json, "droppedDeliveries", snapshot.playerOutboundDeliveries().droppedDeliveries()).append(',');
+        number(json, "coalescedDeliveries", snapshot.playerOutboundDeliveries().coalescedDeliveries()).append(',');
+        number(json, "failedOnlineDeliveries", snapshot.playerOutboundDeliveries().failedOnlineDeliveries()).append(',');
+        number(json, "ackedDeliveries", snapshot.playerOutboundDeliveries().ackedDeliveries());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerGateways(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "gatewayCount", snapshot.playerGateways().gatewayCount()).append(',');
+        number(json, "acceptedLogins", snapshot.playerGateways().acceptedLogins()).append(',');
+        number(json, "failedLogins", snapshot.playerGateways().failedLogins()).append(',');
+        number(json, "authRejectedLogins", snapshot.playerGateways().authRejectedLogins()).append(',');
+        number(json, "duplicateRejectedLogins", snapshot.playerGateways().duplicateRejectedLogins()).append(',');
+        number(json, "kickedConnections", snapshot.playerGateways().kickedConnections()).append(',');
+        number(json, "acceptedCommands", snapshot.playerGateways().acceptedCommands()).append(',');
+        number(json, "rejectedCommands", snapshot.playerGateways().rejectedCommands()).append(',');
+        number(json, "rateLimitedCommands", snapshot.playerGateways().rateLimitedCommands()).append(',');
+        number(json, "acceptedHeartbeats", snapshot.playerGateways().acceptedHeartbeats()).append(',');
+        number(json, "rejectedHeartbeats", snapshot.playerGateways().rejectedHeartbeats()).append(',');
+        number(json, "rateLimitedHeartbeats", snapshot.playerGateways().rateLimitedHeartbeats()).append(',');
+        number(json, "acceptedAcks", snapshot.playerGateways().acceptedAcks()).append(',');
+        number(json, "rejectedAcks", snapshot.playerGateways().rejectedAcks()).append(',');
+        number(json, "slowClientClosures", snapshot.playerGateways().slowClientClosures()).append(',');
+        number(json, "invalidFrames", snapshot.playerGateways().invalidFrames()).append(',');
+        number(json, "disconnectedSessions", snapshot.playerGateways().disconnectedSessions()).append(',');
+        number(json, "idleTimeouts", snapshot.playerGateways().idleTimeouts());
         json.append('}');
         return json;
     }

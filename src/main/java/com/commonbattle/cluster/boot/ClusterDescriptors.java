@@ -83,6 +83,13 @@ final class ClusterDescriptors {
                     ChatOperations.JOIN_CHANNEL,
                     ChatOperations.LEAVE_CHANNEL,
                     ChatOperations.SEND_CHANNEL,
+                    ChatOperations.JOIN_WORLD,
+                    ChatOperations.LEAVE_WORLD,
+                    ChatOperations.SEND_WORLD,
+                    ChatOperations.JOIN_ALLIANCE,
+                    ChatOperations.LEAVE_ALLIANCE,
+                    ChatOperations.SEND_ALLIANCE,
+                    ChatOperations.SEND_DIRECT,
                     BusinessAgentRpcOperations.DISPATCH
             );
             case SCENE -> Set.of(

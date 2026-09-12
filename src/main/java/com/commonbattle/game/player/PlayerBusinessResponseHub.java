@@ -67,7 +67,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         CompletedResponse cached = completed.get(key);
         if (cached != null) {
             replayedResponses.incrementAndGet();
-            callback.completed(cached.response());
+            callback.completed(cached.response(), true);
             return PlayerBusinessResponseRegistration.NOOP;
         }
         RegistrationState state = new RegistrationState();
@@ -93,7 +93,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
             cached = completed.get(key);
             if (cached != null && callbacks.remove(key, waiter)) {
                 replayedResponses.incrementAndGet();
-                callback.completed(cached.response());
+                callback.completed(cached.response(), true);
                 return PlayerBusinessResponseRegistration.NOOP;
             }
             submittedResponses.incrementAndGet();
@@ -241,7 +241,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         private void complete(PlayerBusinessResponse response) {
             List<PlayerBusinessResponseCallback> snapshot = new ArrayList<>(callbacks);
             for (PlayerBusinessResponseCallback callback : snapshot) {
-                callback.completed(response);
+                callback.completed(response, false);
             }
         }
     }

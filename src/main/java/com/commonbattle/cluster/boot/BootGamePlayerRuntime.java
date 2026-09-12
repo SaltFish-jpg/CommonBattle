@@ -25,9 +25,11 @@ import com.commonbattle.game.player.PlayerBusinessCommandEndpoint;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
 import com.commonbattle.game.player.PlayerBusinessCommandHandler;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
+import com.commonbattle.game.player.PlayerClientCommandIngress;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.PlayerGameAgentManager;
+import com.commonbattle.game.player.PlayerGatewayConfig;
 import com.commonbattle.game.player.PlayerStateRepository;
 import com.commonbattle.game.profile.PlayerProfileEventProjector;
 import com.commonbattle.game.profile.PlayerProfileSnapshotProjector;
@@ -37,7 +39,10 @@ import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerClientConnectionService;
+import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
 import com.commonbattle.game.session.PlayerLoginService;
+import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.session.PlayerSessionRegistry;
 import com.commonbattle.game.social.AllianceAgentManager;
 import com.commonbattle.game.social.FriendAgentManager;
@@ -65,6 +70,9 @@ record BootGamePlayerRuntime(
         AllianceAgentManager allianceAgents,
         PlayerSessionRegistry sessions,
         PlayerLoginService logins,
+        PlayerOutboundDeliveryHub outbound,
+        PlayerClientConnectionService clientConnections,
+        PlayerClientCommandIngress clientCommandIngress,
         PlayerCommandDispatcher dispatcher,
         PlayerBusinessResponseHub businessResponses,
         PlayerBusinessCommandGateway businessCommands,
@@ -169,7 +177,8 @@ record BootGamePlayerRuntime(
                 config.playerAutoSaveEnabled(),
                 config.playerAutoSaveInitialDelay(),
                 config.playerAutoSaveInterval(),
-                config.playerBusinessResponseTimeout()
+                config.playerBusinessResponseTimeout(),
+                config.playerGatewayConfig().maxPendingAckMessages()
         );
     }
 
@@ -283,7 +292,8 @@ record BootGamePlayerRuntime(
                 false,
                 Duration.ZERO,
                 Duration.ofSeconds(60),
-                PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT
+                PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT,
+                PlayerGatewayConfig.defaults().maxPendingAckMessages()
         );
     }
 
@@ -307,7 +317,8 @@ record BootGamePlayerRuntime(
             boolean autoSaveEnabled,
             Duration autoSaveInitialDelay,
             Duration autoSaveInterval,
-            Duration businessResponseTimeout
+            Duration businessResponseTimeout,
+            int maxPendingAckMessagesPerPlayer
     ) {
         Objects.requireNonNull(runtime, "runtime");
         Objects.requireNonNull(local, "local");
@@ -327,6 +338,9 @@ record BootGamePlayerRuntime(
         Objects.requireNonNull(autoSaveInitialDelay, "autoSaveInitialDelay");
         Objects.requireNonNull(autoSaveInterval, "autoSaveInterval");
         Objects.requireNonNull(businessResponseTimeout, "businessResponseTimeout");
+        if (maxPendingAckMessagesPerPlayer <= 0) {
+            throw new IllegalArgumentException("maxPendingAckMessagesPerPlayer must be positive");
+        }
 
         if (rpc instanceof RpcRoutePolicyView routePolicyView) {
             runtime.observe("rpcRoutePolicy", routePolicyView);
@@ -383,6 +397,15 @@ record BootGamePlayerRuntime(
                 businessResponses,
                 businessResponseTimeout
         ));
+        PlayerOutboundDeliveryHub outbound = new PlayerOutboundDeliveryHub(
+                sessions,
+                clock,
+                PlayerClientConnectionService.DEFAULT_OFFLINE_FLUSH_LIMIT,
+                maxPendingAckMessagesPerPlayer,
+                PlayerDeliveryOverflowStrategy.DROP_OLDEST
+        );
+        PlayerClientConnectionService clientConnections = new PlayerClientConnectionService(logins, outbound);
+        PlayerClientCommandIngress clientCommandIngress = new PlayerClientCommandIngress(businessCommands, outbound);
         BusinessAgentHandlerRegistry businessAgentHandlers = new BusinessAgentHandlerRegistry();
         SocialAgentOperationBinder.register(
                 businessAgentHandlers,
@@ -422,6 +445,9 @@ record BootGamePlayerRuntime(
                 allianceAgents,
                 sessions,
                 logins,
+                outbound,
+                clientConnections,
+                clientCommandIngress,
                 dispatcher,
                 businessResponses,
                 businessCommands,
@@ -437,6 +463,7 @@ record BootGamePlayerRuntime(
         runtime.observe("friendAgents", friendAgents);
         runtime.observe("playerSessions", sessions);
         runtime.observe("playerLogins", logins);
+        runtime.observe("playerOutboundDeliveries", outbound);
         runtime.observe("playerCommandAudit", audit);
         runtime.observe("playerCommandDispatcher", dispatcher);
         runtime.observe("playerBusinessResponses", businessResponses);

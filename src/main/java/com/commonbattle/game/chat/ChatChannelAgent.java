@@ -24,10 +24,14 @@ public final class ChatChannelAgent {
     private final String channelId;
     private final ScenePlayerInterestCoordinator interests;
     private final ChatMessagePolicy messagePolicy;
+    private final ChatDeliverySink deliverySink;
     private final Clock clock;
+    private final int maxHistoryMessages;
     private final Set<Long> members = new HashSet<>();
     private final List<ChatDelivery> history = new ArrayList<>();
     private long revision;
+    private long droppedHistoryMessages;
+    private ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
 
     public ChatChannelAgent(
             AgentMessagePort messages,
@@ -37,12 +41,42 @@ public final class ChatChannelAgent {
             ChatMessagePolicy messagePolicy,
             Clock clock
     ) {
+        this(messages, self, channelId, interests, messagePolicy, clock, ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
+    }
+
+    public ChatChannelAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            String channelId,
+            ScenePlayerInterestCoordinator interests,
+            ChatMessagePolicy messagePolicy,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
+        this(messages, self, channelId, interests, messagePolicy, ChatDeliverySink.noop(), clock, maxHistoryMessages);
+    }
+
+    public ChatChannelAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            String channelId,
+            ScenePlayerInterestCoordinator interests,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.channelId = ChatJoinRequest.normalizeChannelId(channelId);
         this.interests = Objects.requireNonNull(interests, "interests");
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
+        this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
         this.clock = Objects.requireNonNull(clock, "clock");
+        if (maxHistoryMessages <= 0) {
+            throw new IllegalArgumentException("maxHistoryMessages must be positive");
+        }
+        this.maxHistoryMessages = maxHistoryMessages;
     }
 
     public void join(ChatJoinRequest request, Consumer<ChatJoinResult> callback) {
@@ -123,7 +157,28 @@ public final class ChatChannelAgent {
                 clock.instant()
         );
         history.add(delivery);
+        trimHistory();
+        deliveryStats = deliveryStats.plus(deliverySink.deliver(new ChatDeliveryEnvelope(channelId, members, delivery)));
         return ChatSendResult.sent(delivery);
+    }
+
+    long retainedMessages() {
+        return history.size();
+    }
+
+    long droppedHistoryMessages() {
+        return droppedHistoryMessages;
+    }
+
+    ChatDeliveryResult deliveryStats() {
+        return deliveryStats;
+    }
+
+    private void trimHistory() {
+        while (history.size() > maxHistoryMessages) {
+            history.removeFirst();
+            droppedHistoryMessages++;
+        }
     }
 
     private String interestKey() {

@@ -10,6 +10,9 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
 import com.commonbattle.cluster.rpc.PlayerGrayRouteConfig;
+import com.commonbattle.game.chat.ChatRouteConfig;
+import com.commonbattle.game.player.PlayerGatewayConfig;
+import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import com.commonbattle.observability.DrainConfig;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
 import com.commonbattle.observability.RuntimeHealthPolicy;
@@ -83,6 +86,20 @@ public final class ClusterNodeConfig {
         require(issues, "cluster.host");
         validatePort(issues, "cluster.port");
         validateOptionalPort(issues, "cluster.ops.port");
+        validateBoolean(issues, "cluster.client.enabled");
+        validateOptionalPort(issues, "cluster.client.port");
+        validateBoolean(issues, "cluster.client.heartbeat.ack.enabled");
+        validateNonNegativeInteger(issues, "cluster.client.reader.idle.timeout.millis");
+        validateDuplicateLoginPolicy(issues);
+        validatePositiveInteger(issues, "cluster.client.command.rate.capacity");
+        validatePositiveInteger(issues, "cluster.client.command.rate.refill.permits");
+        validatePositiveInteger(issues, "cluster.client.command.rate.refill.interval.millis");
+        validatePositiveInteger(issues, "cluster.client.heartbeat.rate.capacity");
+        validatePositiveInteger(issues, "cluster.client.heartbeat.rate.refill.permits");
+        validatePositiveInteger(issues, "cluster.client.heartbeat.rate.refill.interval.millis");
+        validatePositiveInteger(issues, "cluster.client.outbound.pending.ack.max.messages");
+        validateNonNegativeInteger(issues, "cluster.client.outbound.pending.ack.max.age.millis");
+        validateBoolean(issues, "cluster.client.outbound.slow.close.enabled");
         validatePositiveInteger(issues, "cluster.actor.workers");
         validatePositiveInteger(issues, "cluster.actor.batch.size");
         validatePositiveInteger(issues, "cluster.actor.mailbox.capacity");
@@ -149,15 +166,21 @@ public final class ClusterNodeConfig {
         validateBoolean(issues, "cluster.shop.stock.reservation.retention.enabled");
         validatePositiveInteger(issues, "cluster.shop.stock.reservation.ttl.millis");
         validatePositiveInteger(issues, "cluster.shop.stock.reservation.scan.interval.millis");
+        ServiceKind actualKind = validateKind(issues, "cluster.kind");
         validatePositiveInteger(issues, "cluster.event.history.default.limit");
         validateEventHistoryTopicLimits(issues);
-        ServiceKind actualKind = validateKind(issues, "cluster.kind");
         if (actualKind != null && expectedKind != null && actualKind != expectedKind) {
             issues.add(new ClusterConfigIssue("cluster.kind", "expected " + expectedKind + " but was " + actualKind));
         }
         validateCenter(issues);
         if (actualKind == ServiceKind.SCENE || expectedKind == ServiceKind.SCENE) {
             validateScene(issues);
+        }
+        if (actualKind == ServiceKind.CHAT || expectedKind == ServiceKind.CHAT) {
+            validatePositiveInteger(issues, "chat.world.shards");
+            validatePositiveInteger(issues, "chat.history.max.messages");
+            validatePositiveInteger(issues, "chat.delivery.max.pending.per.recipient");
+            validateChatDeliveryOverflowStrategy(issues);
         }
         return new ClusterConfigValidation(issues);
     }
@@ -216,6 +239,41 @@ public final class ClusterNodeConfig {
 
     public ServiceEndpoint opsEndpoint() {
         return new ServiceEndpoint(property("cluster.ops.host", "127.0.0.1"), integer("cluster.ops.port", endpoint().port() + 10_000));
+    }
+
+    public boolean clientGatewayEnabled() {
+        return Boolean.parseBoolean(property("cluster.client.enabled", "false"));
+    }
+
+    public ServiceEndpoint clientGatewayEndpoint() {
+        return new ServiceEndpoint(
+                property("cluster.client.host", endpoint().host()),
+                integer("cluster.client.port", endpoint().port() + 20_000)
+        );
+    }
+
+    public PlayerGatewayConfig playerGatewayConfig() {
+        return new PlayerGatewayConfig(
+                Duration.ofMillis(integer("cluster.client.reader.idle.timeout.millis", 0)),
+                Boolean.parseBoolean(property("cluster.client.heartbeat.ack.enabled", "true")),
+                PlayerGatewayDuplicateLoginPolicy.valueOf(property(
+                        "cluster.client.duplicate.login.policy",
+                        PlayerGatewayDuplicateLoginPolicy.KICK_OLD.name()
+                )),
+                new AgentRateLimitPolicy(
+                        integer("cluster.client.command.rate.capacity", 200),
+                        integer("cluster.client.command.rate.refill.permits", 200),
+                        Duration.ofMillis(integer("cluster.client.command.rate.refill.interval.millis", 1_000))
+                ),
+                new AgentRateLimitPolicy(
+                        integer("cluster.client.heartbeat.rate.capacity", 60),
+                        integer("cluster.client.heartbeat.rate.refill.permits", 60),
+                        Duration.ofMillis(integer("cluster.client.heartbeat.rate.refill.interval.millis", 1_000))
+                ),
+                integer("cluster.client.outbound.pending.ack.max.messages", 512),
+                Duration.ofMillis(integer("cluster.client.outbound.pending.ack.max.age.millis", 30_000)),
+                Boolean.parseBoolean(property("cluster.client.outbound.slow.close.enabled", "true"))
+        );
     }
 
     public ServiceId centerServiceId() {
@@ -497,6 +555,19 @@ public final class ClusterNodeConfig {
 
     public int sceneShards() {
         return integer("scene.shards", actorWorkers());
+    }
+
+    public ChatRouteConfig chatRouteConfig() {
+        ChatRouteConfig defaults = ChatRouteConfig.defaults();
+        return new ChatRouteConfig(
+                integer("chat.world.shards", defaults.worldShardCount()),
+                integer("chat.history.max.messages", defaults.maxHistoryMessages()),
+                integer("chat.delivery.max.pending.per.recipient", defaults.maxPendingDeliveriesPerRecipient()),
+                com.commonbattle.game.chat.ChatDeliveryOverflowStrategy.valueOf(property(
+                        "chat.delivery.overflow.strategy",
+                        defaults.deliveryOverflowStrategy().name()
+                ))
+        );
     }
 
     private String required(String key) {
@@ -813,6 +884,31 @@ public final class ClusterNodeConfig {
             ShopStockStoreKind.valueOf(value);
         } catch (IllegalArgumentException e) {
             issues.add(new ClusterConfigIssue("cluster.shop.stock.store", "unknown shop stock store " + value));
+        }
+    }
+
+    private void validateChatDeliveryOverflowStrategy(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("chat.delivery.overflow.strategy");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            com.commonbattle.game.chat.ChatDeliveryOverflowStrategy.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("chat.delivery.overflow.strategy", "unknown chat delivery overflow strategy " + value));
+        }
+    }
+
+    private void validateDuplicateLoginPolicy(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.client.duplicate.login.policy");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            PlayerGatewayDuplicateLoginPolicy.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.client.duplicate.login.policy",
+                    "unknown duplicate login policy " + value));
         }
     }
 

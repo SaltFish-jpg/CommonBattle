@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -129,6 +130,61 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void clientGatewayCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.client.enabled", "true");
+        properties.setProperty("cluster.client.host", "0.0.0.0");
+        properties.setProperty("cluster.client.port", "29001");
+        properties.setProperty("cluster.client.heartbeat.ack.enabled", "false");
+        properties.setProperty("cluster.client.reader.idle.timeout.millis", "45000");
+        properties.setProperty("cluster.client.duplicate.login.policy", "REJECT_NEW");
+        properties.setProperty("cluster.client.command.rate.capacity", "20");
+        properties.setProperty("cluster.client.command.rate.refill.permits", "10");
+        properties.setProperty("cluster.client.command.rate.refill.interval.millis", "500");
+        properties.setProperty("cluster.client.heartbeat.rate.capacity", "8");
+        properties.setProperty("cluster.client.heartbeat.rate.refill.permits", "4");
+        properties.setProperty("cluster.client.heartbeat.rate.refill.interval.millis", "1000");
+        properties.setProperty("cluster.client.outbound.pending.ack.max.messages", "32");
+        properties.setProperty("cluster.client.outbound.pending.ack.max.age.millis", "15000");
+        properties.setProperty("cluster.client.outbound.slow.close.enabled", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertTrue(config.clientGatewayEnabled());
+        assertEquals("0.0.0.0", config.clientGatewayEndpoint().host());
+        assertEquals(29001, config.clientGatewayEndpoint().port());
+        assertFalse(config.playerGatewayConfig().heartbeatAckEnabled());
+        assertEquals(45_000, config.playerGatewayConfig().readerIdleTimeout().toMillis());
+        assertEquals(PlayerGatewayDuplicateLoginPolicy.REJECT_NEW, config.playerGatewayConfig().duplicateLoginPolicy());
+        assertEquals(20, config.playerGatewayConfig().commandRateLimit().capacity());
+        assertEquals(10, config.playerGatewayConfig().commandRateLimit().refillPermits());
+        assertEquals(500, config.playerGatewayConfig().commandRateLimit().refillInterval().toMillis());
+        assertEquals(8, config.playerGatewayConfig().heartbeatRateLimit().capacity());
+        assertEquals(4, config.playerGatewayConfig().heartbeatRateLimit().refillPermits());
+        assertEquals(1000, config.playerGatewayConfig().heartbeatRateLimit().refillInterval().toMillis());
+        assertEquals(32, config.playerGatewayConfig().maxPendingAckMessages());
+        assertEquals(15_000, config.playerGatewayConfig().maxPendingAckAge().toMillis());
+        assertFalse(config.playerGatewayConfig().closeSlowClient());
+    }
+
+    @Test
+    void clientGatewayUsesGameEndpointDefaults() {
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(base());
+
+        assertFalse(config.clientGatewayEnabled());
+        assertEquals("127.0.0.1", config.clientGatewayEndpoint().host());
+        assertEquals(29001, config.clientGatewayEndpoint().port());
+        assertTrue(config.playerGatewayConfig().heartbeatAckEnabled());
+        assertEquals(0, config.playerGatewayConfig().readerIdleTimeout().toMillis());
+        assertEquals(PlayerGatewayDuplicateLoginPolicy.KICK_OLD, config.playerGatewayConfig().duplicateLoginPolicy());
+        assertEquals(200, config.playerGatewayConfig().commandRateLimit().capacity());
+        assertEquals(60, config.playerGatewayConfig().heartbeatRateLimit().capacity());
+        assertEquals(512, config.playerGatewayConfig().maxPendingAckMessages());
+        assertEquals(30_000, config.playerGatewayConfig().maxPendingAckAge().toMillis());
+        assertTrue(config.playerGatewayConfig().closeSlowClient());
+    }
+
+    @Test
     void drainConfigCanBeConfigured() {
         Properties properties = base();
         properties.setProperty("cluster.drain.timeout.millis", "45000");
@@ -185,6 +241,20 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.auto.save.enabled", "maybe");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "-1");
         properties.setProperty("cluster.player.auto.save.interval.millis", "0");
+        properties.setProperty("cluster.client.enabled", "maybe");
+        properties.setProperty("cluster.client.port", "0");
+        properties.setProperty("cluster.client.heartbeat.ack.enabled", "maybe");
+        properties.setProperty("cluster.client.reader.idle.timeout.millis", "-1");
+        properties.setProperty("cluster.client.duplicate.login.policy", "BAD");
+        properties.setProperty("cluster.client.command.rate.capacity", "0");
+        properties.setProperty("cluster.client.command.rate.refill.permits", "-1");
+        properties.setProperty("cluster.client.command.rate.refill.interval.millis", "bad");
+        properties.setProperty("cluster.client.heartbeat.rate.capacity", "0");
+        properties.setProperty("cluster.client.heartbeat.rate.refill.permits", "-1");
+        properties.setProperty("cluster.client.heartbeat.rate.refill.interval.millis", "bad");
+        properties.setProperty("cluster.client.outbound.pending.ack.max.messages", "0");
+        properties.setProperty("cluster.client.outbound.pending.ack.max.age.millis", "-1");
+        properties.setProperty("cluster.client.outbound.slow.close.enabled", "maybe");
         properties.setProperty("game.server.open.time", "not-time");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
@@ -203,6 +273,20 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.player.auto.save.enabled"));
         assertTrue(keys.contains("cluster.player.auto.save.initial.delay.millis"));
         assertTrue(keys.contains("cluster.player.auto.save.interval.millis"));
+        assertTrue(keys.contains("cluster.client.enabled"));
+        assertTrue(keys.contains("cluster.client.port"));
+        assertTrue(keys.contains("cluster.client.heartbeat.ack.enabled"));
+        assertTrue(keys.contains("cluster.client.reader.idle.timeout.millis"));
+        assertTrue(keys.contains("cluster.client.duplicate.login.policy"));
+        assertTrue(keys.contains("cluster.client.command.rate.capacity"));
+        assertTrue(keys.contains("cluster.client.command.rate.refill.permits"));
+        assertTrue(keys.contains("cluster.client.command.rate.refill.interval.millis"));
+        assertTrue(keys.contains("cluster.client.heartbeat.rate.capacity"));
+        assertTrue(keys.contains("cluster.client.heartbeat.rate.refill.permits"));
+        assertTrue(keys.contains("cluster.client.heartbeat.rate.refill.interval.millis"));
+        assertTrue(keys.contains("cluster.client.outbound.pending.ack.max.messages"));
+        assertTrue(keys.contains("cluster.client.outbound.pending.ack.max.age.millis"));
+        assertTrue(keys.contains("cluster.client.outbound.slow.close.enabled"));
         assertTrue(keys.contains("game.server.open.time"));
     }
 
@@ -303,6 +387,24 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void chatRouteConfigCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CHAT");
+        properties.setProperty("chat.world.shards", "16");
+        properties.setProperty("chat.history.max.messages", "256");
+        properties.setProperty("chat.delivery.max.pending.per.recipient", "512");
+        properties.setProperty("chat.delivery.overflow.strategy", "DROP_NEWEST");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(16, config.chatRouteConfig().worldShardCount());
+        assertEquals(256, config.chatRouteConfig().maxHistoryMessages());
+        assertEquals(512, config.chatRouteConfig().maxPendingDeliveriesPerRecipient());
+        assertEquals(com.commonbattle.game.chat.ChatDeliveryOverflowStrategy.DROP_NEWEST,
+                config.chatRouteConfig().deliveryOverflowStrategy());
+    }
+
+    @Test
     void validationRejectsInvalidServiceMetadataConfig() {
         Properties properties = base();
         properties.setProperty("cluster.route.tag", "gray");
@@ -337,6 +439,25 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.rpc.gray.percent"));
         assertTrue(keys.contains("cluster.rpc.gray.players"));
         assertTrue(keys.contains("cluster.rpc.gray.operations"));
+    }
+
+    @Test
+    void validationRejectsInvalidChatRouteConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CHAT");
+        properties.setProperty("chat.world.shards", "0");
+        properties.setProperty("chat.history.max.messages", "-1");
+        properties.setProperty("chat.delivery.max.pending.per.recipient", "0");
+        properties.setProperty("chat.delivery.overflow.strategy", "BAD");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CHAT);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("chat.world.shards"));
+        assertTrue(keys.contains("chat.history.max.messages"));
+        assertTrue(keys.contains("chat.delivery.max.pending.per.recipient"));
+        assertTrue(keys.contains("chat.delivery.overflow.strategy"));
     }
 
     @Test

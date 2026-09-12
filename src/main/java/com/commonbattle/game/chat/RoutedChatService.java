@@ -1,25 +1,37 @@
 package com.commonbattle.game.chat;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
  * 游戏语义层 Chat 路由服务。
  * 对外暴露世界、联盟、私聊，内部把它们稳定映射到对应业务实体 Actor。
  */
-public final class RoutedChatService {
+public final class RoutedChatService implements ChatRuntimeView {
     private final ChatChannelManager channels;
     private final DirectChatSessionManager directSessions;
     private final ChatRouteConfig config;
+    private final ChatAccessControl accessControl;
 
     public RoutedChatService(
             ChatChannelManager channels,
             DirectChatSessionManager directSessions,
             ChatRouteConfig config
     ) {
+        this(channels, directSessions, config, null);
+    }
+
+    public RoutedChatService(
+            ChatChannelManager channels,
+            DirectChatSessionManager directSessions,
+            ChatRouteConfig config,
+            ChatAccessControl accessControl
+    ) {
         this.channels = Objects.requireNonNull(channels, "channels");
         this.directSessions = Objects.requireNonNull(directSessions, "directSessions");
         this.config = Objects.requireNonNull(config, "config");
+        this.accessControl = accessControl;
     }
 
     public void joinWorld(WorldChatJoinRequest request, Consumer<ChatJoinResult> callback) {
@@ -71,5 +83,13 @@ public final class RoutedChatService {
 
     public ChatRouteConfig config() {
         return config;
+    }
+
+    @Override
+    public ChatServiceStats stats() {
+        ChatServiceStats stats = channels.stats().plus(directSessions.stats());
+        return Optional.ofNullable(accessControl)
+                .map(control -> stats.withAccessRejects(control.mutedRejects(), control.blockedRejects()))
+                .orElse(stats);
     }
 }

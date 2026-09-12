@@ -36,7 +36,10 @@ import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
 import com.commonbattle.game.profile.ProfileSnapshotRepository;
 import com.commonbattle.game.profile.ReliableProfileEventPublisher;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.player.NettyPlayerGatewayServer;
+import com.commonbattle.game.player.PlayerClientAuthenticator;
 import com.commonbattle.game.shop.ShopStockPayloadCodecs;
+import com.commonbattle.game.session.PlayerClientPayloadCodecs;
 import com.commonbattle.game.social.AllianceSnapshotEndpoint;
 import com.commonbattle.game.social.AllianceSnapshotRepository;
 import com.commonbattle.game.social.FriendSnapshotEndpoint;
@@ -65,11 +68,11 @@ public final class GameServerMain {
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
             PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
+                    PlayerClientPayloadCodecs.registerTo(ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
                             AgentMigrationPayloadCodecs.registerTo(
                                     AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
                             )
-                    )))
+                    ))))
             );
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
@@ -164,6 +167,17 @@ public final class GameServerMain {
                     friendEvents,
                     Clock.systemUTC()
             );
+            if (config.clientGatewayEnabled()) {
+                runtime.add("playerGateway", new NettyPlayerGatewayServer(
+                        config.clientGatewayEndpoint(),
+                        playerRuntime.clientConnections(),
+                        playerRuntime.clientCommandIngress(),
+                        codecs,
+                        Clock.systemUTC(),
+                        PlayerClientAuthenticator.allowAll(),
+                        config.playerGatewayConfig()
+                )).start();
+            }
             runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
             System.out.println("Game server started: " + local.id().wireName()
                     + ", config=" + configCache.active().version()

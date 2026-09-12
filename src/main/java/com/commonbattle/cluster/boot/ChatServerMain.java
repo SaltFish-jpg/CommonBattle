@@ -19,7 +19,14 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.game.chat.ChatChannelEndpoint;
 import com.commonbattle.game.chat.ChatChannelManager;
+import com.commonbattle.game.chat.ChatAccessControl;
 import com.commonbattle.game.chat.ChatPayloadCodecs;
+import com.commonbattle.game.chat.DirectChatSessionManager;
+import com.commonbattle.game.chat.AccessControlledChatMessagePolicy;
+import com.commonbattle.game.chat.PlayerOutboundChatDeliverySink;
+import com.commonbattle.game.chat.ProfileAwareChatMessagePolicy;
+import com.commonbattle.game.chat.RoutedChatEndpoint;
+import com.commonbattle.game.chat.RoutedChatService;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.profile.LocalProfileCache;
@@ -31,6 +38,9 @@ import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
 import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
+import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
+import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
+import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.time.Clock;
@@ -93,9 +103,39 @@ public final class ChatServerMain {
                     ),
                     new SceneAllianceAwarenessAgent(messages, actors.actor("chat-alliance-awareness"))
             );
-            ChatChannelManager channels = new ChatChannelManager(actors, messages, interests, profiles, Clock.systemUTC());
+            ChatAccessControl accessControl = new ChatAccessControl();
+            Clock clock = Clock.systemUTC();
+            PlayerOutboundDeliveryHub deliveryHub = new PlayerOutboundDeliveryHub(
+                    new InMemoryPlayerSessionRegistry(clock),
+                    clock,
+                    config.chatRouteConfig().maxPendingDeliveriesPerRecipient(),
+                    PlayerDeliveryOverflowStrategy.valueOf(config.chatRouteConfig().deliveryOverflowStrategy().name())
+            );
+            runtime.observe("playerOutboundDeliveryHub", deliveryHub);
+            PlayerOutboundChatDeliverySink deliverySink = new PlayerOutboundChatDeliverySink(deliveryHub);
+            ProfileAwareChatMessagePolicy profilePolicy = new ProfileAwareChatMessagePolicy(profiles);
+            AccessControlledChatMessagePolicy messagePolicy = new AccessControlledChatMessagePolicy(accessControl, profilePolicy);
+            ChatChannelManager channels = new ChatChannelManager(
+                    actors,
+                    messages,
+                    interests,
+                    messagePolicy,
+                    deliverySink,
+                    clock,
+                    config.chatRouteConfig().maxHistoryMessages()
+            );
+            DirectChatSessionManager directSessions = new DirectChatSessionManager(
+                    actors,
+                    messages,
+                    messagePolicy,
+                    deliverySink,
+                    clock,
+                    config.chatRouteConfig().maxHistoryMessages()
+            );
+            RoutedChatService routedChat = new RoutedChatService(channels, directSessions, config.chatRouteConfig(), accessControl);
             new ChatChannelEndpoint(channels).bind(gateway);
-            runtime.observe("chatChannels", channels);
+            new RoutedChatEndpoint(routedChat).bind(gateway);
+            runtime.observe("chat", routedChat);
             node.start(
                     List.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
                     config.registryLeaseTtl(),

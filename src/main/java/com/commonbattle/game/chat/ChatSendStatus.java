@@ -7,5 +7,7 @@ public enum ChatSendStatus {
     SENT,
     NOT_IN_CHANNEL,
     EMPTY_TEXT,
-    STALE_PROFILE
+    STALE_PROFILE,
+    MUTED,
+    BLOCKED
 }

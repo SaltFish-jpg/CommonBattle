@@ -28,6 +28,8 @@ public final class RuntimeMetricsFormatter {
         actorRpc(metrics, snapshot);
         commands(metrics, snapshot);
         businessResponses(metrics, snapshot);
+        playerOutboundDeliveries(metrics, snapshot);
+        playerGateways(metrics, snapshot);
         asyncShopPurchases(metrics, snapshot);
         agents(metrics, snapshot);
         playerAgents(metrics, snapshot);
@@ -53,6 +55,7 @@ public final class RuntimeMetricsFormatter {
         ownerActorEventSubscriptions(metrics, snapshot);
         profileInterests(metrics, snapshot);
         profileRuntimes(metrics, snapshot);
+        chatRuntimes(metrics, snapshot);
         sceneRuntimes(metrics, snapshot);
         shopRuntimes(metrics, snapshot);
         commandAudits(metrics, snapshot);
@@ -157,6 +160,43 @@ public final class RuntimeMetricsFormatter {
                 snapshot.businessResponses().cachedResponses());
         gauge(metrics, "commonbattle_player_business_response_oldest_pending_age_millis",
                 snapshot.businessResponses().oldestPendingAgeMillis());
+    }
+
+    private static void playerOutboundDeliveries(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_player_outbound_delivery_hubs", snapshot.playerOutboundDeliveries().runtimeCount());
+        gauge(metrics, "commonbattle_player_outbound_active_connections", snapshot.playerOutboundDeliveries().activeConnections());
+        gauge(metrics, "commonbattle_player_outbound_offline_players", snapshot.playerOutboundDeliveries().offlinePlayers());
+        gauge(metrics, "commonbattle_player_outbound_pending_offline_messages", snapshot.playerOutboundDeliveries().pendingOfflineMessages());
+        gauge(metrics, "commonbattle_player_outbound_pending_ack_players", snapshot.playerOutboundDeliveries().pendingAckPlayers());
+        gauge(metrics, "commonbattle_player_outbound_pending_ack_messages", snapshot.playerOutboundDeliveries().pendingAckMessages());
+        gauge(metrics, "commonbattle_player_outbound_oldest_pending_ack_age_millis", snapshot.playerOutboundDeliveries().oldestPendingAckAgeMillis());
+        gauge(metrics, "commonbattle_player_outbound_online_deliveries_total", snapshot.playerOutboundDeliveries().onlineDeliveries());
+        gauge(metrics, "commonbattle_player_outbound_offline_queued_deliveries_total", snapshot.playerOutboundDeliveries().offlineQueuedDeliveries());
+        gauge(metrics, "commonbattle_player_outbound_dropped_deliveries_total", snapshot.playerOutboundDeliveries().droppedDeliveries());
+        gauge(metrics, "commonbattle_player_outbound_coalesced_deliveries_total", snapshot.playerOutboundDeliveries().coalescedDeliveries());
+        gauge(metrics, "commonbattle_player_outbound_failed_online_deliveries_total", snapshot.playerOutboundDeliveries().failedOnlineDeliveries());
+        gauge(metrics, "commonbattle_player_outbound_acked_deliveries_total", snapshot.playerOutboundDeliveries().ackedDeliveries());
+    }
+
+    private static void playerGateways(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_player_gateways", snapshot.playerGateways().gatewayCount());
+        gauge(metrics, "commonbattle_player_gateway_accepted_logins_total", snapshot.playerGateways().acceptedLogins());
+        gauge(metrics, "commonbattle_player_gateway_failed_logins_total", snapshot.playerGateways().failedLogins());
+        gauge(metrics, "commonbattle_player_gateway_auth_rejected_logins_total", snapshot.playerGateways().authRejectedLogins());
+        gauge(metrics, "commonbattle_player_gateway_duplicate_rejected_logins_total", snapshot.playerGateways().duplicateRejectedLogins());
+        gauge(metrics, "commonbattle_player_gateway_kicked_connections_total", snapshot.playerGateways().kickedConnections());
+        gauge(metrics, "commonbattle_player_gateway_accepted_commands_total", snapshot.playerGateways().acceptedCommands());
+        gauge(metrics, "commonbattle_player_gateway_rejected_commands_total", snapshot.playerGateways().rejectedCommands());
+        gauge(metrics, "commonbattle_player_gateway_rate_limited_commands_total", snapshot.playerGateways().rateLimitedCommands());
+        gauge(metrics, "commonbattle_player_gateway_accepted_heartbeats_total", snapshot.playerGateways().acceptedHeartbeats());
+        gauge(metrics, "commonbattle_player_gateway_rejected_heartbeats_total", snapshot.playerGateways().rejectedHeartbeats());
+        gauge(metrics, "commonbattle_player_gateway_rate_limited_heartbeats_total", snapshot.playerGateways().rateLimitedHeartbeats());
+        gauge(metrics, "commonbattle_player_gateway_accepted_acks_total", snapshot.playerGateways().acceptedAcks());
+        gauge(metrics, "commonbattle_player_gateway_rejected_acks_total", snapshot.playerGateways().rejectedAcks());
+        gauge(metrics, "commonbattle_player_gateway_slow_client_closures_total", snapshot.playerGateways().slowClientClosures());
+        gauge(metrics, "commonbattle_player_gateway_invalid_frames_total", snapshot.playerGateways().invalidFrames());
+        gauge(metrics, "commonbattle_player_gateway_disconnected_sessions_total", snapshot.playerGateways().disconnectedSessions());
+        gauge(metrics, "commonbattle_player_gateway_idle_timeouts_total", snapshot.playerGateways().idleTimeouts());
     }
 
     private static void asyncShopPurchases(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -484,6 +524,22 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_profile_runtime_remote_stale_total", snapshot.profileRuntimes().remoteStale());
         gauge(metrics, "commonbattle_profile_runtime_remote_misses_total", snapshot.profileRuntimes().remoteMisses());
         gauge(metrics, "commonbattle_profile_runtime_local_fallbacks_total", snapshot.profileRuntimes().localFallbacks());
+    }
+
+    private static void chatRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_chat_runtimes", snapshot.chatRuntimes().runtimeCount());
+        gauge(metrics, "commonbattle_chat_active_channels", snapshot.chatRuntimes().activeChannels());
+        gauge(metrics, "commonbattle_chat_active_direct_sessions", snapshot.chatRuntimes().activeDirectSessions());
+        gauge(metrics, "commonbattle_chat_join_requests_total", snapshot.chatRuntimes().joinRequests());
+        gauge(metrics, "commonbattle_chat_leave_requests_total", snapshot.chatRuntimes().leaveRequests());
+        gauge(metrics, "commonbattle_chat_send_requests_total", snapshot.chatRuntimes().sendRequests());
+        gauge(metrics, "commonbattle_chat_muted_rejects_total", snapshot.chatRuntimes().mutedRejects());
+        gauge(metrics, "commonbattle_chat_blocked_rejects_total", snapshot.chatRuntimes().blockedRejects());
+        gauge(metrics, "commonbattle_chat_retained_messages", snapshot.chatRuntimes().retainedMessages());
+        gauge(metrics, "commonbattle_chat_dropped_history_messages_total", snapshot.chatRuntimes().droppedHistoryMessages());
+        gauge(metrics, "commonbattle_chat_accepted_delivery_recipients_total", snapshot.chatRuntimes().acceptedDeliveryRecipients());
+        gauge(metrics, "commonbattle_chat_dropped_delivery_recipients_total", snapshot.chatRuntimes().droppedDeliveryRecipients());
+        gauge(metrics, "commonbattle_chat_failed_delivery_recipients_total", snapshot.chatRuntimes().failedDeliveryRecipients());
     }
 
     private static void sceneRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {

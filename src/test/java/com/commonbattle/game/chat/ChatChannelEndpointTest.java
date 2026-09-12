@@ -67,11 +67,63 @@ class ChatChannelEndpointTest {
         }
     }
 
+    @Test
+    void remoteWorldAllianceAndDirectRequestsRouteToBusinessActors() {
+        try (Fixture fixture = Fixture.create()) {
+            RecordingCallback<ChatJoinResult> worldJoin = new RecordingCallback<>();
+            RecordingCallback<ChatJoinResult> allianceJoin = new RecordingCallback<>();
+            RecordingCallback<ChatSendResult> allianceSend = new RecordingCallback<>();
+            RecordingCallback<ChatSendResult> directSend = new RecordingCallback<>();
+
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.JOIN_WORLD,
+                    new WorldChatJoinRequest("r1", 10001L, 0),
+                    ChatJoinResult.class
+            ), worldJoin);
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.JOIN_ALLIANCE,
+                    new AllianceChatJoinRequest(900L, 10001L),
+                    ChatJoinResult.class
+            ), allianceJoin);
+            fixture.chatExecutor.runAll();
+
+            assertEquals(ChatJoinStatus.JOINED, worldJoin.response.get().status());
+            assertEquals(fixture.routedChat().worldChannelId("r1", 10001L), worldJoin.response.get().channelId());
+            assertEquals(ChatJoinStatus.JOINED, allianceJoin.response.get().status());
+            assertEquals(ChatChannelIds.alliance(900L), allianceJoin.response.get().channelId());
+
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.SEND_ALLIANCE,
+                    new AllianceChatSendRequest(900L, 10001L, "alliance", 0),
+                    ChatSendResult.class
+            ), allianceSend);
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.SEND_DIRECT,
+                    new DirectChatSendRequest(10001L, 10002L, "direct", 0),
+                    ChatSendResult.class
+            ), directSend);
+
+            assertNull(allianceSend.response.get());
+            assertNull(directSend.response.get());
+            fixture.chatExecutor.runAll();
+
+            assertEquals(ChatSendStatus.SENT, allianceSend.response.get().status());
+            assertEquals(ChatChannelIds.alliance(900L), allianceSend.response.get().delivery().orElseThrow().channelId());
+            assertEquals(ChatSendStatus.SENT, directSend.response.get().status());
+            assertEquals(ChatChannelIds.direct(10001L, 10002L), directSend.response.get().delivery().orElseThrow().channelId());
+        }
+    }
+
     private record Fixture(
             LocalClusterTransport transport,
             RecordingExecutor chatExecutor,
             ClusterRpcGateway gameGateway,
-            ClusterRpcGateway chatGateway
+            ClusterRpcGateway chatGateway,
+            RoutedChatService routedChat
     ) implements AutoCloseable {
         private static Fixture create() {
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
@@ -80,7 +132,14 @@ class ChatChannelEndpointTest {
             ServiceDescriptor chat = descriptor(ServiceKind.CHAT, "chat-1", 9106, Set.of(
                     ChatOperations.JOIN_CHANNEL,
                     ChatOperations.LEAVE_CHANNEL,
-                    ChatOperations.SEND_CHANNEL
+                    ChatOperations.SEND_CHANNEL,
+                    ChatOperations.JOIN_WORLD,
+                    ChatOperations.LEAVE_WORLD,
+                    ChatOperations.SEND_WORLD,
+                    ChatOperations.JOIN_ALLIANCE,
+                    ChatOperations.LEAVE_ALLIANCE,
+                    ChatOperations.SEND_ALLIANCE,
+                    ChatOperations.SEND_DIRECT
             ));
             registry.register(game);
             registry.register(chat);
@@ -105,8 +164,11 @@ class ChatChannelEndpointTest {
             ChatMessagePolicy policy = request ->
                     ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());
             ChatChannelManager manager = new ChatChannelManager(actors, messages, interests, policy, CLOCK);
+            DirectChatSessionManager directSessions = new DirectChatSessionManager(actors, messages, policy, CLOCK);
+            RoutedChatService routedChat = new RoutedChatService(manager, directSessions, new ChatRouteConfig(4));
             new ChatChannelEndpoint(manager).bind(chatGateway);
-            return new Fixture(transport, chatExecutor, gameGateway, chatGateway);
+            new RoutedChatEndpoint(routedChat).bind(chatGateway);
+            return new Fixture(transport, chatExecutor, gameGateway, chatGateway, routedChat);
         }
 
         @Override

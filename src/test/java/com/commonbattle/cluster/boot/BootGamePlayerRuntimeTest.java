@@ -212,6 +212,7 @@ class BootGamePlayerRuntimeTest {
         String metrics = RuntimeMetricsFormatter.format(snapshot);
         assertEquals(1, snapshot.playerAgents().managerCount());
         assertEquals(1, snapshot.playerAgents().loadedAgents());
+        assertEquals(1, snapshot.playerOutboundDeliveries().runtimeCount());
         assertEquals(0, snapshot.playerAgents().autoSaveSchedulers());
         assertEquals(1, snapshot.playerAgents().drainServices());
         assertEquals(1, snapshot.asyncShopPurchases().viewCount());
@@ -224,6 +225,7 @@ class BootGamePlayerRuntimeTest {
         executor.runAll();
         assertEquals(2, profileSnapshots.find(10001L).orElseThrow().level());
         assertEquals(1, runtime.healthRegistry().commandDispatchers().size());
+        assertEquals(1, runtime.healthRegistry().playerOutboundDeliveries().size());
         assertEquals(1, runtime.healthRegistry().commandAudits().size());
         assertEquals(1, runtime.healthRegistry().lifecycleManagers().size());
         assertNull(players.autoSaves());

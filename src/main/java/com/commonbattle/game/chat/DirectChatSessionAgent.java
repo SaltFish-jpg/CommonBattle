@@ -21,9 +21,13 @@ public final class DirectChatSessionAgent {
     private final long firstPlayerId;
     private final long secondPlayerId;
     private final ChatMessagePolicy messagePolicy;
+    private final ChatDeliverySink deliverySink;
     private final Clock clock;
+    private final int maxHistoryMessages;
     private final List<ChatDelivery> history = new ArrayList<>();
     private long revision;
+    private long droppedHistoryMessages;
+    private ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
 
     public DirectChatSessionAgent(
             AgentMessagePort messages,
@@ -33,13 +37,45 @@ public final class DirectChatSessionAgent {
             ChatMessagePolicy messagePolicy,
             Clock clock
     ) {
+        this(messages, self, firstPlayerId, secondPlayerId, messagePolicy, clock,
+                ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
+    }
+
+    public DirectChatSessionAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            long firstPlayerId,
+            long secondPlayerId,
+            ChatMessagePolicy messagePolicy,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
+        this(messages, self, firstPlayerId, secondPlayerId, messagePolicy, ChatDeliverySink.noop(), clock,
+                maxHistoryMessages);
+    }
+
+    public DirectChatSessionAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            long firstPlayerId,
+            long secondPlayerId,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.firstPlayerId = Math.min(firstPlayerId, secondPlayerId);
         this.secondPlayerId = Math.max(firstPlayerId, secondPlayerId);
         this.sessionId = ChatChannelIds.direct(firstPlayerId, secondPlayerId);
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
+        this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
         this.clock = Objects.requireNonNull(clock, "clock");
+        if (maxHistoryMessages <= 0) {
+            throw new IllegalArgumentException("maxHistoryMessages must be positive");
+        }
+        this.maxHistoryMessages = maxHistoryMessages;
     }
 
     public void send(DirectChatSendRequest request, Consumer<ChatSendResult> callback) {
@@ -75,7 +111,32 @@ public final class DirectChatSessionAgent {
                 clock.instant()
         );
         history.add(delivery);
+        trimHistory();
+        deliveryStats = deliveryStats.plus(deliverySink.deliver(new ChatDeliveryEnvelope(
+                sessionId,
+                java.util.Set.of(firstPlayerId, secondPlayerId),
+                delivery
+        )));
         return ChatSendResult.sent(delivery);
+    }
+
+    long retainedMessages() {
+        return history.size();
+    }
+
+    long droppedHistoryMessages() {
+        return droppedHistoryMessages;
+    }
+
+    ChatDeliveryResult deliveryStats() {
+        return deliveryStats;
+    }
+
+    private void trimHistory() {
+        while (history.size() > maxHistoryMessages) {
+            history.removeFirst();
+            droppedHistoryMessages++;
+        }
     }
 
     private void ensureParticipant(long playerId) {

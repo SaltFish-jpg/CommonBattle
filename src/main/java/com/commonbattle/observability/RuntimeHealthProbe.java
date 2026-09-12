@@ -52,6 +52,8 @@ import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.PendingVersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.chat.ChatRuntimeView;
+import com.commonbattle.game.chat.ChatServiceStats;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
@@ -59,6 +61,8 @@ import com.commonbattle.game.player.AsyncShopPurchaseView;
 import com.commonbattle.game.player.PlayerAutoSaveStats;
 import com.commonbattle.game.player.PlayerBusinessResponseStats;
 import com.commonbattle.game.player.PlayerBusinessResponseView;
+import com.commonbattle.game.player.PlayerGatewayView;
+import com.commonbattle.game.player.NettyPlayerGatewayStats;
 import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.profile.ProfileInterestStats;
 import com.commonbattle.game.profile.ProfileInterestView;
@@ -74,6 +78,8 @@ import com.commonbattle.game.session.PlayerCommandAuditStats;
 import com.commonbattle.game.session.PlayerCommandAuditView;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandStats;
+import com.commonbattle.game.session.PlayerOutboundDeliveryStats;
+import com.commonbattle.game.session.PlayerOutboundDeliveryView;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -114,12 +120,15 @@ public final class RuntimeHealthProbe {
     private Collection<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions = List.of();
     private final Collection<ProfileInterestView> profileInterests;
     private final Collection<ProfileRuntimeView> profileRuntimes;
+    private Collection<ChatRuntimeView> chatRuntimes = List.of();
     private Collection<SceneRuntimeView> sceneRuntimes = List.of();
     private final Collection<ShopRuntimeView> shopRuntimes;
     private Collection<PlayerGameAgentManager> playerAgentManagers = List.of();
     private Collection<PlayerAutoSaveScheduler> playerAutoSaves = List.of();
     private Collection<PlayerAgentDrainService> playerAgentDrains = List.of();
     private Collection<PlayerBusinessResponseView> playerBusinessResponses = List.of();
+    private Collection<PlayerOutboundDeliveryView> playerOutboundDeliveries = List.of();
+    private Collection<PlayerGatewayView> playerGateways = List.of();
     private Collection<AsyncShopPurchaseView> asyncShopPurchases = List.of();
     private final Collection<ServiceDescriptorPublisher> serviceDescriptorPublishers;
     private final Collection<AgentMigrationCoordinator> migrationCoordinators;
@@ -178,9 +187,12 @@ public final class RuntimeHealthProbe {
         this.playerAutoSaves = registry.playerAutoSaves();
         this.playerAgentDrains = registry.playerAgentDrains();
         this.playerBusinessResponses = registry.playerBusinessResponses();
+        this.playerOutboundDeliveries = registry.playerOutboundDeliveries();
+        this.playerGateways = registry.playerGateways();
         this.asyncShopPurchases = registry.asyncShopPurchases();
         this.rpcRoutePolicies = registry.rpcRoutePolicies();
         this.sceneRuntimes = registry.sceneRuntimes();
+        this.chatRuntimes = registry.chatRuntimes();
         this.actorEventSubscribers = registry.actorEventSubscribers();
         this.ownerActorEventSubscriptions = registry.ownerActorEventSubscriptions();
         this.registryHistories = registry.registryHistories();
@@ -492,6 +504,8 @@ public final class RuntimeHealthProbe {
         ActorRpcHealthStats actorRpcStats = actorRpcStats();
         PlayerCommandStats commandStats = commandStats();
         PlayerBusinessResponseHealthStats businessResponseStats = businessResponseStats();
+        PlayerOutboundDeliveryHealthStats playerOutboundDeliveryStats = playerOutboundDeliveryStats();
+        PlayerGatewayHealthStats playerGatewayStats = playerGatewayStats();
         AsyncShopPurchaseHealthStats asyncShopPurchaseStats = asyncShopPurchaseStats();
         AgentLifecycleStats agentStats = agentStats();
         PlayerAgentHealthStats playerAgentStats = playerAgentStats();
@@ -518,6 +532,7 @@ public final class RuntimeHealthProbe {
         OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptionStats = ownerActorEventSubscriptionStats();
         ProfileInterestHealthStats profileInterestStats = profileInterestStats();
         ProfileRuntimeHealthStats profileRuntimeStats = profileRuntimeStats();
+        ChatRuntimeHealthStats chatRuntimeStats = chatRuntimeStats();
         SceneRuntimeHealthStats sceneRuntimeStats = sceneRuntimeStats();
         ShopRuntimeHealthStats shopRuntimeStats = shopRuntimeStats();
         RuntimeHealthStatus status = status(
@@ -547,9 +562,10 @@ public final class RuntimeHealthProbe {
                 migrationTaskRetentionStats,
                 migrationTaskStoreStats
         );
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
                 migrationStats, migrationExecutorStats, migrationRecoveryStats, migrationRecoverySchedulerStats, migrationTaskRetentionStats, migrationTaskStoreStats, outboxStats, clusterStats, leaseStats, registryHistoryStats, registrySubscriptionStats, remoteRegistryRecoveryStats, descriptorPublisherStats, networkStats, configStats, recoveryStats,
-                eventCenterStats, eventSubscriptionStats, actorEventSubscriberStats, ownerActorEventSubscriptionStats, profileInterestStats, profileRuntimeStats, sceneRuntimeStats, shopRuntimeStats, auditStats);
+                eventCenterStats, eventSubscriptionStats, actorEventSubscriberStats, ownerActorEventSubscriptionStats,
+                profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats, auditStats);
     }
 
     private RpcGatewayStats rpcStats() {
@@ -1117,6 +1133,82 @@ public final class RuntimeHealthProbe {
                 .map(ProfileRuntimeView::stats)
                 .reduce(ProfileRuntimeStats.empty(), ProfileRuntimeStats::plus);
         return ProfileRuntimeHealthStats.from(profileRuntimes.size(), stats);
+    }
+
+    private ChatRuntimeHealthStats chatRuntimeStats() {
+        if (chatRuntimes.isEmpty()) {
+            return ChatRuntimeHealthStats.empty();
+        }
+        ChatServiceStats stats = chatRuntimes.stream()
+                .map(ChatRuntimeView::stats)
+                .reduce(ChatServiceStats.empty(), ChatServiceStats::plus);
+        return ChatRuntimeHealthStats.from(chatRuntimes.size(), stats);
+    }
+
+    private PlayerOutboundDeliveryHealthStats playerOutboundDeliveryStats() {
+        if (playerOutboundDeliveries.isEmpty()) {
+            return PlayerOutboundDeliveryHealthStats.empty();
+        }
+        PlayerOutboundDeliveryStats stats = playerOutboundDeliveries.stream()
+                .map(PlayerOutboundDeliveryView::deliveryStats)
+                .reduce(PlayerOutboundDeliveryStats.empty(), RuntimeHealthProbe::sumPlayerOutboundDeliveryStats);
+        return PlayerOutboundDeliveryHealthStats.from(playerOutboundDeliveries.size(), stats);
+    }
+
+    private PlayerGatewayHealthStats playerGatewayStats() {
+        if (playerGateways.isEmpty()) {
+            return PlayerGatewayHealthStats.empty();
+        }
+        NettyPlayerGatewayStats stats = playerGateways.stream()
+                .map(PlayerGatewayView::gatewayStats)
+                .reduce(new NettyPlayerGatewayStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                        RuntimeHealthProbe::sumPlayerGatewayStats);
+        return PlayerGatewayHealthStats.from(playerGateways.size(), stats);
+    }
+
+    private static NettyPlayerGatewayStats sumPlayerGatewayStats(
+            NettyPlayerGatewayStats first,
+            NettyPlayerGatewayStats second
+    ) {
+        return new NettyPlayerGatewayStats(
+                first.acceptedLogins() + second.acceptedLogins(),
+                first.failedLogins() + second.failedLogins(),
+                first.authRejectedLogins() + second.authRejectedLogins(),
+                first.duplicateRejectedLogins() + second.duplicateRejectedLogins(),
+                first.kickedConnections() + second.kickedConnections(),
+                first.acceptedCommands() + second.acceptedCommands(),
+                first.rejectedCommands() + second.rejectedCommands(),
+                first.rateLimitedCommands() + second.rateLimitedCommands(),
+                first.acceptedHeartbeats() + second.acceptedHeartbeats(),
+                first.rejectedHeartbeats() + second.rejectedHeartbeats(),
+                first.rateLimitedHeartbeats() + second.rateLimitedHeartbeats(),
+                first.acceptedAcks() + second.acceptedAcks(),
+                first.rejectedAcks() + second.rejectedAcks(),
+                first.slowClientClosures() + second.slowClientClosures(),
+                first.invalidFrames() + second.invalidFrames(),
+                first.disconnectedSessions() + second.disconnectedSessions(),
+                first.idleTimeouts() + second.idleTimeouts()
+        );
+    }
+
+    private static PlayerOutboundDeliveryStats sumPlayerOutboundDeliveryStats(
+            PlayerOutboundDeliveryStats first,
+            PlayerOutboundDeliveryStats second
+    ) {
+        return new PlayerOutboundDeliveryStats(
+                first.activeConnections() + second.activeConnections(),
+                first.offlinePlayers() + second.offlinePlayers(),
+                first.pendingOfflineMessages() + second.pendingOfflineMessages(),
+                first.pendingAckPlayers() + second.pendingAckPlayers(),
+                first.pendingAckMessages() + second.pendingAckMessages(),
+                Math.max(first.oldestPendingAckAgeMillis(), second.oldestPendingAckAgeMillis()),
+                first.onlineDeliveries() + second.onlineDeliveries(),
+                first.offlineQueuedDeliveries() + second.offlineQueuedDeliveries(),
+                first.droppedDeliveries() + second.droppedDeliveries(),
+                first.coalescedDeliveries() + second.coalescedDeliveries(),
+                first.failedOnlineDeliveries() + second.failedOnlineDeliveries(),
+                first.ackedDeliveries() + second.ackedDeliveries()
+        );
     }
 
     private ShopRuntimeHealthStats shopRuntimeStats() {

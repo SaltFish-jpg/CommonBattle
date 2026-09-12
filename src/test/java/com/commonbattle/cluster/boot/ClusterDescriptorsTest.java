@@ -54,6 +54,13 @@ class ClusterDescriptorsTest {
         assertTrue(descriptor.supports(ChatOperations.JOIN_CHANNEL));
         assertTrue(descriptor.supports(ChatOperations.LEAVE_CHANNEL));
         assertTrue(descriptor.supports(ChatOperations.SEND_CHANNEL));
+        assertTrue(descriptor.supports(ChatOperations.JOIN_WORLD));
+        assertTrue(descriptor.supports(ChatOperations.LEAVE_WORLD));
+        assertTrue(descriptor.supports(ChatOperations.SEND_WORLD));
+        assertTrue(descriptor.supports(ChatOperations.JOIN_ALLIANCE));
+        assertTrue(descriptor.supports(ChatOperations.LEAVE_ALLIANCE));
+        assertTrue(descriptor.supports(ChatOperations.SEND_ALLIANCE));
+        assertTrue(descriptor.supports(ChatOperations.SEND_DIRECT));
         assertTrue(descriptor.supports(BusinessAgentRpcOperations.DISPATCH));
     }
 

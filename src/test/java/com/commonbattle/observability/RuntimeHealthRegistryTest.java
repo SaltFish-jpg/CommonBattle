@@ -38,11 +38,16 @@ import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
+import com.commonbattle.game.player.NettyPlayerGatewayStats;
+import com.commonbattle.game.player.PlayerGatewayView;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.profile.ProfileRuntime;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneRuntimeView;
+import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
+import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
+import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.shop.ShopCatalog;
 import com.commonbattle.game.shop.ShopService;
 import org.junit.jupiter.api.Test;
@@ -107,6 +112,13 @@ class RuntimeHealthRegistryTest {
                 ZoneOffset.UTC
         );
         PlayerBusinessResponseHub businessResponses = new PlayerBusinessResponseHub();
+        PlayerOutboundDeliveryHub outboundDeliveries = new PlayerOutboundDeliveryHub(
+                new InMemoryPlayerSessionRegistry(CLOCK),
+                CLOCK,
+                16,
+                PlayerDeliveryOverflowStrategy.DROP_OLDEST
+        );
+        PlayerGatewayView playerGateway = () -> new NettyPlayerGatewayStats(1, 0, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0);
         AsyncShopPurchaseView asyncShopPurchases = AsyncShopPurchaseStats::empty;
         InMemoryServiceRegistry serviceRegistry = new InMemoryServiceRegistry(CLOCK, 16);
         RemoteRegistryRecoveryView remoteRegistryRecovery = () -> RemoteRegistryRecoveryStats.empty();
@@ -119,7 +131,7 @@ class RuntimeHealthRegistryTest {
 
         registry.register(List.of(cache, configRecovery, actorRpc, lifecycles, migrations, migrationExecutor,
                 migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, asyncShopPurchases,
-                routedRpc, serviceRegistry, remoteRegistryRecovery, registrySubscriptions));
+                outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery, registrySubscriptions));
         registry.register(cache);
 
         try {
@@ -134,6 +146,8 @@ class RuntimeHealthRegistryTest {
             assertEquals(1, registry.sceneRuntimes().size());
             assertEquals(1, registry.shopRuntimes().size());
             assertEquals(1, registry.playerBusinessResponses().size());
+            assertEquals(1, registry.playerOutboundDeliveries().size());
+            assertEquals(1, registry.playerGateways().size());
             assertEquals(1, registry.asyncShopPurchases().size());
             assertEquals(1, registry.rpcRoutePolicies().size());
             assertEquals(1, registry.registryHistories().size());
