@@ -4,6 +4,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
 import java.util.Map;
@@ -24,6 +25,7 @@ public final class RuntimeHealthJsonFormatter {
         field(json, "timestamp", snapshot.timestamp().toString()).append(',');
         field(json, "status", snapshot.status().name()).append(',');
         object(json, "actorSystem", actorSystem(snapshot)).append(',');
+        object(json, "actorSchedules", actorSchedules(snapshot)).append(',');
         object(json, "rpc", rpc(snapshot)).append(',');
         object(json, "rpcResilience", rpcResilience(snapshot)).append(',');
         object(json, "rpcRoutes", rpcRoutes(snapshot)).append(',');
@@ -80,12 +82,29 @@ public final class RuntimeHealthJsonFormatter {
         field(json, "largestMailboxActorId", snapshot.actorSystem().largestMailboxActorId()).append(',');
         number(json, "peakQueuedTasks", snapshot.actorSystem().peakQueuedTasks()).append(',');
         number(json, "peakRunningMailboxes", snapshot.actorSystem().peakRunningMailboxes()).append(',');
+        number(json, "slowTasks", snapshot.actorSystem().slowTasks()).append(',');
+        number(json, "slowestTaskMillis", snapshot.actorSystem().slowestTaskMillis()).append(',');
+        field(json, "slowestTaskActorId", snapshot.actorSystem().slowestTaskActorId()).append(',');
+        field(json, "slowestTaskCategory", snapshot.actorSystem().slowestTaskCategory().name()).append(',');
         object(json, "queuedTasksByCategory", enumMap(snapshot.actorSystem().queuedTasksByCategory(),
                 ActorTaskCategory.values())).append(',');
         object(json, "rejectedTasksByCategory", enumMap(snapshot.actorSystem().rejectedTasksByCategory(),
                 ActorTaskCategory.values())).append(',');
         object(json, "droppedTasksByCategory", enumMap(snapshot.actorSystem().droppedTasksByCategory(),
                 ActorTaskCategory.values()));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder actorSchedules(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "registryCount", snapshot.actorSchedules().registryCount()).append(',');
+        number(json, "activeJobs", snapshot.actorSchedules().activeJobs()).append(',');
+        number(json, "scheduledJobs", snapshot.actorSchedules().scheduledJobs()).append(',');
+        number(json, "cancelledJobs", snapshot.actorSchedules().cancelledJobs()).append(',');
+        number(json, "deliveredTimerMessages", snapshot.actorSchedules().deliveredTimerMessages()).append(',');
+        number(json, "rejectedTimerMessages", snapshot.actorSchedules().rejectedTimerMessages());
         json.append('}');
         return json;
     }
@@ -594,7 +613,39 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "droppedDeliveries", snapshot.playerOutboundDeliveries().droppedDeliveries()).append(',');
         number(json, "coalescedDeliveries", snapshot.playerOutboundDeliveries().coalescedDeliveries()).append(',');
         number(json, "failedOnlineDeliveries", snapshot.playerOutboundDeliveries().failedOnlineDeliveries()).append(',');
-        number(json, "ackedDeliveries", snapshot.playerOutboundDeliveries().ackedDeliveries());
+        number(json, "ackedDeliveries", snapshot.playerOutboundDeliveries().ackedDeliveries()).append(',');
+        object(json, "topics", playerOutboundDeliveryTopics(snapshot));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerOutboundDeliveryTopics(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        boolean first = true;
+        for (Map.Entry<String, PlayerOutboundTopicDeliveryStats> entry : snapshot.playerOutboundDeliveries().topics().entrySet()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            object(json, entry.getKey(), playerOutboundDeliveryTopic(entry.getValue()));
+        }
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerOutboundDeliveryTopic(PlayerOutboundTopicDeliveryStats topic) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "pendingOfflineMessages", topic.pendingOfflineMessages()).append(',');
+        number(json, "pendingAckMessages", topic.pendingAckMessages()).append(',');
+        number(json, "oldestPendingAckAgeMillis", topic.oldestPendingAckAgeMillis()).append(',');
+        number(json, "onlineDeliveries", topic.onlineDeliveries()).append(',');
+        number(json, "offlineQueuedDeliveries", topic.offlineQueuedDeliveries()).append(',');
+        number(json, "droppedDeliveries", topic.droppedDeliveries()).append(',');
+        number(json, "coalescedDeliveries", topic.coalescedDeliveries()).append(',');
+        number(json, "failedOnlineDeliveries", topic.failedOnlineDeliveries()).append(',');
+        number(json, "ackedDeliveries", topic.ackedDeliveries());
         json.append('}');
         return json;
     }

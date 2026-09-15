@@ -35,6 +35,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     private final PlayerDomainEventListener domainEventListener;
     private final PlayerStateSaveListener saveListener;
     private final ShopStockAsyncClient shopStockAsyncClient;
+    private final PlayerPushPort pushes;
     private final AsyncShopPurchaseMetrics asyncShopPurchases = new AsyncShopPurchaseMetrics();
     private final Map<Long, PlayerGameAgentHandle> agents = new ConcurrentHashMap<>();
 
@@ -108,6 +109,24 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
             PlayerStateSaveListener saveListener,
             ShopStockAsyncClient shopStockAsyncClient
     ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, PlayerPushPort.NOOP);
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            PlayerPushPort pushes
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -121,6 +140,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         this.domainEventListener = domainEventListener;
         this.saveListener = Objects.requireNonNull(saveListener, "saveListener");
         this.shopStockAsyncClient = shopStockAsyncClient;
+        this.pushes = Objects.requireNonNull(pushes, "pushes");
     }
 
     public PlayerGameAgent getOrCreate(long playerId) {
@@ -268,7 +288,8 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 snapshot.eventRevision(),
                 domainEventListener,
                 shopStockAsyncClient,
-                asyncShopPurchases
+                asyncShopPurchases,
+                pushes
         );
         return new PlayerGameAgentHandle(agent, snapshot, recovery.created());
     }

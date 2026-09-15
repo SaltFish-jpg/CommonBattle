@@ -29,6 +29,7 @@ public record ActivityProgressCommand(String activityId, int delta) implements P
                 activityId,
                 delta
         );
+        execution.pushActivitySnapshot();
         return PlayerBusinessAck.OK;
     }
 }

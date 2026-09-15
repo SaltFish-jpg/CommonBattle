@@ -3,6 +3,8 @@ package com.commonbattle.game.session;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.game.chat.ChatDelivery;
 import com.commonbattle.game.chat.ChatPayloadCodecs;
+import com.commonbattle.game.player.PlayerPushPayloadCodecs;
+import com.commonbattle.game.player.PlayerPushPayloads;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -106,5 +109,41 @@ class NettyPlayerOutboundWriterTest {
         assertEquals(source.sequence(), decoded.sequence());
         assertEquals(source.createdAt(), decoded.createdAt());
         assertEquals(delivery, decoded.payload());
+    }
+
+    @Test
+    void playerOutboundHubWritesBusinessPushPayloadThroughNettyWriter() {
+        PayloadCodecRegistry registry = PlayerPushPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoPlayerClientCodec codec = new ProtoPlayerClientCodec(registry);
+        EmbeddedChannel serverSide = new EmbeddedChannel(
+                new LengthFieldPrepender(4),
+                new NettyPlayerClientFrameEncoder(codec)
+        );
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        PlayerOutboundDeliveryHub hub = new PlayerOutboundDeliveryHub(
+                sessions,
+                CLOCK,
+                8,
+                PlayerDeliveryOverflowStrategy.DROP_OLDEST
+        );
+        PlayerSession session = sessions.bind(10001L, "client-1");
+        assertTrue(hub.connect(session, new NettyPlayerOutboundWriter(serverSide)));
+
+        PlayerOutboundDeliveryResult result = hub.deliver(new PlayerOutboundEnvelope(
+                Set.of(10001L),
+                PlayerOutboundTopicPolicies.BAG_SNAPSHOT,
+                PlayerPushPayloads.bag(new com.commonbattle.game.bag.BagSnapshot(Map.of("gold", 100)))
+        ));
+
+        assertEquals(new PlayerOutboundDeliveryResult(1, 0, 0, 0), result);
+        ByteBuf lengthHeader = serverSide.readOutbound();
+        ByteBuf frameBodyBuffer = serverSide.readOutbound();
+        int frameLength = lengthHeader.readInt();
+        byte[] frameBody = new byte[frameLength];
+        frameBodyBuffer.readBytes(frameBody);
+        PlayerClientEnvelope envelope = codec.decode(frameBody);
+        PlayerPushPayloads.BagSnapshotPayload payload =
+                assertInstanceOf(PlayerPushPayloads.BagSnapshotPayload.class, envelope.payload());
+        assertEquals(100, payload.itemCounts.get("gold"));
     }
 }

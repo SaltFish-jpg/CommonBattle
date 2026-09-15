@@ -22,10 +22,13 @@ public record ClaimTaskCommand(String taskId) implements PlayerBusinessCommand<T
 
     @Override
     public TaskClaimResult execute(PlayerGameExecution execution) {
-        return execution.runtime().requireTaskService().claim(
+        TaskClaimResult result = execution.runtime().requireTaskService().claim(
                 execution.profile().tasks(),
                 execution.profile().bag(),
                 taskId
         );
+        execution.pushTaskSnapshot();
+        execution.pushBagSnapshot();
+        return result;
     }
 }

@@ -6,20 +6,12 @@ import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
-import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
-import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
-import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.actor.ActorSystem;
-import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
-import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
-import com.commonbattle.game.chat.ChatPayloadCodecs;
-import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
-import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -40,13 +32,7 @@ public final class ProxyServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
-                            AgentMigrationPayloadCodecs.registerTo(
-                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                            )
-                    )))
-            );
+            PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs

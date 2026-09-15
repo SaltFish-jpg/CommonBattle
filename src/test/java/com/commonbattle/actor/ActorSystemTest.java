@@ -284,6 +284,34 @@ class ActorSystemTest {
         assertEquals(0, drained.queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));
     }
 
+    @Test
+    void statsTrackSlowestTaskAndSlowTaskCount() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(
+                executor,
+                ActorSystemConfig.defaults(1).withSlowTaskThreshold(java.time.Duration.ofMillis(1)),
+                ActorFailureHandler.ignore(),
+                DeadLetterSink.ignore()
+        );
+        ActorRef player = system.actor("player-1");
+
+        system.send(player, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        executor.runNext();
+
+        ActorSystemStats stats = system.stats();
+        assertEquals(1, stats.completedTasks());
+        assertEquals(1, stats.slowTasks());
+        assertTrue(stats.slowestTaskMillis() >= 1);
+        assertEquals("player-1", stats.slowestTaskActorId());
+        assertEquals(ActorTaskCategory.PLAYER_COMMAND, stats.slowestTaskCategory());
+    }
+
     private static final class RecordingExecutor implements Executor {
         private final List<Runnable> commands = new ArrayList<>();
 

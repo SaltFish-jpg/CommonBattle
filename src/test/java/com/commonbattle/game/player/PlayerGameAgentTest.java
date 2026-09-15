@@ -1,6 +1,7 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
@@ -29,6 +30,8 @@ import com.commonbattle.game.shop.ShopItemDefinition;
 import com.commonbattle.game.shop.ShopPurchaseResult;
 import com.commonbattle.game.shop.ShopPurchaseStatus;
 import com.commonbattle.game.shop.ShopService;
+import com.commonbattle.game.session.PlayerOutboundDeliveryResult;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -37,10 +40,13 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -60,6 +66,63 @@ class PlayerGameAgentTest {
 
         assertEquals(100, goldAfterClaim.get());
         assertEquals(100, agent.profile().bag().count("gold"));
+    }
+
+    @Test
+    void loginActivityPushesFreshSnapshotsAfterMailboxMutation() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, CLOCK, Instant.EPOCH, pushes);
+
+        agent.onLogin("daily-login", ignored -> {
+        });
+
+        assertEquals(List.of(), pushes.messages);
+        executor.runNext();
+        assertEquals(2, pushes.messages.size());
+        assertEquals(PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS, pushes.messages.get(0).topic());
+        assertEquals(PlayerOutboundTopicPolicies.BAG_SNAPSHOT, pushes.messages.get(1).topic());
+        PlayerPushPayloads.ActivityProgressPayload activities = assertInstanceOf(
+                PlayerPushPayloads.ActivityProgressPayload.class,
+                pushes.messages.get(0).payload()
+        );
+        PlayerPushPayloads.BagSnapshotPayload bag = assertInstanceOf(
+                PlayerPushPayloads.BagSnapshotPayload.class,
+                pushes.messages.get(1).payload()
+        );
+        assertEquals(1, activities.progress.get("daily-login").value);
+        assertEquals(100, bag.itemCounts.get("gold"));
+        assertEquals(2, bag.itemCounts.get("exp_potion"));
+    }
+
+    @Test
+    void scheduledActivityRefreshPushesSnapshotAfterMailboxExecution() throws InterruptedException {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(actors, executor, CLOCK, Instant.EPOCH, pushes);
+
+        agent.addActivityProgress("kill-3", 2);
+        executor.runNext();
+        pushes.messages.clear();
+
+        try (ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            agent.scheduleActivitySnapshotRefresh(schedules, Duration.ofMillis(1), Duration.ofMillis(100));
+
+            assertTrue(awaitQueued(executor, 1));
+            assertEquals(List.of(), pushes.messages);
+
+            executor.runNext();
+
+            assertEquals(1, pushes.messages.size());
+            assertEquals(PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS, pushes.messages.getFirst().topic());
+            PlayerPushPayloads.ActivityProgressPayload activities = assertInstanceOf(
+                    PlayerPushPayloads.ActivityProgressPayload.class,
+                    pushes.messages.getFirst().payload()
+            );
+            assertEquals(2, activities.progress.get("kill-3").value);
+            assertEquals(1, schedules.stats().deliveredTimerMessages());
+        }
     }
 
     @Test
@@ -214,7 +277,26 @@ class PlayerGameAgentTest {
     }
 
     private static PlayerGameAgent createAgent(Executor executor, Clock clock, Instant serverOpenTime) {
+        return createAgent(executor, clock, serverOpenTime, PlayerPushPort.NOOP);
+    }
+
+    private static PlayerGameAgent createAgent(
+            Executor executor,
+            Clock clock,
+            Instant serverOpenTime,
+            PlayerPushPort pushes
+    ) {
         ActorSystem actors = new ActorSystem(executor, 64);
+        return createAgent(actors, executor, clock, serverOpenTime, pushes);
+    }
+
+    private static PlayerGameAgent createAgent(
+            ActorSystem actors,
+            Executor executor,
+            Clock clock,
+            Instant serverOpenTime,
+            PlayerPushPort pushes
+    ) {
         ActorRef self = actors.actor("player-10001");
         ItemCatalog items = new ItemCatalog();
         items.register(new ItemDefinition("gold", "currency", 999999));
@@ -251,7 +333,8 @@ class PlayerGameAgentTest {
                 activityService,
                 growthService,
                 clock,
-                serverOpenTime
+                serverOpenTime,
+                pushes
         );
     }
 
@@ -356,12 +439,40 @@ class PlayerGameAgentTest {
         private final List<Runnable> commands = new ArrayList<>();
 
         @Override
-        public void execute(Runnable command) {
+        public synchronized void execute(Runnable command) {
             commands.add(command);
         }
 
-        void runNext() {
+        synchronized int queued() {
+            return commands.size();
+        }
+
+        synchronized void runNext() {
             commands.removeFirst().run();
         }
+    }
+
+    private static final class RecordingPushPort implements PlayerPushPort {
+        private final List<PushedMessage> messages = new ArrayList<>();
+
+        @Override
+        public PlayerOutboundDeliveryResult push(Set<Long> recipients, String topic, Object payload) {
+            messages.add(new PushedMessage(Set.copyOf(recipients), topic, payload));
+            return PlayerOutboundDeliveryResult.empty();
+        }
+    }
+
+    private record PushedMessage(Set<Long> recipients, String topic, Object payload) {
+    }
+
+    private static boolean awaitQueued(RecordingExecutor executor, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (System.nanoTime() < deadline) {
+            if (executor.queued() >= expected) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        return executor.queued() >= expected;
     }
 }

@@ -14,7 +14,8 @@ public record ActorSystemConfig(
         int mailboxCapacity,
         ActorOverflowStrategy overflowStrategy,
         Duration shutdownTimeout,
-        Map<ActorTaskCategory, Integer> categoryCapacities
+        Map<ActorTaskCategory, Integer> categoryCapacities,
+        Duration slowTaskThreshold
 ) {
     public static final int DEFAULT_BATCH_SIZE = 64;
     public static final int DEFAULT_MAILBOX_CAPACITY = 4096;
@@ -26,7 +27,18 @@ public record ActorSystemConfig(
             ActorOverflowStrategy overflowStrategy,
             Duration shutdownTimeout
     ) {
-        this(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, Map.of());
+        this(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, Map.of(), Duration.ZERO);
+    }
+
+    public ActorSystemConfig(
+            int workerThreads,
+            int batchSize,
+            int mailboxCapacity,
+            ActorOverflowStrategy overflowStrategy,
+            Duration shutdownTimeout,
+            Map<ActorTaskCategory, Integer> categoryCapacities
+    ) {
+        this(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, categoryCapacities, Duration.ZERO);
     }
 
     public ActorSystemConfig {
@@ -47,6 +59,9 @@ public record ActorSystemConfig(
         }
         if (categoryCapacities == null) {
             throw new IllegalArgumentException("categoryCapacities must not be null");
+        }
+        if (slowTaskThreshold == null || slowTaskThreshold.isNegative()) {
+            throw new IllegalArgumentException("slowTaskThreshold must not be negative");
         }
         EnumMap<ActorTaskCategory, Integer> normalized = new EnumMap<>(ActorTaskCategory.class);
         for (Map.Entry<ActorTaskCategory, Integer> entry : categoryCapacities.entrySet()) {
@@ -73,17 +88,17 @@ public record ActorSystemConfig(
 
     public ActorSystemConfig withBatchSize(int value) {
         return new ActorSystemConfig(workerThreads, value, mailboxCapacity, overflowStrategy, shutdownTimeout,
-                categoryCapacities);
+                categoryCapacities, slowTaskThreshold);
     }
 
     public ActorSystemConfig withMailboxCapacity(int value) {
         return new ActorSystemConfig(workerThreads, batchSize, value, overflowStrategy, shutdownTimeout,
-                categoryCapacities);
+                categoryCapacities, slowTaskThreshold);
     }
 
     public ActorSystemConfig withOverflowStrategy(ActorOverflowStrategy value) {
         return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, value, shutdownTimeout,
-                categoryCapacities);
+                categoryCapacities, slowTaskThreshold);
     }
 
     public ActorSystemConfig withCategoryCapacity(ActorTaskCategory category, int capacity) {
@@ -93,7 +108,13 @@ public record ActorSystemConfig(
         EnumMap<ActorTaskCategory, Integer> next = new EnumMap<>(ActorTaskCategory.class);
         next.putAll(categoryCapacities);
         next.put(category, capacity);
-        return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, next);
+        return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout, next,
+                slowTaskThreshold);
+    }
+
+    public ActorSystemConfig withSlowTaskThreshold(Duration value) {
+        return new ActorSystemConfig(workerThreads, batchSize, mailboxCapacity, overflowStrategy, shutdownTimeout,
+                categoryCapacities, value);
     }
 
     int capacityFor(ActorTaskCategory category) {

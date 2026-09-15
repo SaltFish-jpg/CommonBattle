@@ -3,7 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.game.session.PlayerClientCommandEnvelope;
 import com.commonbattle.game.session.PlayerClientCommandResponse;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
-import com.commonbattle.game.session.PlayerOutboundEnvelope;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 
 import java.util.Objects;
 import java.util.Set;
@@ -17,10 +17,20 @@ public final class PlayerClientCommandIngress implements PlayerClientCommandAcce
 
     private final PlayerBusinessCommandGateway commands;
     private final PlayerOutboundDeliveryHub outbound;
+    private final PlayerOutboundTopicPolicies topicPolicies;
 
     public PlayerClientCommandIngress(PlayerBusinessCommandGateway commands, PlayerOutboundDeliveryHub outbound) {
+        this(commands, outbound, PlayerOutboundTopicPolicies.gameDefaults());
+    }
+
+    public PlayerClientCommandIngress(
+            PlayerBusinessCommandGateway commands,
+            PlayerOutboundDeliveryHub outbound,
+            PlayerOutboundTopicPolicies topicPolicies
+    ) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.outbound = Objects.requireNonNull(outbound, "outbound");
+        this.topicPolicies = Objects.requireNonNull(topicPolicies, "topicPolicies");
     }
 
     public void accept(PlayerClientCommandEnvelope envelope) {
@@ -33,7 +43,7 @@ public final class PlayerClientCommandIngress implements PlayerClientCommandAcce
 
             @Override
             public void completed(PlayerBusinessResponse response, boolean replayed) {
-                outbound.deliver(new PlayerOutboundEnvelope(
+                outbound.deliver(topicPolicies.envelope(
                         Set.of(envelope.playerId()),
                         RESPONSE_TOPIC,
                         PlayerClientCommandResponse.from(response, replayed)

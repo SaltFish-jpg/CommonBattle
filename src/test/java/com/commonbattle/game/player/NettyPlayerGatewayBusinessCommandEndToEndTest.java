@@ -14,6 +14,7 @@ import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.boot.BootPayloadCodecs;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.config.GameConfigPublishStatus;
@@ -40,6 +41,7 @@ import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
 import com.commonbattle.game.session.PlayerLoginService;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.session.PlayerOutboundEnvelope;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.session.ProtoPlayerClientCodec;
 import com.commonbattle.game.session.ProtoPlayerClientInboundCodec;
 import io.netty.bootstrap.Bootstrap;
@@ -117,6 +119,56 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
                 assertEquals(List.of("test-player-actor"), fixture.businessThreads().get());
                 assertEquals(1, fixture.handled.get());
                 assertEventually(() -> server.stats().acceptedCommands() == 1);
+            }
+        }
+    }
+
+    @Test
+    void realBusinessCommandPushesFreshSnapshotAndResponseOverTcp() throws Exception {
+        int port = freePort();
+        Fixture fixture = Fixture.createBusinessPush();
+        try (fixture;
+             NettyPlayerGatewayServer server = new NettyPlayerGatewayServer(
+                     new ServiceEndpoint("127.0.0.1", port),
+                     fixture.connections,
+                     fixture.ingress,
+                     fixture.codecs,
+                     CLOCK
+             )) {
+            server.start();
+            try (TestClient client = TestClient.connect(port, fixture.codecs)) {
+                client.send(PlayerClientInboundEnvelope.login(new PlayerClientLoginRequest(10001L, "session-1")));
+                assertPayload(client.nextEnvelope(), PlayerClientLoginResponse.class);
+
+                client.send(PlayerClientInboundEnvelope.command(new PlayerClientCommandEnvelope(
+                        10001L,
+                        "session-1",
+                        1,
+                        1,
+                        PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                        new ActivityProgressCommand("battle-win-1", 1)
+                )));
+
+                List<PlayerClientEnvelope> frames = List.of(client.nextEnvelope(), client.nextEnvelope());
+                PlayerClientCommandResponse response = frames.stream()
+                        .map(PlayerClientEnvelope::payload)
+                        .filter(PlayerClientCommandResponse.class::isInstance)
+                        .map(PlayerClientCommandResponse.class::cast)
+                        .findFirst()
+                        .orElseThrow();
+                PlayerPushPayloads.ActivityProgressPayload progress = frames.stream()
+                        .filter(envelope -> PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS.equals(envelope.topic()))
+                        .map(PlayerClientEnvelope::payload)
+                        .filter(PlayerPushPayloads.ActivityProgressPayload.class::isInstance)
+                        .map(PlayerPushPayloads.ActivityProgressPayload.class::cast)
+                        .findFirst()
+                        .orElseThrow();
+
+                assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status());
+                assertEquals(PlayerBusinessAck.OK, response.payload());
+                assertEquals(1, progress.progress.get("battle-win-1").value);
+                assertEquals(false, progress.progress.get("battle-win-1").claimed);
+                assertEquals(2, fixture.outbound.pendingAck(10001L).size());
             }
         }
     }
@@ -446,6 +498,73 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
                     outbound
             );
             return new Fixture(actorExecutor, connections, ingress, outbound, codecs, handled, businessThreads);
+        }
+
+        private static Fixture createBusinessPush() {
+            ExecutorService actorExecutor = Executors.newSingleThreadExecutor(runnable ->
+                    new Thread(runnable, "test-player-actor"));
+            ActorSystem actors = new ActorSystem(actorExecutor, 64);
+            InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+            AgentLifecycleManager lifecycles = new AgentLifecycleManager(
+                    ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                    actors,
+                    directory,
+                    CLOCK
+            );
+            InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+            PlayerOutboundDeliveryHub outbound = new PlayerOutboundDeliveryHub(
+                    sessions,
+                    CLOCK,
+                    8,
+                    PlayerDeliveryOverflowStrategy.DROP_OLDEST
+            );
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+            InMemoryGameConfigRegistry configs = new InMemoryGameConfigRegistry(new GameConfigValidator(), CLOCK);
+            assertEquals(GameConfigPublishStatus.PUBLISHED,
+                    configs.publish(ExampleGameConfigs.basic(7, CLOCK.instant())).status());
+            PlayerGameAgentManager agents = new PlayerGameAgentManager(
+                    actors,
+                    messages,
+                    new InMemoryPlayerStateRepository(),
+                    configs,
+                    lifecycles,
+                    CLOCK,
+                    Instant.parse("2026-08-01T00:00:00Z"),
+                    ignored -> {
+                    },
+                    null,
+                    PlayerStateSaveListener.ignore(),
+                    null,
+                    new OutboundPlayerPushPort(outbound)
+            );
+            PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
+                    sessions,
+                    new PlayerCommandSequencer(),
+                    new AdmissionControlledAgentRouter(
+                            (target, operation) -> AdmissionDecision.accept(),
+                            new LifecycleAwareAgentRouter(lifecycles, messages)
+                    )
+            );
+            PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
+            PlayerBusinessCommandBinder.registerExamples(
+                    dispatcher,
+                    new PlayerBusinessCommandHandler(agents::getOrCreate, responses)
+            );
+            PlayerBusinessCommandGateway commandGateway = new PlayerBusinessCommandGateway(
+                    dispatcher,
+                    new NoopRpcGateway(),
+                    responses,
+                    Duration.ofSeconds(1),
+                    new DirectScheduler()
+            );
+            PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(commandGateway, outbound);
+            PayloadCodecRegistry codecs = BootPayloadCodecs.gameServer();
+            PlayerClientConnectionService connections = new PlayerClientConnectionService(
+                    new PlayerLoginService(agents, sessions),
+                    outbound
+            );
+            return new Fixture(actorExecutor, connections, ingress, outbound, codecs,
+                    new AtomicInteger(), new AtomicReference<>(List.of()));
         }
 
         @Override

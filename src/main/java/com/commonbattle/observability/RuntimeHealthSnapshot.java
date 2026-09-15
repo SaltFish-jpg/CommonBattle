@@ -19,6 +19,7 @@ public record RuntimeHealthSnapshot(
         Instant timestamp,
         RuntimeHealthStatus status,
         ActorSystemStats actorSystem,
+        ActorScheduleHealthStats actorSchedules,
         RpcGatewayStats rpc,
         RpcResilienceHealthStats rpcResilience,
         RpcRouteHealthStats rpcRoutes,

@@ -18,6 +18,10 @@ public record ActorSystemStats(
         String largestMailboxActorId,
         int peakQueuedTasks,
         int peakRunningMailboxes,
+        long slowTasks,
+        long slowestTaskMillis,
+        String slowestTaskActorId,
+        ActorTaskCategory slowestTaskCategory,
         Map<ActorTaskCategory, Integer> queuedTasksByCategory,
         Map<ActorTaskCategory, Long> rejectedTasksByCategory,
         Map<ActorTaskCategory, Long> droppedTasksByCategory

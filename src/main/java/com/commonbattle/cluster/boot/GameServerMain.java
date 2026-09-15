@@ -1,24 +1,19 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
-import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
-import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
-import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseRenewer;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
-import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
-import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.scene.SceneEnterTargetSelector;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
@@ -30,16 +25,12 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEventOutbox;
-import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.profile.InMemoryProfileSnapshotRepository;
 import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
 import com.commonbattle.game.profile.ProfileSnapshotRepository;
 import com.commonbattle.game.profile.ReliableProfileEventPublisher;
-import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.player.NettyPlayerGatewayServer;
 import com.commonbattle.game.player.PlayerClientAuthenticator;
-import com.commonbattle.game.shop.ShopStockPayloadCodecs;
-import com.commonbattle.game.session.PlayerClientPayloadCodecs;
 import com.commonbattle.game.social.AllianceSnapshotEndpoint;
 import com.commonbattle.game.social.AllianceSnapshotRepository;
 import com.commonbattle.game.social.FriendSnapshotEndpoint;
@@ -67,13 +58,7 @@ public final class GameServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    PlayerClientPayloadCodecs.registerTo(ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
-                            AgentMigrationPayloadCodecs.registerTo(
-                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                            )
-                    ))))
-            );
+            PayloadCodecRegistry codecs = BootPayloadCodecs.gameServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs

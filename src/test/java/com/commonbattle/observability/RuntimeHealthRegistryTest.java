@@ -1,5 +1,7 @@
 package com.commonbattle.observability;
 
+import com.commonbattle.actor.ActorScheduleStats;
+import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
@@ -73,6 +75,7 @@ class RuntimeHealthRegistryTest {
         });
         ActorSystem actors = new ActorSystem(Runnable::run, 64);
         ActorRpcClient actorRpc = new ActorRpcClient(actors, actors.actor("player-1"), new NoopRpcGateway());
+        ActorScheduleView actorSchedule = () -> new ActorScheduleStats(1, 2, 0, 2, 0);
         AgentLifecycleManager lifecycles = new AgentLifecycleManager(descriptor().id(), actors,
                 new InMemoryAgentDirectory(), CLOCK);
         AgentMigrationExecutor migrationExecutor = new AgentMigrationExecutor("migration-test", 1, 16);
@@ -131,13 +134,15 @@ class RuntimeHealthRegistryTest {
 
         registry.register(List.of(cache, configRecovery, actorRpc, lifecycles, migrations, migrationExecutor,
                 migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, asyncShopPurchases,
-                outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery, registrySubscriptions));
+                outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery,
+                registrySubscriptions, actorSchedule));
         registry.register(cache);
 
         try {
             assertEquals(1, registry.configCaches().size());
             assertEquals(1, registry.configRecoveries().size());
             assertEquals(1, registry.actorRpcClients().size());
+            assertEquals(1, registry.actorSchedules().size());
             assertEquals(1, registry.lifecycleManagers().size());
             assertEquals(1, registry.migrationCoordinators().size());
             assertEquals(1, registry.migrationExecutors().size());

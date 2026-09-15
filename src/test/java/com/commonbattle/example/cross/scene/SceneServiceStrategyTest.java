@@ -1,5 +1,6 @@
 package com.commonbattle.example.cross.scene;
 
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
@@ -25,9 +26,15 @@ import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -162,6 +169,97 @@ class SceneServiceStrategyTest {
             assertEquals(true, service.leave(10001L, "world-1"));
 
             assertEquals(new SceneRuntimeStats(1, 2, 8, 1), service.stats());
+        }
+    }
+
+    @Test
+    void largeSceneShardTicksRunAfterShardMailboxIsDrained() throws InterruptedException {
+        RecordingExecutor executor = new RecordingExecutor();
+        Clock clock = Clock.fixed(Instant.parse("2026-09-14T00:00:00Z"), ZoneOffset.UTC);
+        try (ActorSystem actors = new ActorSystem(executor, 64);
+             ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    2,
+                    clock
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(10002L, "world-1", 0, 0);
+            service.enter(10003L, "world-1", 1, 0);
+            List<SceneShardTickContext> ticks = new ArrayList<>();
+
+            service.scheduleShardTicks(schedules, Duration.ofMillis(1), Duration.ofDays(1), ticks::add);
+
+            awaitQueued(executor, 2);
+            assertEquals(List.of(), ticks);
+
+            executor.runAll();
+
+            List<SceneShardTickContext> ordered = ticks.stream()
+                    .sorted(Comparator.comparingInt(SceneShardTickContext::shardIndex))
+                    .toList();
+            assertEquals(2, ordered.size());
+            assertEquals(List.of(10001L, 10002L), ordered.get(0).players().stream().sorted().toList());
+            assertEquals(List.of(10003L), ordered.get(1).players().stream().sorted().toList());
+            assertEquals(2, service.tickStats().completedTicks());
+            assertEquals(2, schedules.stats().deliveredTimerMessages());
+        }
+    }
+
+    @Test
+    void largeSceneShardTickSchedulesAreReplacedByBusinessKey() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64);
+             ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    2
+            );
+
+            service.scheduleShardTicks(schedules, Duration.ofHours(1), Duration.ofHours(1), ignored -> {
+            });
+            service.scheduleShardTicks(schedules, Duration.ofHours(2), Duration.ofHours(1), ignored -> {
+            });
+
+            assertEquals(4, service.tickStats().scheduledTickJobs());
+            assertEquals(2, schedules.stats().activeJobs());
+            assertEquals(4, schedules.stats().scheduledJobs());
+            assertEquals(2, schedules.stats().cancelledJobs());
+        }
+    }
+
+    @Test
+    void largeSceneShardTickFailuresAreCountedInsideActorBoundary() throws InterruptedException {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64);
+             ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    2
+            );
+
+            service.scheduleShardTicks(schedules, Duration.ofMillis(1), Duration.ofDays(1), ignored -> {
+                throw new IllegalStateException("tick failed");
+            });
+
+            awaitQueued(executor, 2);
+            executor.runAll();
+
+            assertEquals(0, service.tickStats().completedTicks());
+            assertEquals(2, service.tickStats().failedTicks());
+            assertEquals(2, actors.stats().failedTasks());
         }
     }
 
@@ -386,12 +484,22 @@ class SceneServiceStrategyTest {
         private final List<Runnable> commands = new ArrayList<>();
 
         @Override
-        public void execute(Runnable command) {
+        public synchronized void execute(Runnable command) {
             commands.add(command);
         }
 
-        void runNext() {
+        synchronized int queued() {
+            return commands.size();
+        }
+
+        synchronized void runNext() {
             commands.removeFirst().run();
+        }
+
+        void runAll() {
+            while (queued() > 0) {
+                runNext();
+            }
         }
     }
 
@@ -429,5 +537,13 @@ class SceneServiceStrategyTest {
         public void unwatchOwner(String ownerKey) {
             unwatched.add(ownerKey);
         }
+    }
+
+    private static void awaitQueued(RecordingExecutor executor, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (System.nanoTime() < deadline && executor.queued() < expected) {
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        assertEquals(expected, executor.queued());
     }
 }

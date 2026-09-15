@@ -41,6 +41,10 @@ public record BuyShopItemCommand(String orderId, String sku, int quantity) imple
         );
         if (result.success()) {
             execution.publish(ShopItemPurchasedEvent.from(execution.profile().playerId(), result));
+            if (!result.replayed()) {
+                execution.pushShopSnapshot();
+                execution.pushBagSnapshot();
+            }
         }
         return result;
     }

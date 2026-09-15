@@ -64,6 +64,8 @@ class PlayerOutboundDeliveryHubTest {
         assertEquals(2, acknowledged);
         assertEquals(0, hub.pendingAck(10001L).size());
         assertEquals(2, hub.deliveryStats().ackedDeliveries());
+        assertEquals(2, hub.deliveryStats().topics().get("mail.notice").ackedDeliveries());
+        assertEquals(0, hub.deliveryStats().topics().get("mail.notice").pendingAckMessages());
     }
 
     @Test
@@ -114,6 +116,8 @@ class PlayerOutboundDeliveryHubTest {
 
         assertEquals(List.of("two"), hub.pendingAck(10001L).stream().map(PlayerOutboundMessage::payload).toList());
         assertEquals(1, hub.deliveryStats().droppedDeliveries());
+        assertEquals(1, hub.deliveryStats().topics().get("system.notice").droppedDeliveries());
+        assertEquals(1, hub.deliveryStats().topics().get("system.notice").pendingAckMessages());
     }
 
     @Test
@@ -139,6 +143,8 @@ class PlayerOutboundDeliveryHubTest {
         assertEquals(new PlayerOutboundDeliveryResult(1, 0, 0, 0), result);
         assertEquals(List.of("miss"), written.stream().map(PlayerOutboundMessage::payload).toList());
         assertEquals(0, hub.pendingAck(10001L).size());
+        assertEquals(1, hub.deliveryStats().topics().get("float.text").onlineDeliveries());
+        assertEquals(0, hub.deliveryStats().topics().get("float.text").pendingAckMessages());
     }
 
     @Test
@@ -158,6 +164,7 @@ class PlayerOutboundDeliveryHubTest {
         assertEquals(new PlayerOutboundDeliveryResult(0, 0, 1, 0), result);
         assertEquals(0, hub.pendingOffline(10001L).size());
         assertEquals(1, hub.deliveryStats().droppedDeliveries());
+        assertEquals(1, hub.deliveryStats().topics().get("float.text").droppedDeliveries());
     }
 
     @Test
@@ -177,6 +184,10 @@ class PlayerOutboundDeliveryHubTest {
                 .map(PlayerOutboundMessage::payload)
                 .toList());
         assertEquals(1, hub.deliveryStats().coalescedDeliveries());
+        PlayerOutboundTopicDeliveryStats topic = hub.deliveryStats().topics().get("bag.snapshot");
+        assertEquals(2, topic.offlineQueuedDeliveries());
+        assertEquals(1, topic.coalescedDeliveries());
+        assertEquals(1, topic.pendingOfflineMessages());
     }
 
     @Test
@@ -245,6 +256,10 @@ class PlayerOutboundDeliveryHubTest {
                 secondWriter.stream().map(PlayerOutboundMessage::payload).toList());
         assertEquals(2, hub.pendingAck(10001L).size());
         assertEquals(0, hub.pendingOffline(10001L).size());
+        PlayerOutboundTopicDeliveryStats topic = hub.deliveryStats().topics().get("system.notice");
+        assertEquals(3, topic.onlineDeliveries());
+        assertEquals(1, topic.offlineQueuedDeliveries());
+        assertEquals(2, topic.pendingAckMessages());
     }
 
     @Test

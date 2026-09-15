@@ -32,6 +32,8 @@ public record UseExpItemsCommand(int count) implements PlayerBusinessCommand<Gro
                     result.afterLevel()
             ));
         }
+        execution.pushGrowthSnapshot();
+        execution.pushBagSnapshot();
         return result;
     }
 }

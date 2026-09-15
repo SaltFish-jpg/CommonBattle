@@ -4,27 +4,22 @@ import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
-import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
-import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
-import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseRenewer;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.event.ClusterVersionedEventBus;
 import com.commonbattle.cluster.event.EventReplayRepairer;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
-import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
-import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.EnterSceneResult;
 import com.commonbattle.example.cross.LeaveSceneRequest;
@@ -47,7 +42,6 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.OwnerActorEventSubscription;
-import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileEventReplayRepairer;
@@ -57,13 +51,11 @@ import com.commonbattle.game.profile.ProfileRuntime;
 import com.commonbattle.game.profile.ProfileSnapshotReader;
 import com.commonbattle.game.profile.RemoteProfileSnapshotReader;
 import com.commonbattle.game.profile.SceneProfileSnapshotRepairer;
-import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
 import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
 import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
-import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 import com.commonbattle.game.snapshot.EventReplaySnapshotRepairer;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import com.commonbattle.game.social.AllianceOwnerKeyParser;
@@ -101,13 +93,7 @@ public final class SceneServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
-                            AgentMigrationPayloadCodecs.registerTo(
-                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                            )
-                    )))
-            );
+            PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs

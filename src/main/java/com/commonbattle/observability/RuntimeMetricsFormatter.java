@@ -4,6 +4,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
 import java.util.Map;
@@ -22,6 +23,7 @@ public final class RuntimeMetricsFormatter {
         StringBuilder metrics = new StringBuilder(2048);
         status(metrics, snapshot);
         actorSystem(metrics, snapshot);
+        actorSchedules(metrics, snapshot);
         rpc(metrics, snapshot);
         rpcResilience(metrics, snapshot);
         rpcRoutes(metrics, snapshot);
@@ -82,12 +84,25 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_actor_largest_mailbox_queued_tasks", snapshot.actorSystem().largestMailboxQueuedTasks());
         gauge(metrics, "commonbattle_actor_peak_queued_tasks", snapshot.actorSystem().peakQueuedTasks());
         gauge(metrics, "commonbattle_actor_peak_running_mailboxes", snapshot.actorSystem().peakRunningMailboxes());
+        gauge(metrics, "commonbattle_actor_slow_tasks_total", snapshot.actorSystem().slowTasks());
+        gauge(metrics, "commonbattle_actor_slowest_task_millis", snapshot.actorSystem().slowestTaskMillis());
         labeledEnum(metrics, "commonbattle_actor_queued_tasks_by_category", "category",
                 snapshot.actorSystem().queuedTasksByCategory(), ActorTaskCategory.values());
         labeledEnum(metrics, "commonbattle_actor_rejected_tasks_by_category_total", "category",
                 snapshot.actorSystem().rejectedTasksByCategory(), ActorTaskCategory.values());
         labeledEnum(metrics, "commonbattle_actor_dropped_tasks_by_category_total", "category",
                 snapshot.actorSystem().droppedTasksByCategory(), ActorTaskCategory.values());
+    }
+
+    private static void actorSchedules(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_actor_schedule_registries", snapshot.actorSchedules().registryCount());
+        gauge(metrics, "commonbattle_actor_schedule_active_jobs", snapshot.actorSchedules().activeJobs());
+        gauge(metrics, "commonbattle_actor_schedule_scheduled_jobs_total", snapshot.actorSchedules().scheduledJobs());
+        gauge(metrics, "commonbattle_actor_schedule_cancelled_jobs_total", snapshot.actorSchedules().cancelledJobs());
+        gauge(metrics, "commonbattle_actor_schedule_delivered_timer_messages_total",
+                snapshot.actorSchedules().deliveredTimerMessages());
+        gauge(metrics, "commonbattle_actor_schedule_rejected_timer_messages_total",
+                snapshot.actorSchedules().rejectedTimerMessages());
     }
 
     private static void rpc(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -176,6 +191,26 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_player_outbound_coalesced_deliveries_total", snapshot.playerOutboundDeliveries().coalescedDeliveries());
         gauge(metrics, "commonbattle_player_outbound_failed_online_deliveries_total", snapshot.playerOutboundDeliveries().failedOnlineDeliveries());
         gauge(metrics, "commonbattle_player_outbound_acked_deliveries_total", snapshot.playerOutboundDeliveries().ackedDeliveries());
+        for (PlayerOutboundTopicDeliveryStats topic : snapshot.playerOutboundDeliveries().topics().values()) {
+            gauge(metrics, "commonbattle_player_outbound_topic_pending_offline_messages", "topic", topic.topic(),
+                    topic.pendingOfflineMessages());
+            gauge(metrics, "commonbattle_player_outbound_topic_pending_ack_messages", "topic", topic.topic(),
+                    topic.pendingAckMessages());
+            gauge(metrics, "commonbattle_player_outbound_topic_oldest_pending_ack_age_millis", "topic", topic.topic(),
+                    topic.oldestPendingAckAgeMillis());
+            gauge(metrics, "commonbattle_player_outbound_topic_online_deliveries_total", "topic", topic.topic(),
+                    topic.onlineDeliveries());
+            gauge(metrics, "commonbattle_player_outbound_topic_offline_queued_deliveries_total", "topic", topic.topic(),
+                    topic.offlineQueuedDeliveries());
+            gauge(metrics, "commonbattle_player_outbound_topic_dropped_deliveries_total", "topic", topic.topic(),
+                    topic.droppedDeliveries());
+            gauge(metrics, "commonbattle_player_outbound_topic_coalesced_deliveries_total", "topic", topic.topic(),
+                    topic.coalescedDeliveries());
+            gauge(metrics, "commonbattle_player_outbound_topic_failed_online_deliveries_total", "topic", topic.topic(),
+                    topic.failedOnlineDeliveries());
+            gauge(metrics, "commonbattle_player_outbound_topic_acked_deliveries_total", "topic", topic.topic(),
+                    topic.ackedDeliveries());
+        }
     }
 
     private static void playerGateways(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {

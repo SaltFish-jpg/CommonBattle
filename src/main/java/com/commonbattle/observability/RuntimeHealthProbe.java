@@ -1,5 +1,7 @@
 package com.commonbattle.observability;
 
+import com.commonbattle.actor.ActorScheduleStats;
+import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinatorStats;
@@ -79,6 +81,7 @@ import com.commonbattle.game.session.PlayerCommandAuditView;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandStats;
 import com.commonbattle.game.session.PlayerOutboundDeliveryStats;
+import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerOutboundDeliveryView;
 
 import java.time.Clock;
@@ -104,6 +107,7 @@ public final class RuntimeHealthProbe {
     private final Collection<ResilientRpcGateway> resilientRpcGateways;
     private Collection<RpcRoutePolicyView> rpcRoutePolicies = List.of();
     private final Collection<ActorRpcClient> actorRpcClients;
+    private Collection<ActorScheduleView> actorSchedules = List.of();
     private final Collection<PlayerCommandDispatcher> commandDispatchers;
     private final Collection<NettyClusterTransport> networkTransports;
     private final Collection<RegistryLeaseRenewer> leaseRenewers;
@@ -198,6 +202,7 @@ public final class RuntimeHealthProbe {
         this.registryHistories = registry.registryHistories();
         this.registrySubscriptions = registry.registrySubscriptions();
         this.remoteRegistryRecoveries = registry.remoteRegistryRecoveries();
+        this.actorSchedules = registry.actorSchedules();
     }
 
     public RuntimeHealthProbe(
@@ -498,6 +503,7 @@ public final class RuntimeHealthProbe {
 
     public RuntimeHealthSnapshot snapshot() {
         var actorStats = actors.stats();
+        ActorScheduleHealthStats actorScheduleStats = actorScheduleStats();
         RpcGatewayStats rpcStats = rpcStats();
         RpcResilienceHealthStats rpcResilienceStats = rpcResilienceStats();
         RpcRouteHealthStats rpcRouteStats = rpcRouteStats();
@@ -538,6 +544,7 @@ public final class RuntimeHealthProbe {
         RuntimeHealthStatus status = status(
                 actorStats.queuedTasks(),
                 outboxStats.pendingEvents(),
+                actorScheduleStats,
                 commandStats,
                 businessResponseStats,
                 asyncShopPurchaseStats,
@@ -562,10 +569,20 @@ public final class RuntimeHealthProbe {
                 migrationTaskRetentionStats,
                 migrationTaskStoreStats
         );
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, actorScheduleStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
                 migrationStats, migrationExecutorStats, migrationRecoveryStats, migrationRecoverySchedulerStats, migrationTaskRetentionStats, migrationTaskStoreStats, outboxStats, clusterStats, leaseStats, registryHistoryStats, registrySubscriptionStats, remoteRegistryRecoveryStats, descriptorPublisherStats, networkStats, configStats, recoveryStats,
                 eventCenterStats, eventSubscriptionStats, actorEventSubscriberStats, ownerActorEventSubscriptionStats,
                 profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats, auditStats);
+    }
+
+    private ActorScheduleHealthStats actorScheduleStats() {
+        if (actorSchedules.isEmpty()) {
+            return ActorScheduleHealthStats.empty();
+        }
+        ActorScheduleStats stats = actorSchedules.stream()
+                .map(ActorScheduleView::scheduleStats)
+                .reduce(ActorScheduleStats.empty(), ActorScheduleStats::plus);
+        return ActorScheduleHealthStats.from(actorSchedules.size(), stats);
     }
 
     private RpcGatewayStats rpcStats() {
@@ -1207,6 +1224,34 @@ public final class RuntimeHealthProbe {
                 first.droppedDeliveries() + second.droppedDeliveries(),
                 first.coalescedDeliveries() + second.coalescedDeliveries(),
                 first.failedOnlineDeliveries() + second.failedOnlineDeliveries(),
+                first.ackedDeliveries() + second.ackedDeliveries(),
+                sumPlayerOutboundTopicStats(first.topics(), second.topics())
+        );
+    }
+
+    private static Map<String, PlayerOutboundTopicDeliveryStats> sumPlayerOutboundTopicStats(
+            Map<String, PlayerOutboundTopicDeliveryStats> first,
+            Map<String, PlayerOutboundTopicDeliveryStats> second
+    ) {
+        Map<String, PlayerOutboundTopicDeliveryStats> result = new HashMap<>(first);
+        second.forEach((topic, stats) -> result.merge(topic, stats, RuntimeHealthProbe::sumPlayerOutboundTopicStats));
+        return Map.copyOf(result);
+    }
+
+    private static PlayerOutboundTopicDeliveryStats sumPlayerOutboundTopicStats(
+            PlayerOutboundTopicDeliveryStats first,
+            PlayerOutboundTopicDeliveryStats second
+    ) {
+        return new PlayerOutboundTopicDeliveryStats(
+                first.topic(),
+                first.pendingOfflineMessages() + second.pendingOfflineMessages(),
+                first.pendingAckMessages() + second.pendingAckMessages(),
+                Math.max(first.oldestPendingAckAgeMillis(), second.oldestPendingAckAgeMillis()),
+                first.onlineDeliveries() + second.onlineDeliveries(),
+                first.offlineQueuedDeliveries() + second.offlineQueuedDeliveries(),
+                first.droppedDeliveries() + second.droppedDeliveries(),
+                first.coalescedDeliveries() + second.coalescedDeliveries(),
+                first.failedOnlineDeliveries() + second.failedOnlineDeliveries(),
                 first.ackedDeliveries() + second.ackedDeliveries()
         );
     }
@@ -1234,6 +1279,7 @@ public final class RuntimeHealthProbe {
     private RuntimeHealthStatus status(
             int queuedTasks,
             int pendingEvents,
+            ActorScheduleHealthStats actorScheduleStats,
             PlayerCommandStats commandStats,
             PlayerBusinessResponseHealthStats businessResponseStats,
             AsyncShopPurchaseHealthStats asyncShopPurchaseStats,
@@ -1260,6 +1306,9 @@ public final class RuntimeHealthProbe {
     ) {
         if (!actors.isAccepting()) {
             return RuntimeHealthStatus.DOWN;
+        }
+        if (actorScheduleStats.rejectedTimerMessages() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
         }
         if (commandStats.drainingDispatchers() > 0) {
             return RuntimeHealthStatus.DEGRADED;

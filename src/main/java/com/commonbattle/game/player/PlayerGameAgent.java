@@ -1,6 +1,8 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleKey;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorTimerHandle;
 import com.commonbattle.actor.ActorTimerService;
 import com.commonbattle.actor.message.AgentMessagePort;
@@ -29,6 +31,7 @@ import com.commonbattle.game.shop.ShopStockCallback;
 import com.commonbattle.game.shop.ShopStockReleaseResponse;
 import com.commonbattle.game.shop.ShopStockReserveResponse;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.task.TaskClaimResult;
 
 import java.time.Clock;
@@ -53,6 +56,7 @@ public final class PlayerGameAgent {
     private final PlayerDomainEventListener domainEventListener;
     private final ShopStockAsyncClient shopStockAsyncClient;
     private final AsyncShopPurchaseMetrics asyncShopPurchases;
+    private final PlayerPushPort pushes;
     private long stateRevision;
     private long domainEventRevision;
 
@@ -151,7 +155,8 @@ public final class PlayerGameAgent {
                 0,
                 null,
                 null,
-                new AsyncShopPurchaseMetrics()
+                new AsyncShopPurchaseMetrics(),
+                PlayerPushPort.NOOP
         );
     }
 
@@ -226,7 +231,8 @@ public final class PlayerGameAgent {
                 initialEventRevision,
                 domainEventListener,
                 shopStockAsyncClient,
-                new AsyncShopPurchaseMetrics()
+                new AsyncShopPurchaseMetrics(),
+                PlayerPushPort.NOOP
         );
     }
 
@@ -244,6 +250,26 @@ public final class PlayerGameAgent {
             ShopStockAsyncClient shopStockAsyncClient,
             AsyncShopPurchaseMetrics asyncShopPurchases
     ) {
+        this(messages, self, profile, configView, clock, serverOpenTime, domainEventPublisher,
+                initialStateRevision, initialEventRevision, domainEventListener, shopStockAsyncClient,
+                asyncShopPurchases, PlayerPushPort.NOOP);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases,
+            PlayerPushPort pushes
+    ) {
         this(
                 messages,
                 self,
@@ -256,7 +282,8 @@ public final class PlayerGameAgent {
                 initialEventRevision,
                 domainEventListener,
                 shopStockAsyncClient,
-                asyncShopPurchases
+                asyncShopPurchases,
+                pushes
         );
     }
 
@@ -296,7 +323,8 @@ public final class PlayerGameAgent {
                 0,
                 null,
                 null,
-                new AsyncShopPurchaseMetrics()
+                new AsyncShopPurchaseMetrics(),
+                PlayerPushPort.NOOP
         );
     }
 
@@ -322,7 +350,35 @@ public final class PlayerGameAgent {
                 0,
                 null,
                 null,
-                new AsyncShopPurchaseMetrics()
+                new AsyncShopPurchaseMetrics(),
+                PlayerPushPort.NOOP
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            Clock clock,
+            Instant serverOpenTime,
+            PlayerPushPort pushes
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                fixedRuntimeResolver(activityService, growthService),
+                clock,
+                serverOpenTime,
+                null,
+                0,
+                0,
+                null,
+                null,
+                new AsyncShopPurchaseMetrics(),
+                pushes
         );
     }
 
@@ -338,7 +394,8 @@ public final class PlayerGameAgent {
             long initialEventRevision,
             PlayerDomainEventListener domainEventListener,
             ShopStockAsyncClient shopStockAsyncClient,
-            AsyncShopPurchaseMetrics asyncShopPurchases
+            AsyncShopPurchaseMetrics asyncShopPurchases,
+            PlayerPushPort pushes
     ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
@@ -350,6 +407,7 @@ public final class PlayerGameAgent {
         this.domainEventListener = domainEventListener;
         this.shopStockAsyncClient = shopStockAsyncClient;
         this.asyncShopPurchases = Objects.requireNonNull(asyncShopPurchases, "asyncShopPurchases");
+        this.pushes = Objects.requireNonNull(pushes, "pushes");
         loadRevision(initialStateRevision);
         loadDomainEventRevision(initialEventRevision);
     }
@@ -362,19 +420,28 @@ public final class PlayerGameAgent {
         execute(execution -> {
             ActivityService service = execution.runtime().activityService();
             service.recordLogin(profile.activities(), execution.activityAccess(), activityId);
-            callback.accept(service.claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId));
+            ActivityClaimResult result = service.claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId);
+            execution.pushActivitySnapshot();
+            execution.pushBagSnapshot();
+            callback.accept(result);
         });
     }
 
     public void addActivityProgress(String activityId, int delta) {
-        execute(execution ->
-                execution.runtime().activityService().increase(profile.activities(), execution.activityAccess(), activityId, delta));
+        execute(execution -> {
+            execution.runtime().activityService().increase(profile.activities(), execution.activityAccess(), activityId, delta);
+            execution.pushActivitySnapshot();
+        });
     }
 
     public void claimActivity(String activityId, Consumer<ActivityClaimResult> callback) {
-        execute(execution ->
-                callback.accept(execution.runtime().activityService()
-                        .claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId)));
+        execute(execution -> {
+            ActivityClaimResult result = execution.runtime().activityService()
+                    .claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId);
+            execution.pushActivitySnapshot();
+            execution.pushBagSnapshot();
+            callback.accept(result);
+        });
     }
 
     public void useExpItems(int count, Consumer<GrowthResult> callback) {
@@ -383,6 +450,8 @@ public final class PlayerGameAgent {
             if (result.afterLevel() > result.beforeLevel()) {
                 execution.publish(new GrowthLevelChangedEvent(profile.playerId(), result.beforeLevel(), result.afterLevel()));
             }
+            execution.pushGrowthSnapshot();
+            execution.pushBagSnapshot();
             callback.accept(result);
         });
     }
@@ -398,6 +467,10 @@ public final class PlayerGameAgent {
                     .purchaseAt(profile.bag(), profile.shop(), orderId, sku, quantity, clock.instant());
             if (result.success()) {
                 execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+                if (!result.replayed()) {
+                    execution.pushShopSnapshot();
+                    execution.pushBagSnapshot();
+                }
             }
             callback.accept(result);
         });
@@ -484,6 +557,9 @@ public final class PlayerGameAgent {
                     .clear(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             if (result.victory()) {
                 execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+                if (!result.replayed()) {
+                    execution.pushBattleSettlementSnapshots(result);
+                }
             }
             callback.accept(result);
         });
@@ -499,20 +575,33 @@ public final class PlayerGameAgent {
             BattleSettlementResult result = execution.runtime().requireBattleService()
                     .sweep(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+            if (!result.replayed()) {
+                execution.pushBattleSettlementSnapshots(result);
+            }
             callback.accept(result);
         });
     }
 
     public void claimTask(String taskId, Consumer<TaskClaimResult> callback) {
         Objects.requireNonNull(callback, "callback");
-        execute(execution -> callback.accept(execution.runtime().requireTaskService()
-                .claim(profile.tasks(), profile.bag(), taskId)));
+        execute(execution -> {
+            TaskClaimResult result = execution.runtime().requireTaskService()
+                    .claim(profile.tasks(), profile.bag(), taskId);
+            execution.pushTaskSnapshot();
+            execution.pushBagSnapshot();
+            callback.accept(result);
+        });
     }
 
     public void claimAchievement(String achievementId, Consumer<AchievementClaimResult> callback) {
         Objects.requireNonNull(callback, "callback");
-        execute(execution -> callback.accept(execution.runtime().requireAchievementService()
-                .claim(profile.achievements(), profile.bag(), achievementId)));
+        execute(execution -> {
+            AchievementClaimResult result = execution.runtime().requireAchievementService()
+                    .claim(profile.achievements(), profile.bag(), achievementId);
+            execution.pushAchievementSnapshot();
+            execution.pushBagSnapshot();
+            callback.accept(result);
+        });
     }
 
     public <R> R executeBusiness(PlayerBusinessCommand<R> command) {
@@ -576,6 +665,21 @@ public final class PlayerGameAgent {
         });
     }
 
+    public ActorTimerHandle scheduleActivitySnapshotRefresh(
+            ActorScheduleRegistry schedules,
+            Duration initialDelay,
+            Duration interval
+    ) {
+        Objects.requireNonNull(schedules, "schedules");
+        return schedules.scheduleAtFixedRate(
+                ActorScheduleKey.of("player.activity.refresh", profile.playerId()),
+                self,
+                initialDelay,
+                interval,
+                ignored -> execution().pushActivitySnapshot()
+        );
+    }
+
     public void loadRevision(long revision) {
         if (revision < 0) {
             throw new IllegalArgumentException("revision must not be negative");
@@ -596,7 +700,7 @@ public final class PlayerGameAgent {
 
     private PlayerGameExecution execution() {
         PlayerGameRuntime runtime = runtimeResolver.apply(profile.playerId());
-        return new PlayerGameExecution(profile, runtime, activityAccess(), this::publishDomainEvent);
+        return new PlayerGameExecution(profile, runtime, activityAccess(), this::publishDomainEvent, pushes);
     }
 
     private void publishDomainEvent(PlayerDomainEvent event) {
@@ -652,6 +756,10 @@ public final class PlayerGameAgent {
         if (result.success()) {
             asyncShopPurchases.completedPurchase();
             execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+            if (!result.replayed()) {
+                execution.pushShopSnapshot();
+                execution.pushBagSnapshot();
+            }
         } else {
             asyncShopPurchases.rejectedPurchase();
         }

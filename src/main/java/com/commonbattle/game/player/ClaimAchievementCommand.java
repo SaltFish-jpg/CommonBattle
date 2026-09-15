@@ -22,10 +22,13 @@ public record ClaimAchievementCommand(String achievementId) implements PlayerBus
 
     @Override
     public AchievementClaimResult execute(PlayerGameExecution execution) {
-        return execution.runtime().requireAchievementService().claim(
+        AchievementClaimResult result = execution.runtime().requireAchievementService().claim(
                 execution.profile().achievements(),
                 execution.profile().bag(),
                 achievementId
         );
+        execution.pushAchievementSnapshot();
+        execution.pushBagSnapshot();
+        return result;
     }
 }

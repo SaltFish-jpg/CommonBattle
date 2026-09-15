@@ -22,11 +22,14 @@ public record ClaimActivityCommand(String activityId) implements PlayerBusinessC
 
     @Override
     public ActivityClaimResult execute(PlayerGameExecution execution) {
-        return execution.runtime().activityService().claim(
+        ActivityClaimResult result = execution.runtime().activityService().claim(
                 execution.profile().activities(),
                 execution.profile().bag(),
                 execution.activityAccess(),
                 activityId
         );
+        execution.pushActivitySnapshot();
+        execution.pushBagSnapshot();
+        return result;
     }
 }

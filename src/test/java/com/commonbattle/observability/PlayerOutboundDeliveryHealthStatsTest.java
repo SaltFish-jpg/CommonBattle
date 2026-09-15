@@ -12,6 +12,7 @@ import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.session.PlayerOutboundEnvelope;
+import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerSession;
 import org.junit.jupiter.api.Test;
 
@@ -73,13 +74,21 @@ class PlayerOutboundDeliveryHealthStatsTest {
         assertEquals(1, snapshot.playerOutboundDeliveries().onlineDeliveries());
         assertEquals(1, snapshot.playerOutboundDeliveries().offlineQueuedDeliveries());
         assertEquals(0, snapshot.playerOutboundDeliveries().coalescedDeliveries());
+        PlayerOutboundTopicDeliveryStats topic = snapshot.playerOutboundDeliveries().topics().get("chat.delivery");
+        assertEquals(1, topic.onlineDeliveries());
+        assertEquals(1, topic.offlineQueuedDeliveries());
+        assertEquals(1, topic.pendingOfflineMessages());
+        assertEquals(1, topic.pendingAckMessages());
         assertTrue(json.contains("\"playerOutboundDeliveries\":{\"runtimeCount\":1,\"activeConnections\":1"));
+        assertTrue(json.contains("\"topics\":{\"chat.delivery\""));
         assertTrue(metrics.contains("commonbattle_player_outbound_online_deliveries_total 1"));
         assertTrue(metrics.contains("commonbattle_player_outbound_pending_offline_messages 1"));
         assertTrue(metrics.contains("commonbattle_player_outbound_pending_ack_players 1"));
         assertTrue(metrics.contains("commonbattle_player_outbound_pending_ack_messages 1"));
         assertTrue(metrics.contains("commonbattle_player_outbound_oldest_pending_ack_age_millis 0"));
         assertTrue(metrics.contains("commonbattle_player_outbound_coalesced_deliveries_total 0"));
+        assertTrue(metrics.contains("commonbattle_player_outbound_topic_online_deliveries_total{topic=\"chat.delivery\"} 1"));
+        assertTrue(metrics.contains("commonbattle_player_outbound_topic_pending_ack_messages{topic=\"chat.delivery\"} 1"));
     }
 
     private static final class InlineExecutor implements Executor {

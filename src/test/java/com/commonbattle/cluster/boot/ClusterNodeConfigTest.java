@@ -88,6 +88,7 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.actor.mailbox.capacity", "100");
         properties.setProperty("cluster.actor.overflow.strategy", "DROP_OLDEST");
         properties.setProperty("cluster.actor.shutdown.timeout.millis", "1500");
+        properties.setProperty("cluster.actor.slow.task.threshold.millis", "25");
         properties.setProperty("cluster.actor.category.PLAYER_COMMAND.capacity", "60");
         properties.setProperty("cluster.actor.category.RPC_CALLBACK.capacity", "30");
 
@@ -99,6 +100,7 @@ class ClusterNodeConfigTest {
         org.junit.jupiter.api.Assertions.assertEquals(ActorOverflowStrategy.DROP_OLDEST,
                 config.actorSystemConfig().overflowStrategy());
         org.junit.jupiter.api.Assertions.assertEquals(1500, config.actorSystemConfig().shutdownTimeout().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(25, config.actorSystemConfig().slowTaskThreshold().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(60,
                 config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.PLAYER_COMMAND));
         org.junit.jupiter.api.Assertions.assertEquals(30,
@@ -232,6 +234,7 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.actor.batch.size", "0");
         properties.setProperty("cluster.actor.mailbox.capacity", "-1");
         properties.setProperty("cluster.actor.overflow.strategy", "UNKNOWN");
+        properties.setProperty("cluster.actor.slow.task.threshold.millis", "-1");
         properties.setProperty("cluster.actor.category.BAD.capacity", "10");
         properties.setProperty("cluster.actor.category.TIMER.capacity", "bad");
         properties.setProperty("cluster.player.command.rate.capacity", "0");
@@ -264,6 +267,7 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.actor.batch.size"));
         assertTrue(keys.contains("cluster.actor.mailbox.capacity"));
         assertTrue(keys.contains("cluster.actor.overflow.strategy"));
+        assertTrue(keys.contains("cluster.actor.slow.task.threshold.millis"));
         assertTrue(keys.contains("cluster.actor.category.BAD.capacity"));
         assertTrue(keys.contains("cluster.actor.category.TIMER.capacity"));
         assertTrue(keys.contains("cluster.player.command.rate.capacity"));

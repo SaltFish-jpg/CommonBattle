@@ -1,6 +1,7 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.rpc.ActorRpcClient;
+import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationExecutor;
@@ -57,6 +58,7 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ResilientRpcGateway> resilientRpcGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RpcRoutePolicyView> rpcRoutePolicies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorRpcClient> actorRpcClients = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorScheduleView> actorSchedules = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentLifecycleManager> lifecycleManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandDispatcher> commandDispatchers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<NettyClusterTransport> networkTransports = new CopyOnWriteArrayList<>();
@@ -110,6 +112,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, ResilientRpcGateway.class, resilientRpcGateways);
         addIf(component, RpcRoutePolicyView.class, rpcRoutePolicies);
         addIf(component, ActorRpcClient.class, actorRpcClients);
+        addIf(component, ActorScheduleView.class, actorSchedules);
         addIf(component, AgentLifecycleManager.class, lifecycleManagers);
         addIf(component, PlayerCommandDispatcher.class, commandDispatchers);
         addIf(component, NettyClusterTransport.class, networkTransports);
@@ -164,6 +167,10 @@ public final class RuntimeHealthRegistry {
 
     public List<ActorRpcClient> actorRpcClients() {
         return List.copyOf(actorRpcClients);
+    }
+
+    public List<ActorScheduleView> actorSchedules() {
+        return List.copyOf(actorSchedules);
     }
 
     public List<AgentLifecycleManager> lifecycleManagers() {

@@ -7,17 +7,13 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
-import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
-import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.actor.agent.remote.CenterAgentDirectoryEndpoint;
 import com.commonbattle.cluster.event.ClusterEventCenter;
-import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseReaper;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.CenterRegistryEndpoint;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
-import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RegistrySubscriptionLeaseReaper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
@@ -25,15 +21,12 @@ import com.commonbattle.game.config.GameConfigCenterEndpoint;
 import com.commonbattle.game.config.GameConfigCenterPublisher;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
-import com.commonbattle.game.chat.ChatPayloadCodecs;
-import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.shop.InMemoryShopStockRepository;
 import com.commonbattle.game.shop.SerializedShopStockRepository;
 import com.commonbattle.game.shop.ShopStockReservationRepository;
 import com.commonbattle.game.shop.ShopStockReservationRetentionScheduler;
 import com.commonbattle.game.shop.ShopStockReservationRetentionService;
 import com.commonbattle.game.shop.ShopStockEndpoint;
-import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 import com.commonbattle.persistence.InMemoryAtomicBytesStore;
 
 import java.time.Clock;
@@ -52,13 +45,7 @@ public final class CenterServerMain {
             ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/center.properties");
             config.validate(ServiceKind.CENTER).throwIfInvalid();
             ServiceDescriptor center = ClusterDescriptors.fromConfig(config);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
-                            AgentMigrationPayloadCodecs.registerTo(
-                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults()))
-                            )
-                    )))
-            );
+            PayloadCodecRegistry codecs = BootPayloadCodecs.centerServer();
             Clock clock = Clock.systemUTC();
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry(clock, config.registryHistoryLimit());
             runtime.observe("registryHistory", registry);

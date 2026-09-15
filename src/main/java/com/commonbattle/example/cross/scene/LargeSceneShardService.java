@@ -1,7 +1,10 @@
 package com.commonbattle.example.cross.scene;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleKey;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorTimerHandle;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
@@ -10,9 +13,13 @@ import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 超大场景承载策略。
@@ -22,8 +29,12 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     private final ServiceDescriptor descriptor;
     private final ActorRef[] shards;
     private final String sceneId;
+    private final Clock clock;
     private final Map<Long, ScenePlacement> placementsByPlayer = new ConcurrentHashMap<>();
     private final Map<Integer, Set<Long>> playersByShard = new ConcurrentHashMap<>();
+    private final AtomicLong scheduledTickJobs = new AtomicLong();
+    private final AtomicLong completedTicks = new AtomicLong();
+    private final AtomicLong failedTicks = new AtomicLong();
 
     public LargeSceneShardService(
             ActorSystem actors,
@@ -32,10 +43,22 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             String sceneId,
             int shardCount
     ) {
+        this(actors, serviceId, endpoint, sceneId, shardCount, Clock.systemUTC());
+    }
+
+    public LargeSceneShardService(
+            ActorSystem actors,
+            ServiceId serviceId,
+            ServiceEndpoint endpoint,
+            String sceneId,
+            int shardCount,
+            Clock clock
+    ) {
         if (shardCount <= 0) {
             throw new IllegalArgumentException("shardCount must be positive");
         }
-        this.sceneId = sceneId;
+        this.sceneId = Objects.requireNonNull(sceneId, "sceneId");
+        this.clock = Objects.requireNonNull(clock, "clock");
         this.shards = new ActorRef[shardCount];
         for (int i = 0; i < shardCount; i++) {
             shards[i] = actors.actor("scene:" + serviceId.node() + ":" + sceneId + ":shard-" + i);
@@ -69,6 +92,25 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         );
     }
 
+    public static LargeSceneShardService create(
+            ActorSystem actors,
+            String region,
+            String node,
+            ServiceEndpoint endpoint,
+            String sceneId,
+            int shardCount,
+            Clock clock
+    ) {
+        return new LargeSceneShardService(
+                actors,
+                ServiceId.of(ServiceKind.SCENE, region, node),
+                endpoint,
+                sceneId,
+                shardCount,
+                clock
+        );
+    }
+
     @Override
     public ServiceDescriptor descriptor() {
         return SceneRuntimeMetadata.apply(ServiceMetadata.withLoad(descriptor, stats().activePlayers(), shards.length), stats());
@@ -91,6 +133,47 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         }
         int shardIndex = Math.floorMod(chunkX * 31 + chunkY, shards.length);
         return new ScenePlacement(sceneId, shards[shardIndex], shardIndex, shards.length);
+    }
+
+    public Set<Long> shardPlayers(int shardIndex) {
+        validateShardIndex(shardIndex);
+        return Set.copyOf(playersByShard.getOrDefault(shardIndex, Set.of()));
+    }
+
+    public SceneShardTickStats tickStats() {
+        return new SceneShardTickStats(
+                shards.length,
+                scheduledTickJobs.get(),
+                completedTicks.get(),
+                failedTicks.get()
+        );
+    }
+
+    public java.util.List<ActorTimerHandle> scheduleShardTicks(
+            ActorScheduleRegistry schedules,
+            Duration initialDelay,
+            Duration interval,
+            SceneShardTickHandler handler
+    ) {
+        Objects.requireNonNull(schedules, "schedules");
+        Objects.requireNonNull(handler, "handler");
+        java.util.List<ActorTimerHandle> handles = new java.util.ArrayList<>(shards.length);
+        for (int shardIndex = 0; shardIndex < shards.length; shardIndex++) {
+            int currentShard = shardIndex;
+            ActorScheduleKey key = new ActorScheduleKey(
+                    "scene.shard.tick",
+                    descriptor.id() + ":" + sceneId + ":shard-" + currentShard
+            );
+            handles.add(schedules.scheduleAtFixedRate(
+                    key,
+                    shards[currentShard],
+                    initialDelay,
+                    interval,
+                    ignored -> tickShard(currentShard, handler)
+            ));
+            scheduledTickJobs.incrementAndGet();
+        }
+        return java.util.List.copyOf(handles);
     }
 
     @Override
@@ -130,6 +213,29 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             if (players.isEmpty()) {
                 playersByShard.remove(shardIndex, players);
             }
+        }
+    }
+
+    private void tickShard(int shardIndex, SceneShardTickHandler handler) {
+        SceneShardTickContext context = new SceneShardTickContext(
+                sceneId,
+                shardIndex,
+                shards.length,
+                shardPlayers(shardIndex),
+                clock.instant()
+        );
+        try {
+            handler.onTick(context);
+            completedTicks.incrementAndGet();
+        } catch (RuntimeException e) {
+            failedTicks.incrementAndGet();
+            throw e;
+        }
+    }
+
+    private void validateShardIndex(int shardIndex) {
+        if (shardIndex < 0 || shardIndex >= shards.length) {
+            throw new IllegalArgumentException("invalid shard index: " + shardIndex);
         }
     }
 }

@@ -37,6 +37,9 @@ public record BattleStageClearCommand(String settlementId, String stageId) imple
         );
         if (result.victory()) {
             execution.publish(BattleStageClearedEvent.from(execution.profile().playerId(), result));
+            if (!result.replayed()) {
+                execution.pushBattleSettlementSnapshots(result);
+            }
         }
         return result;
     }

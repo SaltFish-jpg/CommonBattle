@@ -176,16 +176,25 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     private void runTask(ActorRef actor, ActorTask task, ActorContext context) {
+        ActorTaskCategory category = categoryOf(task);
+        long startedAt = System.nanoTime();
+        Throwable failure = null;
         try {
             task.run(context);
-            metrics.taskCompleted();
         } catch (Throwable error) {
-            // Actor 异常隔离边界：单条消息失败只上报监督处理器，不允许打断同邮箱后续消息调度。
-            metrics.taskFailed();
-            try {
-                failureHandler.onFailure(new ActorFailure(actor, task, error));
-            } catch (Throwable ignored) {
-            }
+            failure = error;
+        } finally {
+            metrics.taskExecuted(actor, category, System.nanoTime() - startedAt, config.slowTaskThreshold());
+        }
+        if (failure == null) {
+            metrics.taskCompleted();
+            return;
+        }
+        // Actor 异常隔离边界：单条消息失败只上报监督处理器，不允许打断同邮箱后续消息调度。
+        metrics.taskFailed();
+        try {
+            failureHandler.onFailure(new ActorFailure(actor, task, failure));
+        } catch (Throwable ignored) {
         }
     }
 

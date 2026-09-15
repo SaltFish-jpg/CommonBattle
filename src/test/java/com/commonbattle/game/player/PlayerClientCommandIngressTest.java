@@ -21,7 +21,10 @@ import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
 import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
+import com.commonbattle.game.session.PlayerOutboundDeliveryMode;
 import com.commonbattle.game.session.PlayerOutboundMessage;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicy;
 import com.commonbattle.game.session.PlayerSession;
 import org.junit.jupiter.api.Test;
 
@@ -114,6 +117,27 @@ class PlayerClientCommandIngressTest {
         assertEquals(PlayerBusinessResponseStatus.SUCCESS, second.status());
         assertEquals(true, second.replayed());
         assertEquals(PlayerBusinessAck.OK, second.payload());
+    }
+
+    @Test
+    void commandResponseUsesTopicPolicy() {
+        Fixture fixture = Fixture.create();
+        PlayerOutboundTopicPolicies policies = new PlayerOutboundTopicPolicies()
+                .register(PlayerClientCommandIngress.RESPONSE_TOPIC, PlayerOutboundTopicPolicy.bestEffort());
+        PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound, policies);
+        PlayerClientCommandEnvelope envelope = fixture.command(1);
+        List<PlayerOutboundMessage> written = new ArrayList<>();
+        fixture.outbound.connect(fixture.session, message -> {
+            written.add(message);
+            return true;
+        });
+
+        ingress.accept(envelope);
+        fixture.executor.runNext();
+
+        assertEquals(1, written.size());
+        assertEquals(PlayerOutboundDeliveryMode.BEST_EFFORT, written.getFirst().mode());
+        assertEquals(List.of(), fixture.outbound.pendingAck(10001L));
     }
 
     private record Fixture(

@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -31,6 +32,7 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
     private final AtomicLong coalescedDeliveries = new AtomicLong();
     private final AtomicLong failedOnlineDeliveries = new AtomicLong();
     private final AtomicLong ackedDeliveries = new AtomicLong();
+    private final Map<String, TopicCounters> topicCounters = new ConcurrentHashMap<>();
 
     public PlayerOutboundDeliveryHub(
             PlayerSessionRegistry sessions,
@@ -129,13 +131,16 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
             return 0;
         }
         long acknowledged = 0;
+        Map<String, Long> acknowledgedByTopic = new HashMap<>();
         synchronized (messages) {
             while (!messages.isEmpty() && messages.peekFirst().sequence() <= acknowledgedSequence) {
-                messages.removeFirst();
+                PlayerOutboundMessage message = messages.removeFirst();
+                acknowledgedByTopic.merge(message.topic(), 1L, Long::sum);
                 acknowledged++;
             }
         }
         ackedDeliveries.addAndGet(acknowledged);
+        acknowledgedByTopic.forEach((topic, count) -> counters(topic).ackedDeliveries.addAndGet(count));
         return acknowledged;
     }
 
@@ -208,11 +213,14 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
             try {
                 if (connection.writer().write(message)) {
                     delivered++;
+                    counters(message.topic()).onlineDeliveries.incrementAndGet();
                 } else {
                     failed++;
+                    counters(message.topic()).failedOnlineDeliveries.incrementAndGet();
                 }
             } catch (RuntimeException e) {
                 failed++;
+                counters(message.topic()).failedOnlineDeliveries.incrementAndGet();
             }
         }
         onlineDeliveries.addAndGet(delivered);
@@ -243,17 +251,24 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
                     delivered++;
                     PendingAckOfferResult pending = queuePendingAck(message);
                     dropped += pending.dropped() ? 1 : 0;
+                    TopicCounters counters = counters(message.topic());
+                    counters.onlineDeliveries.incrementAndGet();
+                    if (pending.dropped()) {
+                        counters.droppedDeliveries.incrementAndGet();
+                    }
                 } else {
                     failed++;
                     OfflineOfferResult offer = queueOffline(message);
                     requeued += offer.queued() ? 1 : 0;
                     dropped += offer.dropped() ? 1 : 0;
+                    recordTopicFallback(message.topic(), offer, true);
                 }
             } catch (RuntimeException e) {
                 failed++;
                 OfflineOfferResult offer = queueOffline(message);
                 requeued += offer.queued() ? 1 : 0;
                 dropped += offer.dropped() ? 1 : 0;
+                recordTopicFallback(message.topic(), offer, true);
             }
         }
         onlineDeliveries.addAndGet(delivered);
@@ -270,11 +285,15 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
         long pendingAckPlayers = 0;
         long pendingAckMessages = 0;
         long oldestPendingAckAgeMillis = 0;
+        Map<String, TopicPendingAccumulator> topicPending = new HashMap<>();
         for (ArrayDeque<PlayerOutboundMessage> messages : offline.values()) {
             synchronized (messages) {
                 if (!messages.isEmpty()) {
                     offlinePlayers++;
                     pendingMessages += messages.size();
+                }
+                for (PlayerOutboundMessage message : messages) {
+                    topicPending.computeIfAbsent(message.topic(), TopicPendingAccumulator::new).pendingOfflineMessages++;
                 }
             }
         }
@@ -282,14 +301,22 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
             synchronized (messages) {
                 if (!messages.isEmpty()) {
                     pendingAckPlayers++;
-                    oldestPendingAckAgeMillis = Math.max(
-                            oldestPendingAckAgeMillis,
-                            Math.max(0, Duration.between(messages.peekFirst().createdAt(), clock.instant()).toMillis())
-                    );
+                    long oldestAge = Math.max(0, Duration.between(messages.peekFirst().createdAt(), clock.instant()).toMillis());
+                    oldestPendingAckAgeMillis = Math.max(oldestPendingAckAgeMillis, oldestAge);
                 }
                 pendingAckMessages += messages.size();
+                for (PlayerOutboundMessage message : messages) {
+                    TopicPendingAccumulator accumulator =
+                            topicPending.computeIfAbsent(message.topic(), TopicPendingAccumulator::new);
+                    accumulator.pendingAckMessages++;
+                    accumulator.oldestPendingAckAgeMillis = Math.max(
+                            accumulator.oldestPendingAckAgeMillis,
+                            Math.max(0, Duration.between(message.createdAt(), clock.instant()).toMillis())
+                    );
+                }
             }
         }
+        Map<String, PlayerOutboundTopicDeliveryStats> topics = topicStats(topicPending);
         return new PlayerOutboundDeliveryStats(
                 connections.size(),
                 offlinePlayers,
@@ -302,7 +329,8 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
                 droppedDeliveries.get(),
                 coalescedDeliveries.get(),
                 failedOnlineDeliveries.get(),
-                ackedDeliveries.get()
+                ackedDeliveries.get(),
+                topics
         );
     }
 
@@ -325,29 +353,43 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
         Connection connection = currentConnection(playerId);
         if (connection == null) {
             if (mode == PlayerOutboundDeliveryMode.BEST_EFFORT) {
+                counters(topic).droppedDeliveries.incrementAndGet();
                 return new PlayerOutboundDeliveryResult(0, 0, 1, 0);
             }
             OfflineOfferResult offer = queueOffline(message);
+            recordTopicOfflineOffer(topic, offer);
             return new PlayerOutboundDeliveryResult(0, offer.queued() ? 1 : 0, offer.dropped() ? 1 : 0, 0);
         }
         try {
             if (connection.writer().write(message)) {
+                counters(topic).onlineDeliveries.incrementAndGet();
                 if (mode == PlayerOutboundDeliveryMode.BEST_EFFORT) {
                     return new PlayerOutboundDeliveryResult(1, 0, 0, 0);
                 }
                 PendingAckOfferResult pending = queuePendingAck(message);
+                if (pending.dropped()) {
+                    counters(topic).droppedDeliveries.incrementAndGet();
+                }
                 return new PlayerOutboundDeliveryResult(1, 0, pending.dropped() ? 1 : 0, 0);
             }
             if (mode == PlayerOutboundDeliveryMode.BEST_EFFORT) {
+                TopicCounters counters = counters(topic);
+                counters.failedOnlineDeliveries.incrementAndGet();
+                counters.droppedDeliveries.incrementAndGet();
                 return new PlayerOutboundDeliveryResult(0, 0, 1, 1);
             }
             OfflineOfferResult offer = queueOffline(message);
+            recordTopicFallback(topic, offer, true);
             return new PlayerOutboundDeliveryResult(0, offer.queued() ? 1 : 0, offer.dropped() ? 1 : 0, 1);
         } catch (RuntimeException e) {
             if (mode == PlayerOutboundDeliveryMode.BEST_EFFORT) {
+                TopicCounters counters = counters(topic);
+                counters.failedOnlineDeliveries.incrementAndGet();
+                counters.droppedDeliveries.incrementAndGet();
                 return new PlayerOutboundDeliveryResult(0, 0, 1, 1);
             }
             OfflineOfferResult offer = queueOffline(message);
+            recordTopicFallback(topic, offer, true);
             return new PlayerOutboundDeliveryResult(0, offer.queued() ? 1 : 0, offer.dropped() ? 1 : 0, 1);
         }
     }
@@ -370,6 +412,7 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
         synchronized (messages) {
             if (message.mode() == PlayerOutboundDeliveryMode.COALESCING && replaceCoalesced(messages, message)) {
                 coalescedDeliveries.incrementAndGet();
+                counters(message.topic()).coalescedDeliveries.incrementAndGet();
                 return new OfflineOfferResult(true, false);
             }
             if (messages.size() < maxOfflineMessagesPerPlayer) {
@@ -391,6 +434,7 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
         synchronized (messages) {
             if (message.mode() == PlayerOutboundDeliveryMode.COALESCING && replaceCoalesced(messages, message)) {
                 coalescedDeliveries.incrementAndGet();
+                counters(message.topic()).coalescedDeliveries.incrementAndGet();
                 return new PendingAckOfferResult(false);
             }
             if (messages.size() < maxPendingAckMessagesPerPlayer) {
@@ -436,8 +480,83 @@ public final class PlayerOutboundDeliveryHub implements PlayerOutboundDeliveryVi
         return session.playerId() + ":" + session.sessionId() + ":" + session.epoch();
     }
 
+    private void recordTopicOfflineOffer(String topic, OfflineOfferResult offer) {
+        TopicCounters counters = counters(topic);
+        if (offer.queued()) {
+            counters.offlineQueuedDeliveries.incrementAndGet();
+        }
+        if (offer.dropped()) {
+            counters.droppedDeliveries.incrementAndGet();
+        }
+    }
+
+    private void recordTopicFallback(String topic, OfflineOfferResult offer, boolean failedOnline) {
+        TopicCounters counters = counters(topic);
+        if (failedOnline) {
+            counters.failedOnlineDeliveries.incrementAndGet();
+        }
+        if (offer.queued()) {
+            counters.offlineQueuedDeliveries.incrementAndGet();
+        }
+        if (offer.dropped()) {
+            counters.droppedDeliveries.incrementAndGet();
+        }
+    }
+
+    private TopicCounters counters(String topic) {
+        return topicCounters.computeIfAbsent(topic, ignored -> new TopicCounters());
+    }
+
+    private Map<String, PlayerOutboundTopicDeliveryStats> topicStats(
+            Map<String, TopicPendingAccumulator> topicPending
+    ) {
+        Map<String, PlayerOutboundTopicDeliveryStats> stats = new HashMap<>();
+        topicCounters.forEach((topic, counters) -> {
+            TopicPendingAccumulator pending = topicPending.getOrDefault(topic, new TopicPendingAccumulator(topic));
+            stats.put(topic, counters.snapshot(topic, pending));
+        });
+        topicPending.forEach((topic, pending) ->
+                stats.putIfAbsent(topic, new TopicCounters().snapshot(topic, pending)));
+        return Map.copyOf(stats);
+    }
+
     private void removePlayerConnections(long playerId) {
         connections.entrySet().removeIf(entry -> entry.getValue().session().playerId() == playerId);
+    }
+
+    private static final class TopicCounters {
+        private final AtomicLong onlineDeliveries = new AtomicLong();
+        private final AtomicLong offlineQueuedDeliveries = new AtomicLong();
+        private final AtomicLong droppedDeliveries = new AtomicLong();
+        private final AtomicLong coalescedDeliveries = new AtomicLong();
+        private final AtomicLong failedOnlineDeliveries = new AtomicLong();
+        private final AtomicLong ackedDeliveries = new AtomicLong();
+
+        private PlayerOutboundTopicDeliveryStats snapshot(String topic, TopicPendingAccumulator pending) {
+            return new PlayerOutboundTopicDeliveryStats(
+                    topic,
+                    pending.pendingOfflineMessages,
+                    pending.pendingAckMessages,
+                    pending.oldestPendingAckAgeMillis,
+                    onlineDeliveries.get(),
+                    offlineQueuedDeliveries.get(),
+                    droppedDeliveries.get(),
+                    coalescedDeliveries.get(),
+                    failedOnlineDeliveries.get(),
+                    ackedDeliveries.get()
+            );
+        }
+    }
+
+    private static final class TopicPendingAccumulator {
+        private final String topic;
+        private long pendingOfflineMessages;
+        private long pendingAckMessages;
+        private long oldestPendingAckAgeMillis;
+
+        private TopicPendingAccumulator(String topic) {
+            this.topic = topic;
+        }
     }
 
     private record Connection(PlayerSession session, PlayerOutboundWriter writer) {

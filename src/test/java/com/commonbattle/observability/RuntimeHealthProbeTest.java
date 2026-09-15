@@ -1,6 +1,8 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleStats;
+import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
@@ -267,6 +269,72 @@ class RuntimeHealthProbeTest {
         assertTrue(json.contains("\"registryHistory\":{\"viewCount\":1,\"currentVersion\":2"));
         assertTrue(metrics.contains("commonbattle_registry_history_current_version 2"));
         assertTrue(metrics.contains("commonbattle_registry_history_compacted_replay_requests_total 1"));
+    }
+
+    @Test
+    void snapshotReportsActorScheduleStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ActorScheduleView first = () -> new ActorScheduleStats(2, 3, 1, 5, 0);
+        ActorScheduleView second = () -> new ActorScheduleStats(1, 4, 2, 6, 0);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(java.util.List.of(first, second));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.UP, snapshot.status());
+        assertEquals(2, snapshot.actorSchedules().registryCount());
+        assertEquals(3, snapshot.actorSchedules().activeJobs());
+        assertEquals(7, snapshot.actorSchedules().scheduledJobs());
+        assertEquals(3, snapshot.actorSchedules().cancelledJobs());
+        assertEquals(11, snapshot.actorSchedules().deliveredTimerMessages());
+        assertTrue(json.contains("\"actorSchedules\":{\"registryCount\":2,\"activeJobs\":3"));
+        assertTrue(metrics.contains("commonbattle_actor_schedule_registries 2"));
+        assertTrue(metrics.contains("commonbattle_actor_schedule_delivered_timer_messages_total 11"));
+    }
+
+    @Test
+    void rejectedActorScheduleTimerMessagesDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ActorScheduleView schedules = () -> new ActorScheduleStats(1, 1, 0, 0, 1);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(schedules);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.actorSchedules().rejectedTimerMessages());
+        assertTrue(metrics.contains("commonbattle_actor_schedule_rejected_timer_messages_total 1"));
     }
 
     @Test

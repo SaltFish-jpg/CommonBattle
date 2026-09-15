@@ -30,6 +30,7 @@ import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.player.PlayerGatewayConfig;
+import com.commonbattle.game.player.OutboundPlayerPushPort;
 import com.commonbattle.game.player.PlayerStateRepository;
 import com.commonbattle.game.profile.PlayerProfileEventProjector;
 import com.commonbattle.game.profile.PlayerProfileSnapshotProjector;
@@ -362,6 +363,14 @@ record BootGamePlayerRuntime(
                 playerDomainEvents,
                 lifecycles
         );
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(clock);
+        PlayerOutboundDeliveryHub outbound = new PlayerOutboundDeliveryHub(
+                sessions,
+                clock,
+                PlayerClientConnectionService.DEFAULT_OFFLINE_FLUSH_LIMIT,
+                maxPendingAckMessagesPerPlayer,
+                PlayerDeliveryOverflowStrategy.DROP_OLDEST
+        );
         PlayerGameAgentManager agents = new PlayerGameAgentManager(
                 actors,
                 messages,
@@ -373,9 +382,9 @@ record BootGamePlayerRuntime(
                 playerDomainEvents,
                 new PlayerProfileEventProjector(profileSnapshots, profileEvents, clock)::onPlayerDomainEvent,
                 new PlayerProfileSnapshotProjector(profileSnapshots)::project,
-                shopStockAsyncClient
+                shopStockAsyncClient,
+                new OutboundPlayerPushPort(outbound)
         );
-        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(clock);
         PlayerLoginService logins = new PlayerLoginService(agents, sessions);
         InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
         LifecycleAwareAgentRouter lifecycleRouter = new LifecycleAwareAgentRouter(lifecycles, messages);
@@ -397,13 +406,6 @@ record BootGamePlayerRuntime(
                 businessResponses,
                 businessResponseTimeout
         ));
-        PlayerOutboundDeliveryHub outbound = new PlayerOutboundDeliveryHub(
-                sessions,
-                clock,
-                PlayerClientConnectionService.DEFAULT_OFFLINE_FLUSH_LIMIT,
-                maxPendingAckMessagesPerPlayer,
-                PlayerDeliveryOverflowStrategy.DROP_OLDEST
-        );
         PlayerClientConnectionService clientConnections = new PlayerClientConnectionService(logins, outbound);
         PlayerClientCommandIngress clientCommandIngress = new PlayerClientCommandIngress(businessCommands, outbound);
         BusinessAgentHandlerRegistry businessAgentHandlers = new BusinessAgentHandlerRegistry();

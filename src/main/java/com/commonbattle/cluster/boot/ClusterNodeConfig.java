@@ -104,6 +104,7 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.actor.batch.size");
         validatePositiveInteger(issues, "cluster.actor.mailbox.capacity");
         validatePositiveInteger(issues, "cluster.actor.shutdown.timeout.millis");
+        validateNonNegativeInteger(issues, "cluster.actor.slow.task.threshold.millis");
         validatePositiveInteger(issues, "cluster.player.command.rate.capacity");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.permits");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.interval.millis");
@@ -291,6 +292,8 @@ public final class ClusterNodeConfig {
                 integer("cluster.actor.mailbox.capacity", ActorSystemConfig.DEFAULT_MAILBOX_CAPACITY),
                 ActorOverflowStrategy.valueOf(property("cluster.actor.overflow.strategy", ActorOverflowStrategy.REJECT.name())),
                 Duration.ofMillis(integer("cluster.actor.shutdown.timeout.millis", 3_000))
+        ).withSlowTaskThreshold(
+                Duration.ofMillis(integer("cluster.actor.slow.task.threshold.millis", 0))
         );
         String prefix = "cluster.actor.category.";
         String suffix = ".capacity";

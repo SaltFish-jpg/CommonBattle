@@ -1,8 +1,6 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
-import com.commonbattle.actor.agent.migration.AgentMigrationPayloadCodecs;
-import com.commonbattle.actor.agent.remote.AgentDirectoryPayloadCodecs;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
@@ -10,24 +8,19 @@ import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
-import com.commonbattle.cluster.event.ClusterEventPayloadCodecs;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
-import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
-import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.game.chat.ChatChannelEndpoint;
 import com.commonbattle.game.chat.ChatChannelManager;
 import com.commonbattle.game.chat.ChatAccessControl;
-import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.chat.DirectChatSessionManager;
 import com.commonbattle.game.chat.AccessControlledChatMessagePolicy;
 import com.commonbattle.game.chat.PlayerOutboundChatDeliverySink;
 import com.commonbattle.game.chat.ProfileAwareChatMessagePolicy;
 import com.commonbattle.game.chat.RoutedChatEndpoint;
 import com.commonbattle.game.chat.RoutedChatService;
-import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileInterestControl;
@@ -41,7 +34,6 @@ import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
-import com.commonbattle.game.shop.ShopStockPayloadCodecs;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -65,13 +57,7 @@ public final class ChatServerMain {
             ServiceDescriptor center = ClusterDescriptors.center(config);
             ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
             directory.seed(center);
-            PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(
-                    ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(PlayerBusinessCommandPayloadCodecs.registerTo(
-                            AgentMigrationPayloadCodecs.registerTo(
-                                    AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(CrossPayloadCodecs.create()))
-                            )
-                    )))
-            );
+            PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
                     codecs

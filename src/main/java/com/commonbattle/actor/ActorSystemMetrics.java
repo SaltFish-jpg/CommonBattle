@@ -3,6 +3,7 @@ package com.commonbattle.actor;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 final class ActorSystemMetrics {
@@ -11,6 +12,7 @@ final class ActorSystemMetrics {
     private final LongAdder failedTasks = new LongAdder();
     private final LongAdder rejectedTasks = new LongAdder();
     private final LongAdder droppedTasks = new LongAdder();
+    private final LongAdder slowTasks = new LongAdder();
     private final EnumMap<ActorTaskCategory, LongAdder> rejectedTasksByCategory =
             new EnumMap<>(ActorTaskCategory.class);
     private final EnumMap<ActorTaskCategory, LongAdder> droppedTasksByCategory =
@@ -19,6 +21,9 @@ final class ActorSystemMetrics {
     private final AtomicInteger runningMailboxes = new AtomicInteger();
     private final AtomicInteger peakQueuedTasks = new AtomicInteger();
     private final AtomicInteger peakRunningMailboxes = new AtomicInteger();
+    private final AtomicLong slowestTaskNanos = new AtomicLong();
+    private volatile String slowestTaskActorId = "";
+    private volatile ActorTaskCategory slowestTaskCategory = ActorTaskCategory.DEFAULT;
 
     ActorSystemMetrics() {
         for (ActorTaskCategory category : ActorTaskCategory.values()) {
@@ -42,6 +47,21 @@ final class ActorSystemMetrics {
 
     void taskFailed() {
         failedTasks.increment();
+    }
+
+    void taskExecuted(ActorRef actor, ActorTaskCategory category, long elapsedNanos, java.time.Duration slowTaskThreshold) {
+        if (!slowTaskThreshold.isZero() && elapsedNanos >= slowTaskThreshold.toNanos()) {
+            slowTasks.increment();
+        }
+        long current;
+        do {
+            current = slowestTaskNanos.get();
+            if (elapsedNanos <= current) {
+                return;
+            }
+        } while (!slowestTaskNanos.compareAndSet(current, elapsedNanos));
+        slowestTaskActorId = actor.id();
+        slowestTaskCategory = category;
     }
 
     void taskRejected(ActorTaskCategory category) {
@@ -82,6 +102,10 @@ final class ActorSystemMetrics {
                 largestMailboxActorId,
                 peakQueuedTasks.get(),
                 peakRunningMailboxes.get(),
+                slowTasks.sum(),
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(slowestTaskNanos.get()),
+                slowestTaskActorId,
+                slowestTaskCategory,
                 Map.copyOf(queuedTasksByCategory),
                 sumByCategory(rejectedTasksByCategory),
                 sumByCategory(droppedTasksByCategory)
