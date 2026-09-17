@@ -19,8 +19,26 @@ public record BattleStageDefinition(
         String progressActivityId,
         int progressDelta,
         Reward firstClearReward,
-        int sweepRequiredStars
+        int sweepRequiredStars,
+        int staminaCost
 ) {
+    public BattleStageDefinition(
+            String stageId,
+            int playerHp,
+            int playerAttack,
+            int enemyHp,
+            int enemyAttack,
+            int maxRounds,
+            Reward victoryReward,
+            String progressActivityId,
+            int progressDelta,
+            Reward firstClearReward,
+            int sweepRequiredStars
+    ) {
+        this(stageId, playerHp, playerAttack, enemyHp, enemyAttack, maxRounds, victoryReward,
+                progressActivityId, progressDelta, firstClearReward, sweepRequiredStars, 0);
+    }
+
     public BattleStageDefinition(
             String stageId,
             int playerHp,
@@ -33,7 +51,7 @@ public record BattleStageDefinition(
             int progressDelta
     ) {
         this(stageId, playerHp, playerAttack, enemyHp, enemyAttack, maxRounds, victoryReward,
-                progressActivityId, progressDelta, Reward.of(), 0);
+                progressActivityId, progressDelta, Reward.of(), 0, 0);
     }
 
     public BattleStageDefinition {
@@ -61,6 +79,9 @@ public record BattleStageDefinition(
         }
         if (sweepRequiredStars < 0 || sweepRequiredStars > 3) {
             throw new IllegalArgumentException("sweepRequiredStars must be 0..3");
+        }
+        if (staminaCost < 0) {
+            throw new IllegalArgumentException("staminaCost must not be negative");
         }
     }
 

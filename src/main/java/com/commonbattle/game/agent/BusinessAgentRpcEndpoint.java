@@ -3,9 +3,12 @@ package com.commonbattle.game.agent;
 import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.agent.AgentRoute;
 import com.commonbattle.actor.agent.AgentRouteType;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
 
 import java.util.Objects;
 
@@ -16,16 +19,31 @@ import java.util.Objects;
 public final class BusinessAgentRpcEndpoint {
     private final LifecycleAwareAgentRouter router;
     private final BusinessAgentHandlerRegistry handlers;
+    private final InboundAdmissionController admissions;
 
     public BusinessAgentRpcEndpoint(LifecycleAwareAgentRouter router, BusinessAgentHandlerRegistry handlers) {
+        this(router, handlers, (target, operation) -> AdmissionDecision.accept());
+    }
+
+    public BusinessAgentRpcEndpoint(
+            LifecycleAwareAgentRouter router,
+            BusinessAgentHandlerRegistry handlers,
+            InboundAdmissionController admissions
+    ) {
         this.router = Objects.requireNonNull(router, "router");
         this.handlers = Objects.requireNonNull(handlers, "handlers");
+        this.admissions = Objects.requireNonNull(admissions, "admissions");
     }
 
     public void bind(ClusterRpcGateway gateway) {
         Objects.requireNonNull(gateway, "gateway");
         gateway.handle(BusinessAgentRpcOperations.DISPATCH, (envelope, responder) -> {
             BusinessAgentRequest request = (BusinessAgentRequest) envelope.payload();
+            AdmissionDecision admission = admissions.admit(request.target(), request.operation());
+            if (!admission.accepted()) {
+                responder.failure(RpcStructuredException.rejected(admission.reason(), admission.retryAfter()));
+                return;
+            }
             AgentRoute route = router.resolve(request.target());
             if (route.type() != AgentRouteType.LOCAL) {
                 responder.failure(new BusinessAgentRequestException(request.target(), request.operation(), route.reason()));
@@ -42,11 +60,7 @@ public final class BusinessAgentRpcEndpoint {
                     }
             ));
             if (!delivery.accepted()) {
-                responder.failure(new BusinessAgentRequestException(
-                        request.target(),
-                        request.operation(),
-                        delivery.reason()
-                ));
+                responder.failure(RpcStructuredException.rejected(delivery.reason(), delivery.retryAfter()));
             }
         });
     }

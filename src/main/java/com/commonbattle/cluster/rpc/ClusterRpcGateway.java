@@ -350,12 +350,12 @@ public final class ClusterRpcGateway implements OptionedRpcGateway, AutoCloseabl
 
                 @Override
                 public void failure(Throwable error) {
-                    cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(error.getMessage())));
+                    cache(idempotencyKey, RpcIdempotencyResult.failure(RpcError.from(error)));
                     replyFailure(envelope, error);
                 }
             });
         } catch (RuntimeException e) {
-            cache(idempotencyKey, RpcIdempotencyResult.failure(new RpcError(e.getMessage())));
+            cache(idempotencyKey, RpcIdempotencyResult.failure(RpcError.from(e)));
             replyFailure(envelope, e);
         }
     }
@@ -375,7 +375,7 @@ public final class ClusterRpcGateway implements OptionedRpcGateway, AutoCloseabl
         if (pending != null) {
             pending.cancelTimeout();
             recordCompleted(pending, false);
-            pending.callback.failure(new IllegalStateException(String.valueOf(envelope.payload())));
+            pending.callback.failure(remoteFailure(envelope.payload()));
         }
     }
 
@@ -390,9 +390,16 @@ public final class ClusterRpcGateway implements OptionedRpcGateway, AutoCloseabl
                 local.id(),
                 request.source(),
                 RPC_FAILURE,
-                new RpcError(error.getMessage())
+                RpcError.from(error)
         );
         sendReply(request.source(), response);
+    }
+
+    private static Throwable remoteFailure(Object payload) {
+        if (payload instanceof RpcError error) {
+            return RpcStructuredException.from(error);
+        }
+        return new IllegalStateException(String.valueOf(payload));
     }
 
     private void sendReply(ServiceId target, ClusterEnvelope response) {
@@ -495,7 +502,28 @@ public final class ClusterRpcGateway implements OptionedRpcGateway, AutoCloseabl
     /**
      * 跨服 RPC 失败响应的可序列化载体。
      */
-    public record RpcError(String message) implements Serializable {
+    public record RpcError(String code, String message, long retryAfterMillis) implements Serializable {
+        public RpcError {
+            code = code == null || code.isBlank() ? RpcStructuredException.REMOTE_ERROR : code;
+            message = message == null ? "" : message;
+            retryAfterMillis = Math.max(0, retryAfterMillis);
+        }
+
+        public RpcError(String message) {
+            this(RpcStructuredException.REMOTE_ERROR, message, 0);
+        }
+
+        public static RpcError from(Throwable error) {
+            if (error instanceof RpcStructuredException structured) {
+                return new RpcError(
+                        structured.code(),
+                        structured.getMessage(),
+                        structured.retryAfter().toMillis()
+                );
+            }
+            return new RpcError(error == null ? "" : error.getMessage());
+        }
+
         @Override
         public String toString() {
             return message;

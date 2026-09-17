@@ -131,7 +131,8 @@ class ClusterEventPayloadCodecsTest {
                                 "open-day-2",
                                 1,
                                 Reward.of(new ItemStack("exp_potion", 2)),
-                                3
+                                3,
+                                5
                         )),
                         List.of(new TaskDefinition(
                                 "task-clear-forest",
@@ -175,6 +176,7 @@ class ClusterEventPayloadCodecsTest {
         assertEquals("forest-1", decodedEvent.config().battles().getFirst().stageId());
         assertEquals(2, decodedEvent.config().battles().getFirst().firstClearReward().items().getFirst().count());
         assertEquals(3, decodedEvent.config().battles().getFirst().sweepRequiredStars());
+        assertEquals(5, decodedEvent.config().battles().getFirst().staminaCost());
         assertEquals("task-clear-forest", decodedEvent.config().tasks().getFirst().taskId());
         assertEquals(BattleStageClearedEvent.TYPE,
                 decodedEvent.config().tasks().getFirst().progressRule().eventType());

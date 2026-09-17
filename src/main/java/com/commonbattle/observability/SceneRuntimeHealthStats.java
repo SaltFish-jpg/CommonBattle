@@ -14,10 +14,18 @@ public record SceneRuntimeHealthStats(
         int playerInterests,
         int allianceReferences,
         long duplicateEnters,
-        long missingLeaves
+        long missingLeaves,
+        long projectionReceivedEvents,
+        long projectionAppliedEvents,
+        long projectionDuplicateEvents,
+        long projectionGapEvents,
+        long projectionRepairRequests,
+        long projectionAppliedSnapshots,
+        long projectionIgnoredSnapshots,
+        int projectionStaleViews
 ) {
     public static SceneRuntimeHealthStats empty() {
-        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static SceneRuntimeHealthStats from(int runtimeCount, SceneRuntimeStats stats) {
@@ -30,7 +38,15 @@ public record SceneRuntimeHealthStats(
                 stats.playerInterests(),
                 stats.allianceReferences(),
                 stats.duplicateEnters(),
-                stats.missingLeaves()
+                stats.missingLeaves(),
+                stats.projectionReceivedEvents(),
+                stats.projectionAppliedEvents(),
+                stats.projectionDuplicateEvents(),
+                stats.projectionGapEvents(),
+                stats.projectionRepairRequests(),
+                stats.projectionAppliedSnapshots(),
+                stats.projectionIgnoredSnapshots(),
+                stats.projectionStaleViews()
         );
     }
 }

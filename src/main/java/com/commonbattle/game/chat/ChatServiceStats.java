@@ -15,10 +15,12 @@ public record ChatServiceStats(
         long droppedHistoryMessages,
         long acceptedDeliveryRecipients,
         long droppedDeliveryRecipients,
-        long failedDeliveryRecipients
+        long failedDeliveryRecipients,
+        long allianceEventRemovedMembers,
+        long allianceSnapshotRemovedMembers
 ) {
     public ChatServiceStats(long activeChannels, long joinRequests, long leaveRequests, long sendRequests) {
-        this(activeChannels, 0, joinRequests, leaveRequests, sendRequests, 0, 0, 0, 0, 0, 0, 0);
+        this(activeChannels, 0, joinRequests, leaveRequests, sendRequests, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ChatServiceStats(
@@ -33,11 +35,30 @@ public record ChatServiceStats(
             long droppedHistoryMessages
     ) {
         this(activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests, mutedRejects, blockedRejects,
-                retainedMessages, droppedHistoryMessages, 0, 0, 0);
+                retainedMessages, droppedHistoryMessages, 0, 0, 0, 0, 0);
+    }
+
+    public ChatServiceStats(
+            long activeChannels,
+            long activeDirectSessions,
+            long joinRequests,
+            long leaveRequests,
+            long sendRequests,
+            long mutedRejects,
+            long blockedRejects,
+            long retainedMessages,
+            long droppedHistoryMessages,
+            long acceptedDeliveryRecipients,
+            long droppedDeliveryRecipients,
+            long failedDeliveryRecipients
+    ) {
+        this(activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests, mutedRejects, blockedRejects,
+                retainedMessages, droppedHistoryMessages, acceptedDeliveryRecipients, droppedDeliveryRecipients,
+                failedDeliveryRecipients, 0, 0);
     }
 
     public static ChatServiceStats empty() {
-        return new ChatServiceStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new ChatServiceStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ChatServiceStats plus(ChatServiceStats other) {
@@ -53,7 +74,9 @@ public record ChatServiceStats(
                 droppedHistoryMessages + other.droppedHistoryMessages,
                 acceptedDeliveryRecipients + other.acceptedDeliveryRecipients,
                 droppedDeliveryRecipients + other.droppedDeliveryRecipients,
-                failedDeliveryRecipients + other.failedDeliveryRecipients
+                failedDeliveryRecipients + other.failedDeliveryRecipients,
+                allianceEventRemovedMembers + other.allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers + other.allianceSnapshotRemovedMembers
         );
     }
 
@@ -70,7 +93,13 @@ public record ChatServiceStats(
                 droppedHistoryMessages,
                 acceptedDeliveryRecipients,
                 droppedDeliveryRecipients,
-                failedDeliveryRecipients
+                failedDeliveryRecipients,
+                allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers
         );
+    }
+
+    public long allianceRemovedMembers() {
+        return allianceEventRemovedMembers + allianceSnapshotRemovedMembers;
     }
 }

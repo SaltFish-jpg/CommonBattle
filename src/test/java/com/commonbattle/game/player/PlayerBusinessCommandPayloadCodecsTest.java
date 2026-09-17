@@ -199,6 +199,7 @@ class PlayerBusinessCommandPayloadCodecsTest {
                 PlayerBusinessResponseStatus.FAILED,
                 PlayerBusinessResponse.BUSINESS_REJECTED,
                 "stock not enough",
+                250,
                 null
         );
 
@@ -214,6 +215,7 @@ class PlayerBusinessCommandPayloadCodecsTest {
         assertEquals(PlayerBusinessResponseStatus.FAILED, envelope.status());
         assertEquals(PlayerBusinessResponse.BUSINESS_REJECTED, envelope.code());
         assertEquals("stock not enough", envelope.message());
+        assertEquals(250, envelope.retryAfterMillis());
         assertEquals(null, envelope.payload());
     }
 }

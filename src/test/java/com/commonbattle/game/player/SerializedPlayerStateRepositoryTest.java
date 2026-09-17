@@ -16,6 +16,9 @@ import com.commonbattle.game.shop.PlayerShopSnapshot;
 import com.commonbattle.game.task.PlayerTasksSnapshot;
 import com.commonbattle.game.task.TaskProgressSnapshot;
 import com.commonbattle.persistence.InMemoryAtomicBytesStore;
+import io.protostuff.LinkedBuffer;
+import io.protostuff.ProtostuffIOUtil;
+import io.protostuff.runtime.RuntimeSchema;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -49,6 +52,29 @@ class SerializedPlayerStateRepositoryTest {
     }
 
     @Test
+    void protostuffSerializerDefaultsMissingGrowthStaminaFields() {
+        ProtostuffPlayerStateSnapshotSerializer.StateDto oldDto = new ProtostuffPlayerStateSnapshotSerializer.StateDto();
+        oldDto.playerId = 10001L;
+        oldDto.createdAtMillis = Instant.parse("2026-08-01T00:00:00Z").toEpochMilli();
+        oldDto.savedAtMillis = Instant.parse("2026-09-01T00:00:00Z").toEpochMilli();
+        oldDto.growthLevel = 2;
+        oldDto.growthExp = 20;
+        byte[] bytes = ProtostuffIOUtil.toByteArray(
+                oldDto,
+                RuntimeSchema.getSchema(ProtostuffPlayerStateSnapshotSerializer.StateDto.class),
+                LinkedBuffer.allocate(1024)
+        );
+
+        PlayerStateSnapshot decoded = serializer.deserialize(bytes);
+
+        assertEquals(2, decoded.growth().level());
+        assertEquals(20, decoded.growth().exp());
+        assertEquals(GrowthSnapshot.DEFAULT_MAX_STAMINA, decoded.growth().stamina());
+        assertEquals(GrowthSnapshot.DEFAULT_MAX_STAMINA, decoded.growth().maxStamina());
+        assertEquals(Instant.EPOCH, decoded.growth().staminaUpdatedAt());
+    }
+
+    @Test
     void repositoryRejectsMismatchedPlayerKey() {
         SerializedPlayerStateRepository repository = new SerializedPlayerStateRepository(
                 new InMemoryAtomicBytesStore(),
@@ -66,7 +92,7 @@ class SerializedPlayerStateRepositoryTest {
                 createdAt,
                 new BagSnapshot(Map.of("gold", 100, "exp_potion", 2)),
                 new PlayerActivitiesSnapshot(Map.of("battle-win-1", new ActivityProgressSnapshot(1, true))),
-                new GrowthSnapshot(2, 20),
+                new GrowthSnapshot(2, 20, 7, 120, savedAt.minusSeconds(60)),
                 new PlayerShopSnapshot(
                         Map.of("growth_pack", 1),
                         Map.of("growth_pack@2026-09-01", 1)

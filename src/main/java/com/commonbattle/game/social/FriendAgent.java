@@ -3,6 +3,7 @@ package com.commonbattle.game.social;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.event.SnapshotEventPublisher;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -18,9 +19,7 @@ public final class FriendAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
     private final long playerId;
-    private final EventPublisher publisher;
-    private final FriendSnapshotRepository snapshots;
-    private final FriendSummaryListener summaryListener;
+    private final SnapshotEventPublisher<FriendSnapshot, FriendChangedEvent> publisher;
     private final Set<Long> friends = new HashSet<>();
     private long revision;
 
@@ -46,6 +45,22 @@ public final class FriendAgent {
             FriendSnapshotRepository snapshots,
             FriendSummaryListener summaryListener
     ) {
+        this(messages, self, playerId, (snapshot, event) -> {
+            snapshots.save(snapshot);
+            summaryListener.onFriendSnapshot(snapshot);
+            publisher.publish(event);
+        });
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(snapshots, "snapshots");
+        Objects.requireNonNull(summaryListener, "summaryListener");
+    }
+
+    private FriendAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            long playerId,
+            SnapshotEventPublisher<FriendSnapshot, FriendChangedEvent> publisher
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         if (playerId <= 0) {
@@ -53,8 +68,15 @@ public final class FriendAgent {
         }
         this.playerId = playerId;
         this.publisher = Objects.requireNonNull(publisher, "publisher");
-        this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
-        this.summaryListener = Objects.requireNonNull(summaryListener, "summaryListener");
+    }
+
+    public static FriendAgent withSnapshotPublisher(
+            AgentMessagePort messages,
+            ActorRef self,
+            long playerId,
+            SnapshotEventPublisher<FriendSnapshot, FriendChangedEvent> publisher
+    ) {
+        return new FriendAgent(messages, self, playerId, publisher);
     }
 
     public void add(long friendId) {
@@ -89,9 +111,7 @@ public final class FriendAgent {
         // 好友关系变更边界：owner 状态修改后递增 revision，先写关系快照和 Profile 摘要，再发布关系事件。
         revision++;
         FriendSnapshot snapshot = snapshotNow();
-        snapshots.save(snapshot);
-        summaryListener.onFriendSnapshot(snapshot);
-        publisher.publish(new FriendChangedEvent(playerId, friendId, action, revision));
+        publisher.publish(snapshot, new FriendChangedEvent(playerId, friendId, action, revision));
     }
 
     public FriendSnapshot snapshotNow() {

@@ -1,5 +1,7 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.ActorScheduleRegistry;
+import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.LocalGameConfigCache;
@@ -90,6 +92,19 @@ class BootRuntimeTest {
 
         assertSame(cache, runtime.healthRegistry().configCaches().getFirst());
         assertSame(recovery, runtime.healthRegistry().configRecoveries().getFirst());
+    }
+
+    @Test
+    void bootActorSchedulesRegistersScheduleView() {
+        BootRuntime runtime = new BootRuntime();
+        try {
+            ActorSystem actors = runtime.add("actors", new ActorSystem(Runnable::run, 64));
+            ActorScheduleRegistry schedules = BootActorSchedules.configure(runtime, actors);
+
+            assertSame(schedules, runtime.healthRegistry().actorSchedules().getFirst());
+        } finally {
+            runtime.close();
+        }
     }
 
     @Test

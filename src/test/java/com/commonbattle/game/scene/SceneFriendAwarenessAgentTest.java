@@ -71,6 +71,7 @@ class SceneFriendAwarenessAgentTest {
         assertTrue(view.stale());
         assertEquals(3, view.revision());
         assertEquals(List.of(FriendOwnerKeyParser.ownerKey(10001L)), interests.repairs);
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 0, 0, 1), scene.projectionStats());
     }
 
     @Test
@@ -93,6 +94,24 @@ class SceneFriendAwarenessAgentTest {
     }
 
     @Test
+    void leaveClearsFriendRevisionSoDelayedEventCannotCreateFalseFreshCheckpoint() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChanged(new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1));
+        executor.runNext();
+        scene.leave(10001L);
+        executor.runNext();
+        scene.onFriendChanged(new FriendChangedEvent(10001L, 30003L, FriendRelationAction.ADD, 2));
+        executor.runNext();
+
+        assertTrue(scene.friendsOf(10001L).isEmpty());
+        assertEquals(0, scene.revisionOf(10001L));
+    }
+
+    @Test
     void snapshotRefreshRunsInsideSceneMailboxAndClearsStaleView() {
         RecordingExecutor executor = new RecordingExecutor();
         SceneFriendAwarenessAgent scene = createScene(executor);
@@ -111,6 +130,28 @@ class SceneFriendAwarenessAgentTest {
         assertFalse(view.stale());
         assertEquals(Set.of(20002L, 30003L), view.friends());
         assertEquals(3, view.revision());
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void ignoredSnapshotOfflineEventAndDuplicateEventAreCounted() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(executor);
+
+        scene.refresh(new FriendSnapshot(10001L, 1, Set.of(20002L)));
+        executor.runNext();
+        scene.onFriendChanged(new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1));
+        executor.runNext();
+        scene.enter(10001L);
+        executor.runNext();
+        scene.refresh(new FriendSnapshot(10001L, 3, Set.of(20002L)));
+        executor.runNext();
+        scene.refresh(new FriendSnapshot(10001L, 2, Set.of()));
+        executor.runNext();
+        scene.onFriendChanged(new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1));
+        executor.runNext();
+
+        assertEquals(new SceneProjectionStats(2, 0, 1, 0, 0, 1, 2, 0), scene.projectionStats());
     }
 
     private static SceneFriendAwarenessAgent createScene(Executor executor) {

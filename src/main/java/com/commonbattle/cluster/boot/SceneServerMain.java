@@ -2,6 +2,11 @@ package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleRegistry;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
 import com.commonbattle.cluster.ClusterDirectory;
@@ -20,6 +25,7 @@ import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.EnterSceneResult;
 import com.commonbattle.example.cross.LeaveSceneRequest;
@@ -29,6 +35,7 @@ import com.commonbattle.example.cross.scene.LargeSceneShardService;
 import com.commonbattle.example.cross.scene.MultiSmallSceneService;
 import com.commonbattle.example.cross.scene.ProfileAwareSceneService;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
+import com.commonbattle.example.cross.scene.SceneMailboxPressureGate;
 import com.commonbattle.example.cross.scene.ScenePlacement;
 import com.commonbattle.example.cross.scene.SceneRuntimeMetadata;
 import com.commonbattle.example.cross.scene.SceneServiceStrategy;
@@ -42,6 +49,10 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.OwnerActorEventSubscription;
+import com.commonbattle.game.event.OwnerActorEventSubscriptionRecoveryScheduler;
+import com.commonbattle.game.event.OwnerEventInterestControl;
+import com.commonbattle.game.event.OwnerEventRepairDispatcher;
+import com.commonbattle.game.event.OwnerEventRepairScheduler;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileEventReplayRepairer;
@@ -88,6 +99,7 @@ public final class SceneServerMain {
             ClusterNodeConfig config = ClusterNodeConfig.load(args, "cluster/scene-small.properties");
             config.validate(ServiceKind.SCENE).throwIfInvalid();
             ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            ActorScheduleRegistry actorSchedules = BootActorSchedules.configure(runtime, actors);
             SceneServiceStrategy sceneService = sceneService(config, actors);
             ServiceDescriptor local = ClusterDescriptors.withConfigMetadata(sceneService.descriptor(), config);
             ServiceDescriptor center = ClusterDescriptors.center(config);
@@ -124,6 +136,7 @@ public final class SceneServerMain {
                     profileRepairWorkers(config),
                     new NamedThreadFactory("common-battle-profile-repair")
             ));
+            OwnerEventRepairDispatcher repairDispatcher = repairDispatcher(config);
             ProfileSnapshotReader profileSnapshotReader = new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1));
             ProfileOwnerEventInterests profileInterests = new ProfileOwnerEventInterests();
             runtime.observe("profileInterests", profileInterests);
@@ -236,7 +249,14 @@ public final class SceneServerMain {
                             ),
                             profileRepairExecutor
                     ));
-            allianceAwareness.attachInterests(allianceEventInterests);
+            allianceAwareness.attachInterests(repairControl(
+                    runtime,
+                    config,
+                    repairDispatcher,
+                    "allianceEventRepairs",
+                    AllianceMemberChangedEvent.TOPIC,
+                    allianceEventInterests
+            ));
             ActorMailboxEventSubscriber friendEventSubscriber = new ActorMailboxEventSubscriber(
                     profileMessagePort,
                     friendEventActor,
@@ -267,7 +287,28 @@ public final class SceneServerMain {
                             ),
                             profileRepairExecutor
                     ));
-            friendAwareness.attachInterests(friendEventInterests);
+            friendAwareness.attachInterests(repairControl(
+                    runtime,
+                    config,
+                    repairDispatcher,
+                    "friendEventRepairs",
+                    FriendChangedEvent.TOPIC,
+                    friendEventInterests
+            ));
+            startRepairDispatcher(runtime, repairDispatcher);
+            OwnerActorEventSubscriptionRecoveryScheduler ownerEventRecovery = runtime.add(
+                    "ownerEventRecovery",
+                    new OwnerActorEventSubscriptionRecoveryScheduler(
+                            List.of(
+                                    profileEventInterests,
+                                    domainEventInterests,
+                                    allianceEventInterests,
+                                    friendEventInterests
+                            ),
+                            config.eventSubscriptionRecoveryInterval()
+                    )
+            );
+            ownerEventRecovery.start();
             SceneServiceStrategy activeSceneService = new ProfileAwareSceneService(
                     sceneService,
                     profileAwareness,
@@ -281,8 +322,21 @@ public final class SceneServerMain {
                     config.runtimeHealthPolicy()
             );
             runtime.observe("sceneRuntime", activeSceneService);
+            InboundAdmissionController sceneAdmissions = sceneAdmissions(actors, config.sceneMailboxPressurePolicy());
+            runtime.observe("sceneMailboxPressure", sceneAdmissions);
+            SceneMailboxPressureGate scenePressureGate = new SceneMailboxPressureGate(activeSceneService, sceneAdmissions);
+            startLargeSceneShardTicks(config, sceneService, actorSchedules);
             gateway.handle(SceneOperations.ENTER, (request, responder) -> {
                 EnterSceneRequest payload = (EnterSceneRequest) request.payload();
+                SceneMailboxPressureGate.SceneAdmission admission = scenePressureGate.admitEnter(payload.sceneId(), 0, 0);
+                if (!admission.accepted()) {
+                    responder.failure(new RpcStructuredException(
+                            admission.decision().reason(),
+                            admission.decision().reason(),
+                            admission.decision().retryAfter()
+                    ));
+                    return;
+                }
                 ScenePlacement placement = activeSceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
                 responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), 0));
             });
@@ -363,8 +417,80 @@ public final class SceneServerMain {
         );
     }
 
+    private static void startLargeSceneShardTicks(
+            ClusterNodeConfig config,
+            SceneServiceStrategy sceneService,
+            ActorScheduleRegistry schedules
+    ) {
+        if (config.sceneTickEnabled() && sceneService instanceof LargeSceneShardService largeScene) {
+            largeScene.scheduleShardTicks(
+                    schedules,
+                    config.sceneTickInitialDelay(),
+                    config.sceneTickInterval(),
+                    ignored -> {
+                    }
+            );
+        }
+    }
+
+    private static InboundAdmissionController sceneAdmissions(
+            ActorSystem actors,
+            ActorMailboxPressurePolicy policy
+    ) {
+        return new ActorMailboxPressureAdmissionController(
+                (target, operation) -> AdmissionDecision.accept(),
+                actors,
+                policy,
+                SceneMailboxPressureGate::actorIdOf
+        );
+    }
+
     private static int profileRepairWorkers(ClusterNodeConfig config) {
         return Math.max(1, Math.min(2, config.actorWorkers()));
+    }
+
+    private static OwnerEventInterestControl repairControl(
+            BootRuntime runtime,
+            ClusterNodeConfig config,
+            OwnerEventRepairDispatcher dispatcher,
+            String name,
+            String topic,
+            OwnerEventInterestControl delegate
+    ) {
+        if (!config.eventRepairSchedulerEnabled(topic)) {
+            return delegate;
+        }
+        OwnerEventRepairScheduler scheduler = runtime.add(name, new OwnerEventRepairScheduler(
+                delegate,
+                config.eventRepairInterval(topic),
+                config.eventRepairMaxBatchSize(topic),
+                config.eventRepairPriority(topic),
+                config.eventRepairBackoffPolicy(topic),
+                config.eventRepairIsolationPolicy(topic)
+        ));
+        if (dispatcher == null) {
+            scheduler.start();
+        } else {
+            dispatcher.register(scheduler, config.eventRepairInterval(topic));
+        }
+        return scheduler;
+    }
+
+    private static OwnerEventRepairDispatcher repairDispatcher(ClusterNodeConfig config) {
+        if (!config.eventRepairDispatcherEnabled()) {
+            return null;
+        }
+        return new OwnerEventRepairDispatcher(
+                config.eventRepairDispatcherInterval(),
+                config.eventRepairDispatcherMaxDrainsPerTick()
+        );
+    }
+
+    private static void startRepairDispatcher(BootRuntime runtime, OwnerEventRepairDispatcher dispatcher) {
+        if (dispatcher == null) {
+            return;
+        }
+        runtime.add("eventRepairDispatcher", dispatcher).start();
     }
 
     private static final class NamedThreadFactory implements java.util.concurrent.ThreadFactory {

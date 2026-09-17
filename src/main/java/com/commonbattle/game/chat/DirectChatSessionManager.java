@@ -1,6 +1,8 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.AgentMessagePort;
 
 import java.time.Clock;
@@ -17,8 +19,10 @@ import java.util.function.Consumer;
 public final class DirectChatSessionManager implements ChatRuntimeView {
     private final ActorSystem actors;
     private final AgentMessagePort messages;
+    private final DirectChatAccessPolicy accessPolicy;
     private final ChatMessagePolicy messagePolicy;
     private final ChatDeliverySink deliverySink;
+    private final InboundAdmissionController admissions;
     private final Clock clock;
     private final int maxHistoryMessages;
     private final ConcurrentMap<String, DirectChatSessionAgent> sessions = new ConcurrentHashMap<>();
@@ -30,7 +34,8 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
             ChatMessagePolicy messagePolicy,
             Clock clock
     ) {
-        this(actors, messages, messagePolicy, ChatDeliverySink.noop(), clock, ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
+        this(actors, messages, DirectChatAccessPolicy.allowAll(), messagePolicy, ChatDeliverySink.noop(), clock,
+                ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES, (target, operation) -> AdmissionDecision.accept());
     }
 
     public DirectChatSessionManager(
@@ -40,7 +45,8 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
             Clock clock,
             int maxHistoryMessages
     ) {
-        this(actors, messages, messagePolicy, ChatDeliverySink.noop(), clock, maxHistoryMessages);
+        this(actors, messages, DirectChatAccessPolicy.allowAll(), messagePolicy, ChatDeliverySink.noop(), clock,
+                maxHistoryMessages, (target, operation) -> AdmissionDecision.accept());
     }
 
     public DirectChatSessionManager(
@@ -51,10 +57,39 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
             Clock clock,
             int maxHistoryMessages
     ) {
+        this(actors, messages, DirectChatAccessPolicy.allowAll(), messagePolicy, deliverySink, clock, maxHistoryMessages,
+                (target, operation) -> AdmissionDecision.accept());
+    }
+
+    public DirectChatSessionManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages,
+            InboundAdmissionController admissions
+    ) {
+        this(actors, messages, DirectChatAccessPolicy.allowAll(), messagePolicy, deliverySink, clock,
+                maxHistoryMessages, admissions);
+    }
+
+    public DirectChatSessionManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            DirectChatAccessPolicy accessPolicy,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages,
+            InboundAdmissionController admissions
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
+        this.accessPolicy = Objects.requireNonNull(accessPolicy, "accessPolicy");
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
         this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
+        this.admissions = Objects.requireNonNull(admissions, "admissions");
         this.clock = Objects.requireNonNull(clock, "clock");
         if (maxHistoryMessages <= 0) {
             throw new IllegalArgumentException("maxHistoryMessages must be positive");
@@ -64,6 +99,12 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
 
     public void send(DirectChatSendRequest request, Consumer<ChatSendResult> callback) {
         sendRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.directIdentity(request.senderId(), request.receiverId()),
+                ChatOperations.SEND_DIRECT);
+        if (!admission.accepted()) {
+            callback.accept(ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED));
+            return;
+        }
         session(request.senderId(), request.receiverId()).send(request, callback);
     }
 
@@ -110,9 +151,10 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
         String sessionId = ChatChannelIds.direct(firstPlayerId, secondPlayerId);
         return new DirectChatSessionAgent(
                 messages,
-                actors.actor("chat-" + sessionId),
+                actors.actor(ChatActorIds.directActorId(sessionId)),
                 firstPlayerId,
                 secondPlayerId,
+                accessPolicy,
                 messagePolicy,
                 deliverySink,
                 clock,

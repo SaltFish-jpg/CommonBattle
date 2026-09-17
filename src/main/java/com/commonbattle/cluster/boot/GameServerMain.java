@@ -1,6 +1,7 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
@@ -87,6 +88,7 @@ public final class GameServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
+            ActorScheduleRegistry actorSchedules = BootActorSchedules.configure(runtime, actors);
             LocalGameConfigCache configCache = runtime.add("configCache", new LocalGameConfigCache(
                     new GameConfigValidator(),
                     Clock.systemUTC()
@@ -147,9 +149,11 @@ public final class GameServerMain {
                     configCache,
                     profileSnapshots,
                     friendSnapshots,
+                    allianceSnapshots,
                     playerDomainEvents,
                     profileEvents,
                     friendEvents,
+                    actorSchedules,
                     Clock.systemUTC()
             );
             if (config.clientGatewayEnabled()) {

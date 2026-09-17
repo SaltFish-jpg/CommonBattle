@@ -27,6 +27,19 @@ class ClusterRpcDeliveryFailureMapperTest {
     }
 
     @Test
+    void mapsStructuredAdmissionFailureWithRetryAfter() {
+        var result = mapper.map(new RpcStructuredException(
+                "mailbox_pressure:target",
+                "mailbox_pressure:target",
+                Duration.ofMillis(50)
+        ));
+
+        assertEquals(AgentDeliveryStatus.REJECTED, result.status());
+        assertEquals("mailbox_pressure:target", result.reason());
+        assertEquals(50, result.retryAfter().toMillis());
+    }
+
+    @Test
     void mapsClosedAndUnknownFailures() {
         assertEquals(AgentDeliveryStatus.SYSTEM_CLOSED,
                 mapper.map(new IllegalStateException("RPC resilience gateway is closed")).status());

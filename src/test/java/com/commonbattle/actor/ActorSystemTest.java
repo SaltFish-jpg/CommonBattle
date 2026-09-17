@@ -285,6 +285,31 @@ class ActorSystemTest {
     }
 
     @Test
+    void queuedMailboxStatsExposeHotMailboxesInStableOrder() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        ActorRef player = system.actor("player-10001");
+        ActorRef scene = system.actor("scene-shard:world-1:0");
+
+        system.send(scene, ActorTask.categorized(ActorTaskCategory.TIMER, ignored -> {
+        }));
+        system.send(player, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+        }));
+        system.send(player, ActorTask.categorized(ActorTaskCategory.RPC_CALLBACK, ignored -> {
+        }));
+
+        List<ActorMailboxStats> stats = system.queuedMailboxStats();
+
+        assertEquals(2, stats.size());
+        assertEquals("player-10001", stats.get(0).actor().id());
+        assertEquals(2, stats.get(0).queuedTasks());
+        assertEquals(1, stats.get(0).queuedTasksByCategory().get(ActorTaskCategory.PLAYER_COMMAND));
+        assertEquals(1, stats.get(0).queuedTasksByCategory().get(ActorTaskCategory.RPC_CALLBACK));
+        assertEquals("scene-shard:world-1:0", stats.get(1).actor().id());
+        assertEquals(1, stats.get(1).queuedTasksByCategory().get(ActorTaskCategory.TIMER));
+    }
+
+    @Test
     void statsTrackSlowestTaskAndSlowTaskCount() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem system = new ActorSystem(

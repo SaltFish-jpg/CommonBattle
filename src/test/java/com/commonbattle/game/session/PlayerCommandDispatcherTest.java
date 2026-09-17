@@ -119,8 +119,36 @@ class PlayerCommandDispatcherTest {
         fixture.executor.runNext();
 
         assertEquals(PlayerCommandStatus.RATE_LIMITED, rejected.status());
+        assertEquals(100, rejected.retryAfter().toMillis());
         assertEquals(PlayerCommandStatus.ACCEPTED, retry.status());
         assertEquals(1, handled.get());
+    }
+
+    @Test
+    void mailboxPressureDoesNotConsumeCommandSequence() {
+        AtomicInteger attempts = new AtomicInteger();
+        InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
+        Fixture fixture = Fixture.local(
+                (target, operation) -> attempts.incrementAndGet() == 1
+                        ? AdmissionDecision.reject("mailbox_pressure:target", Duration.ofMillis(50))
+                        : AdmissionDecision.accept(),
+                audit,
+                () -> 0
+        );
+        AtomicInteger handled = new AtomicInteger();
+        fixture.dispatcher.handle("bag.use", (context, command) -> handled.incrementAndGet());
+
+        PlayerCommandResult rejected = fixture.dispatch(command(1));
+        PlayerCommandResult retry = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+
+        assertEquals(PlayerCommandStatus.BACKPRESSURED, rejected.status());
+        assertEquals("mailbox_pressure:target", rejected.reason());
+        assertEquals(50, rejected.retryAfter().toMillis());
+        assertEquals(PlayerCommandStatus.ACCEPTED, retry.status());
+        assertEquals(1, handled.get());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.BACKPRESSURED));
+        assertEquals(PlayerCommandStatus.ACCEPTED, audit.last().dispatchStatus());
     }
 
     @Test

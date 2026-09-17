@@ -1,7 +1,7 @@
 package com.commonbattle.game.profile;
 
 import com.commonbattle.game.event.EventPublisher;
-import com.commonbattle.game.event.ReliableVersionedEventPublisher;
+import com.commonbattle.game.event.ReliableSnapshotEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
 
@@ -12,16 +12,20 @@ import java.util.Objects;
  * 它把 ProfileChangedEvent 转成“保存最新快照 -> 写 outbox -> 尝试发布”的固定边界。
  */
 public final class ReliableProfileEventPublisher implements EventPublisher {
-    private final ProfileSnapshotRepository snapshots;
-    private final ReliableVersionedEventPublisher reliablePublisher;
+    private final ReliableSnapshotEventPublisher<PlayerProfileSnapshot, ProfileChangedEvent> publisher;
 
     public ReliableProfileEventPublisher(
             ProfileSnapshotRepository snapshots,
             VersionedEventOutbox outbox,
             EventPublisher delegate
     ) {
-        this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
-        this.reliablePublisher = new ReliableVersionedEventPublisher(outbox, delegate);
+        Objects.requireNonNull(snapshots, "snapshots");
+        this.publisher = new ReliableSnapshotEventPublisher<>(
+                ProfileChangedEvent.class,
+                snapshots::save,
+                outbox,
+                delegate
+        );
     }
 
     @Override
@@ -29,11 +33,10 @@ public final class ReliableProfileEventPublisher implements EventPublisher {
         if (!(event instanceof ProfileChangedEvent profileEvent)) {
             throw new IllegalArgumentException("ReliableProfileEventPublisher only accepts ProfileChangedEvent");
         }
-        snapshots.save(profileEvent.snapshot());
-        reliablePublisher.publish(profileEvent);
+        publisher.publish(profileEvent.snapshot(), profileEvent);
     }
 
     public void replayPending() {
-        reliablePublisher.replayPending();
+        publisher.replayPending();
     }
 }

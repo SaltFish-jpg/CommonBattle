@@ -3,6 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -28,6 +29,17 @@ final class PlayerGatewayRateLimiter {
         }
         permits--;
         return true;
+    }
+
+    synchronized Duration retryAfter() {
+        refill();
+        if (permits > 0) {
+            return Duration.ZERO;
+        }
+        long interval = policy.refillInterval().toMillis();
+        long elapsed = clock.millis() - lastRefillMillis;
+        long remaining = Math.max(1, interval - Math.floorMod(Math.max(0, elapsed), interval));
+        return Duration.ofMillis(remaining);
     }
 
     private void refill() {

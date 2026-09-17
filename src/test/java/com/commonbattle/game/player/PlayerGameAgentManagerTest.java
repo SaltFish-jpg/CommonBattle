@@ -1,5 +1,6 @@
 package com.commonbattle.game.player;
 
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
@@ -56,6 +57,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -262,6 +264,38 @@ class PlayerGameAgentManagerTest {
             assertEquals(1, fixture.manager.loadedAgents());
         } finally {
             autoSaves.close();
+        }
+    }
+
+    @Test
+    void actorScheduledAutoSaveSubmitsPlayerSaveAfterSchedulerMailboxRuns() throws InterruptedException {
+        Fixture fixture = Fixture.create();
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.clearBattleStage("settle-10001-1", "forest-1", ignored -> {
+        });
+        fixture.executor.runAll();
+
+        try (ActorScheduleRegistry schedules = new ActorScheduleRegistry(fixture.actors);
+             PlayerAutoSaveScheduler autoSaves = new PlayerAutoSaveScheduler(
+                     fixture.manager,
+                     schedules,
+                     fixture.actors.actor("player-autosave:r1-game-1"),
+                     Duration.ofMillis(1),
+                     Duration.ofSeconds(60)
+             )) {
+            autoSaves.start();
+
+            assertTrue(awaitQueued(fixture.actors, 1));
+            assertTrue(fixture.repository.load(10001L).isEmpty());
+            assertEquals(1, schedules.stats().deliveredTimerMessages());
+
+            fixture.executor.runAll();
+
+            assertEquals(1, autoSaves.stats().runs());
+            assertEquals(1, autoSaves.stats().submitted());
+            assertEquals(1, autoSaves.stats().completed());
+            assertEquals(30, fixture.repository.load(10001L).orElseThrow().bag().itemCounts().get("gold"));
         }
     }
 
@@ -555,15 +589,26 @@ class PlayerGameAgentManagerTest {
         private final List<Runnable> commands = new ArrayList<>();
 
         @Override
-        public void execute(Runnable command) {
+        public synchronized void execute(Runnable command) {
             commands.add(command);
         }
 
-        void runAll() {
+        synchronized void runAll() {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
         }
+    }
+
+    private static boolean awaitQueued(ActorSystem actors, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (System.nanoTime() < deadline) {
+            if (actors.stats().queuedTasks() >= expected) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        return actors.stats().queuedTasks() >= expected;
     }
 
     private static final class NoopRpcGateway implements RpcGateway {

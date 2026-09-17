@@ -2,6 +2,7 @@ package com.commonbattle.game.session;
 
 import com.commonbattle.actor.agent.AgentRoute;
 
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -13,10 +14,24 @@ public record PlayerCommandResult(
         PlayerCommandStatus status,
         String reason,
         Optional<AgentRoute> route,
-        Optional<PlayerCommandStatus> originalStatus
+        Optional<PlayerCommandStatus> originalStatus,
+        Duration retryAfter
 ) {
+    public PlayerCommandResult(
+            PlayerCommandStatus status,
+            String reason,
+            Optional<AgentRoute> route,
+            Optional<PlayerCommandStatus> originalStatus
+    ) {
+        this(status, reason, route, originalStatus, Duration.ZERO);
+    }
+
+    public PlayerCommandResult {
+        retryAfter = retryAfter == null || retryAfter.isNegative() ? Duration.ZERO : retryAfter;
+    }
+
     public static PlayerCommandResult accepted() {
-        return new PlayerCommandResult(PlayerCommandStatus.ACCEPTED, "", Optional.empty(), Optional.empty());
+        return new PlayerCommandResult(PlayerCommandStatus.ACCEPTED, "", Optional.empty(), Optional.empty(), Duration.ZERO);
     }
 
     public static PlayerCommandResult duplicate() {
@@ -26,15 +41,19 @@ public record PlayerCommandResult(
     public static PlayerCommandResult duplicateOf(PlayerCommandStatus originalStatus) {
         PlayerCommandStatus status = Objects.requireNonNull(originalStatus, "originalStatus");
         return new PlayerCommandResult(PlayerCommandStatus.DUPLICATE, "duplicate:" + status.name(),
-                Optional.empty(), Optional.of(status));
+                Optional.empty(), Optional.of(status), Duration.ZERO);
     }
 
     public static PlayerCommandResult reject(PlayerCommandStatus status, String reason) {
-        return new PlayerCommandResult(status, reason, Optional.empty(), Optional.empty());
+        return reject(status, reason, Duration.ZERO);
+    }
+
+    public static PlayerCommandResult reject(PlayerCommandStatus status, String reason, Duration retryAfter) {
+        return new PlayerCommandResult(status, reason, Optional.empty(), Optional.empty(), retryAfter);
     }
 
     public static PlayerCommandResult routedRemote(AgentRoute route) {
-        return new PlayerCommandResult(PlayerCommandStatus.ROUTED_REMOTE, "", Optional.of(route), Optional.empty());
+        return new PlayerCommandResult(PlayerCommandStatus.ROUTED_REMOTE, "", Optional.of(route), Optional.empty(), Duration.ZERO);
     }
 
     public boolean waitForExistingResponse() {

@@ -1,6 +1,9 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcRequest;
@@ -13,6 +16,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
 import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
@@ -22,6 +26,7 @@ import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -31,6 +36,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class ChatChannelEndpointTest {
@@ -118,14 +124,59 @@ class ChatChannelEndpointTest {
         }
     }
 
+    @Test
+    void remoteChannelBackpressureReturnsStructuredRpcFailure() {
+        try (Fixture fixture = Fixture.create(new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)))) {
+            fixture.actors.send(fixture.actors.actor(ChatActorIds.channelActorId("world")), ignored -> {
+            });
+            RecordingCallback<ChatJoinResult> joined = new RecordingCallback<>();
+
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.JOIN_CHANNEL,
+                    new ChatJoinRequest("world", 10001L, 0),
+                    ChatJoinResult.class
+            ), joined);
+
+            RpcStructuredException failure = assertInstanceOf(RpcStructuredException.class, joined.failure.get());
+            assertEquals("mailbox_pressure:target", failure.code());
+            assertNull(joined.response.get());
+        }
+    }
+
+    @Test
+    void remoteDirectBackpressureReturnsStructuredRpcFailure() {
+        try (Fixture fixture = Fixture.create(new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)))) {
+            fixture.actors.send(fixture.actors.actor(ChatActorIds.directActorId(10001L, 10002L)), ignored -> {
+            });
+            RecordingCallback<ChatSendResult> sent = new RecordingCallback<>();
+
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.SEND_DIRECT,
+                    new DirectChatSendRequest(10001L, 10002L, "direct", 0),
+                    ChatSendResult.class
+            ), sent);
+
+            RpcStructuredException failure = assertInstanceOf(RpcStructuredException.class, sent.failure.get());
+            assertEquals("mailbox_pressure:target", failure.code());
+            assertNull(sent.response.get());
+        }
+    }
+
     private record Fixture(
             LocalClusterTransport transport,
             RecordingExecutor chatExecutor,
+            ActorSystem actors,
             ClusterRpcGateway gameGateway,
             ClusterRpcGateway chatGateway,
             RoutedChatService routedChat
     ) implements AutoCloseable {
         private static Fixture create() {
+            return create(ActorMailboxPressurePolicy.disabled());
+        }
+
+        private static Fixture create(ActorMailboxPressurePolicy pressurePolicy) {
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
             LocalClusterTransport transport = new LocalClusterTransport();
             ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9101, Set.of());
@@ -151,6 +202,12 @@ class ChatChannelEndpointTest {
             RecordingExecutor chatExecutor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(chatExecutor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, chatGateway);
+            ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    pressurePolicy,
+                    ChatActorIds::actorIdOf
+            );
             ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
                     new SceneProfileAwarenessAgent(
                             messages,
@@ -163,18 +220,36 @@ class ChatChannelEndpointTest {
             );
             ChatMessagePolicy policy = request ->
                     ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());
-            ChatChannelManager manager = new ChatChannelManager(actors, messages, interests, policy, CLOCK);
-            DirectChatSessionManager directSessions = new DirectChatSessionManager(actors, messages, policy, CLOCK);
+            ChatChannelManager manager = new ChatChannelManager(
+                    actors,
+                    messages,
+                    interests,
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    pressure
+            );
+            DirectChatSessionManager directSessions = new DirectChatSessionManager(
+                    actors,
+                    messages,
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    pressure
+            );
             RoutedChatService routedChat = new RoutedChatService(manager, directSessions, new ChatRouteConfig(4));
             new ChatChannelEndpoint(manager).bind(chatGateway);
             new RoutedChatEndpoint(routedChat).bind(chatGateway);
-            return new Fixture(transport, chatExecutor, gameGateway, chatGateway, routedChat);
+            return new Fixture(transport, chatExecutor, actors, gameGateway, chatGateway, routedChat);
         }
 
         @Override
         public void close() {
             gameGateway.close();
             chatGateway.close();
+            actors.close();
             transport.close();
         }
     }

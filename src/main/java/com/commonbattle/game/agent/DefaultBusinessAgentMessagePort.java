@@ -7,6 +7,8 @@ import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.AgentRoute;
 import com.commonbattle.actor.agent.AgentRouteType;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
@@ -31,6 +33,7 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     private final PlayerBusinessCommandGateway playerCommands;
     private final LifecycleAwareAgentRouter router;
     private final BusinessAgentHandlerRegistry handlers;
+    private final InboundAdmissionController admissions;
 
     public DefaultBusinessAgentMessagePort(AgentMessagePort messages, PlayerBusinessCommandGateway playerCommands) {
         this(messages, playerCommands, null, null);
@@ -42,10 +45,21 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             LifecycleAwareAgentRouter router,
             BusinessAgentHandlerRegistry handlers
     ) {
+        this(messages, playerCommands, router, handlers, (target, operation) -> AdmissionDecision.accept());
+    }
+
+    public DefaultBusinessAgentMessagePort(
+            AgentMessagePort messages,
+            PlayerBusinessCommandGateway playerCommands,
+            LifecycleAwareAgentRouter router,
+            BusinessAgentHandlerRegistry handlers,
+            InboundAdmissionController admissions
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.playerCommands = Objects.requireNonNull(playerCommands, "playerCommands");
         this.router = router;
         this.handlers = handlers;
+        this.admissions = Objects.requireNonNull(admissions, "admissions");
     }
 
     @Override
@@ -120,6 +134,12 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
         Objects.requireNonNull(callback, "callback");
         ensureAgentRequestConfigured();
         BusinessAgentRequest request = new BusinessAgentRequest(target, operation, payload);
+        AdmissionDecision admission = admissions.admit(target, operation);
+        if (!admission.accepted()) {
+            failOnRequesterMailbox(requester, options, callback,
+                    new BusinessAgentRequestException(target, operation, admission.reason()));
+            return;
+        }
         AgentRoute route = router.resolve(target);
         if (route.type() == AgentRouteType.LOCAL) {
             askLocalAgent(requester, route.location().orElseThrow(), request, responseType, options, callback);

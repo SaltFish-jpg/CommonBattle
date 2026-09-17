@@ -1325,7 +1325,8 @@ public final class ClusterEventPayloadCodecs {
                 + stringSize(8, battle.progressActivityId())
                 + CodedOutputStream.computeInt32Size(9, battle.progressDelta())
                 + CodedOutputStream.computeByteArraySize(10, encodeReward(battle.firstClearReward()))
-                + CodedOutputStream.computeInt32Size(11, battle.sweepRequiredStars());
+                + CodedOutputStream.computeInt32Size(11, battle.sweepRequiredStars())
+                + CodedOutputStream.computeInt32Size(12, battle.staminaCost());
         byte[] bytes = new byte[size];
         try {
             CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -1340,6 +1341,7 @@ public final class ClusterEventPayloadCodecs {
             output.writeInt32(9, battle.progressDelta());
             output.writeByteArray(10, encodeReward(battle.firstClearReward()));
             output.writeInt32(11, battle.sweepRequiredStars());
+            output.writeInt32(12, battle.staminaCost());
             output.flush();
             return bytes;
         } catch (IOException e) {
@@ -1360,6 +1362,7 @@ public final class ClusterEventPayloadCodecs {
         int progressDelta = 0;
         Reward firstClearReward = Reward.of();
         int sweepRequiredStars = 0;
+        int staminaCost = 0;
         try {
             int tag;
             while ((tag = input.readTag()) != 0) {
@@ -1375,11 +1378,12 @@ public final class ClusterEventPayloadCodecs {
                     case 9 -> progressDelta = input.readInt32();
                     case 10 -> firstClearReward = decodeReward(input.readByteArray());
                     case 11 -> sweepRequiredStars = input.readInt32();
+                    case 12 -> staminaCost = input.readInt32();
                     default -> input.skipField(tag);
                 }
             }
             return new BattleStageDefinition(stageId, playerHp, playerAttack, enemyHp, enemyAttack, maxRounds,
-                    reward, progressActivityId, progressDelta, firstClearReward, sweepRequiredStars);
+                    reward, progressActivityId, progressDelta, firstClearReward, sweepRequiredStars, staminaCost);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode battle stage definition", e);
         }

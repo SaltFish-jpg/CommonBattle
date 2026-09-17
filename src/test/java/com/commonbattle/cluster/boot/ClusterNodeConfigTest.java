@@ -44,6 +44,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("scene.mode", "UNKNOWN");
         properties.setProperty("scene.capacity", "0");
         properties.setProperty("scene.shards", "-1");
+        properties.setProperty("scene.tick.enabled", "maybe");
+        properties.setProperty("scene.tick.initial.delay.millis", "-1");
+        properties.setProperty("scene.tick.interval.millis", "0");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.SCENE);
 
@@ -55,6 +58,9 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("scene.mode"));
         assertTrue(keys.contains("scene.capacity"));
         assertTrue(keys.contains("scene.shards"));
+        assertTrue(keys.contains("scene.tick.enabled"));
+        assertTrue(keys.contains("scene.tick.initial.delay.millis"));
+        assertTrue(keys.contains("scene.tick.interval.millis"));
     }
 
     @Test
@@ -105,6 +111,33 @@ class ClusterNodeConfigTest {
                 config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.PLAYER_COMMAND));
         org.junit.jupiter.api.Assertions.assertEquals(30,
                 config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.RPC_CALLBACK));
+    }
+
+    @Test
+    void sceneTickConfigCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "SCENE");
+        properties.setProperty("scene.tick.enabled", "true");
+        properties.setProperty("scene.tick.initial.delay.millis", "250");
+        properties.setProperty("scene.tick.interval.millis", "50");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertTrue(config.sceneTickEnabled());
+        assertEquals(250, config.sceneTickInitialDelay().toMillis());
+        assertEquals(50, config.sceneTickInterval().toMillis());
+    }
+
+    @Test
+    void sceneTickConfigDefaultsToDisabled() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "SCENE");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertFalse(config.sceneTickEnabled());
+        assertEquals(1_000, config.sceneTickInitialDelay().toMillis());
+        assertEquals(100, config.sceneTickInterval().toMillis());
     }
 
     @Test
@@ -206,12 +239,23 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.command.rate.capacity", "800");
         properties.setProperty("cluster.player.command.rate.refill.permits", "400");
         properties.setProperty("cluster.player.command.rate.refill.interval.millis", "500");
+        properties.setProperty("cluster.player.command.mailbox.pressure.enabled", "true");
+        properties.setProperty("cluster.player.command.mailbox.pressure.target.max.queued", "300");
+        properties.setProperty("cluster.player.command.mailbox.pressure.group.max.queued", "3000");
+        properties.setProperty("cluster.player.command.mailbox.pressure.retry.after.millis", "75");
+        properties.setProperty("cluster.business.agent.mailbox.pressure.enabled", "true");
+        properties.setProperty("cluster.business.agent.mailbox.pressure.target.max.queued", "120");
+        properties.setProperty("cluster.business.agent.mailbox.pressure.group.max.queued", "1200");
+        properties.setProperty("cluster.business.agent.mailbox.pressure.retry.after.millis", "80");
         properties.setProperty("cluster.player.state.store", "FILE");
         properties.setProperty("cluster.player.state.store.dir", "data/custom-player-state");
         properties.setProperty("cluster.player.auto.save.enabled", "false");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "15000");
         properties.setProperty("cluster.player.auto.save.interval.millis", "45000");
         properties.setProperty("cluster.player.business.response.timeout.millis", "3500");
+        properties.setProperty("cluster.player.growth.stamina.recovery.enabled", "true");
+        properties.setProperty("cluster.player.growth.stamina.recovery.initial.delay.millis", "3000");
+        properties.setProperty("cluster.player.growth.stamina.recovery.interval.millis", "15000");
         properties.setProperty("game.server.open.time", "2026-08-01T00:00:00Z");
 
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
@@ -219,12 +263,23 @@ class ClusterNodeConfigTest {
         assertEquals(800, config.playerCommandRateLimitPolicy().capacity());
         assertEquals(400, config.playerCommandRateLimitPolicy().refillPermits());
         assertEquals(500, config.playerCommandRateLimitPolicy().refillInterval().toMillis());
+        assertTrue(config.playerCommandMailboxPressurePolicy().enabled());
+        assertEquals(300, config.playerCommandMailboxPressurePolicy().maxTargetQueuedTasks());
+        assertEquals(3000, config.playerCommandMailboxPressurePolicy().maxGroupQueuedTasks());
+        assertEquals(75, config.playerCommandMailboxPressurePolicy().retryAfter().toMillis());
+        assertTrue(config.businessAgentMailboxPressurePolicy().enabled());
+        assertEquals(120, config.businessAgentMailboxPressurePolicy().maxTargetQueuedTasks());
+        assertEquals(1200, config.businessAgentMailboxPressurePolicy().maxGroupQueuedTasks());
+        assertEquals(80, config.businessAgentMailboxPressurePolicy().retryAfter().toMillis());
         assertEquals(PlayerStateStoreKind.FILE, config.playerStateStoreKind());
         assertEquals(java.nio.file.Path.of("data/custom-player-state"), config.playerStateStoreDirectory());
         assertFalse(config.playerAutoSaveEnabled());
         assertEquals(15_000, config.playerAutoSaveInitialDelay().toMillis());
         assertEquals(45_000, config.playerAutoSaveInterval().toMillis());
         assertEquals(3_500, config.playerBusinessResponseTimeout().toMillis());
+        assertTrue(config.playerGrowthStaminaRecoveryEnabled());
+        assertEquals(3_000, config.playerGrowthStaminaRecoveryInitialDelay().toMillis());
+        assertEquals(15_000, config.playerGrowthStaminaRecoveryInterval().toMillis());
         assertEquals(Instant.parse("2026-08-01T00:00:00Z"), config.gameServerOpenTime());
     }
 
@@ -244,6 +299,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.auto.save.enabled", "maybe");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "-1");
         properties.setProperty("cluster.player.auto.save.interval.millis", "0");
+        properties.setProperty("cluster.player.growth.stamina.recovery.enabled", "maybe");
+        properties.setProperty("cluster.player.growth.stamina.recovery.initial.delay.millis", "-1");
+        properties.setProperty("cluster.player.growth.stamina.recovery.interval.millis", "0");
         properties.setProperty("cluster.client.enabled", "maybe");
         properties.setProperty("cluster.client.port", "0");
         properties.setProperty("cluster.client.heartbeat.ack.enabled", "maybe");
@@ -277,6 +335,9 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.player.auto.save.enabled"));
         assertTrue(keys.contains("cluster.player.auto.save.initial.delay.millis"));
         assertTrue(keys.contains("cluster.player.auto.save.interval.millis"));
+        assertTrue(keys.contains("cluster.player.growth.stamina.recovery.enabled"));
+        assertTrue(keys.contains("cluster.player.growth.stamina.recovery.initial.delay.millis"));
+        assertTrue(keys.contains("cluster.player.growth.stamina.recovery.interval.millis"));
         assertTrue(keys.contains("cluster.client.enabled"));
         assertTrue(keys.contains("cluster.client.port"));
         assertTrue(keys.contains("cluster.client.heartbeat.ack.enabled"));
@@ -336,6 +397,18 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.event.subscription.lease.ttl.millis", "13000");
         properties.setProperty("cluster.event.subscription.lease.renew.interval.millis", "4000");
         properties.setProperty("cluster.event.subscription.lease.scan.interval.millis", "900");
+        properties.setProperty("cluster.event.repair.scheduler.enabled", "false");
+        properties.setProperty("cluster.event.repair.dispatcher.enabled", "false");
+        properties.setProperty("cluster.event.repair.dispatcher.interval.millis", "750");
+        properties.setProperty("cluster.event.repair.dispatcher.max.drains.per.tick", "3");
+        properties.setProperty("cluster.event.repair.interval.millis", "2500");
+        properties.setProperty("cluster.event.repair.max.batch.size", "32");
+        properties.setProperty("cluster.event.repair.priority", "3");
+        properties.setProperty("cluster.event.repair.backoff.initial.millis", "100");
+        properties.setProperty("cluster.event.repair.backoff.max.millis", "2000");
+        properties.setProperty("cluster.event.repair.backoff.multiplier", "1.5");
+        properties.setProperty("cluster.event.repair.owner.isolation.max.failures", "4");
+        properties.setProperty("cluster.event.repair.owner.isolation.duration.millis", "30000");
         properties.setProperty("cluster.ops.host", "0.0.0.0");
         properties.setProperty("cluster.ops.port", "19101");
 
@@ -352,8 +425,63 @@ class ClusterNodeConfigTest {
         org.junit.jupiter.api.Assertions.assertEquals(13000, config.eventSubscriptionLeaseTtl().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(4000, config.eventSubscriptionLeaseRenewInterval().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(900, config.eventSubscriptionLeaseScanInterval().toMillis());
+        assertFalse(config.eventRepairSchedulerEnabled());
+        assertFalse(config.eventRepairDispatcherEnabled());
+        org.junit.jupiter.api.Assertions.assertEquals(750, config.eventRepairDispatcherInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(3, config.eventRepairDispatcherMaxDrainsPerTick());
+        org.junit.jupiter.api.Assertions.assertEquals(2500, config.eventRepairInterval().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(32, config.eventRepairMaxBatchSize());
+        org.junit.jupiter.api.Assertions.assertEquals(3, config.eventRepairPriority());
+        org.junit.jupiter.api.Assertions.assertEquals(100,
+                config.eventRepairBackoffPolicy("friend.changed").initialDelay().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(2000,
+                config.eventRepairBackoffPolicy("friend.changed").maxDelay().toMillis());
+        org.junit.jupiter.api.Assertions.assertEquals(1.5,
+                config.eventRepairBackoffPolicy("friend.changed").multiplier(),
+                0.0001);
+        org.junit.jupiter.api.Assertions.assertEquals(4,
+                config.eventRepairIsolationPolicy("friend.changed").maxFailures());
+        org.junit.jupiter.api.Assertions.assertEquals(30000,
+                config.eventRepairIsolationPolicy("friend.changed").duration().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals("0.0.0.0", config.opsEndpoint().host());
         org.junit.jupiter.api.Assertions.assertEquals(19101, config.opsEndpoint().port());
+    }
+
+    @Test
+    void eventRepairTopicOverridesInheritGlobalDefaults() {
+        Properties properties = base();
+        properties.setProperty("cluster.event.repair.scheduler.enabled", "true");
+        properties.setProperty("cluster.event.repair.interval.millis", "5000");
+        properties.setProperty("cluster.event.repair.max.batch.size", "64");
+        properties.setProperty("cluster.event.repair.priority", "2");
+        properties.setProperty("cluster.event.repair.backoff.initial.millis", "1000");
+        properties.setProperty("cluster.event.repair.backoff.max.millis", "30000");
+        properties.setProperty("cluster.event.repair.backoff.multiplier", "2.0");
+        properties.setProperty("cluster.event.repair.owner.isolation.max.failures", "3");
+        properties.setProperty("cluster.event.repair.owner.isolation.duration.millis", "60000");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.scheduler.enabled", "false");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.interval.millis", "2500");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.priority", "9");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.backoff.max.millis", "5000");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.owner.isolation.duration.millis", "10000");
+        properties.setProperty("cluster.event.repair.topic.alliance.member.changed.max.batch.size", "128");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertFalse(config.eventRepairSchedulerEnabled("friend.changed"));
+        assertEquals(2500, config.eventRepairInterval("friend.changed").toMillis());
+        assertEquals(64, config.eventRepairMaxBatchSize("friend.changed"));
+        assertEquals(9, config.eventRepairPriority("friend.changed"));
+        assertEquals(1000, config.eventRepairBackoffPolicy("friend.changed").initialDelay().toMillis());
+        assertEquals(5000, config.eventRepairBackoffPolicy("friend.changed").maxDelay().toMillis());
+        assertEquals(3, config.eventRepairIsolationPolicy("friend.changed").maxFailures());
+        assertEquals(10000, config.eventRepairIsolationPolicy("friend.changed").duration().toMillis());
+        assertTrue(config.eventRepairSchedulerEnabled("alliance.member.changed"));
+        assertEquals(5000, config.eventRepairInterval("alliance.member.changed").toMillis());
+        assertEquals(128, config.eventRepairMaxBatchSize("alliance.member.changed"));
+        assertEquals(2, config.eventRepairPriority("alliance.member.changed"));
+        assertEquals(30000, config.eventRepairBackoffPolicy("alliance.member.changed").maxDelay().toMillis());
+        assertEquals(60000, config.eventRepairIsolationPolicy("alliance.member.changed").duration().toMillis());
     }
 
     @Test
@@ -406,6 +534,30 @@ class ClusterNodeConfigTest {
         assertEquals(512, config.chatRouteConfig().maxPendingDeliveriesPerRecipient());
         assertEquals(com.commonbattle.game.chat.ChatDeliveryOverflowStrategy.DROP_NEWEST,
                 config.chatRouteConfig().deliveryOverflowStrategy());
+    }
+
+    @Test
+    void serviceMailboxPressurePoliciesCanBeConfiguredIndependently() {
+        Properties properties = base();
+        properties.setProperty("cluster.chat.mailbox.pressure.enabled", "true");
+        properties.setProperty("cluster.chat.mailbox.pressure.target.max.queued", "300");
+        properties.setProperty("cluster.chat.mailbox.pressure.group.max.queued", "3000");
+        properties.setProperty("cluster.chat.mailbox.pressure.retry.after.millis", "75");
+        properties.setProperty("cluster.scene.mailbox.pressure.enabled", "true");
+        properties.setProperty("cluster.scene.mailbox.pressure.target.max.queued", "400");
+        properties.setProperty("cluster.scene.mailbox.pressure.group.max.queued", "4000");
+        properties.setProperty("cluster.scene.mailbox.pressure.retry.after.millis", "80");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertTrue(config.chatMailboxPressurePolicy().enabled());
+        assertEquals(300, config.chatMailboxPressurePolicy().maxTargetQueuedTasks());
+        assertEquals(3000, config.chatMailboxPressurePolicy().maxGroupQueuedTasks());
+        assertEquals(75, config.chatMailboxPressurePolicy().retryAfter().toMillis());
+        assertTrue(config.sceneMailboxPressurePolicy().enabled());
+        assertEquals(400, config.sceneMailboxPressurePolicy().maxTargetQueuedTasks());
+        assertEquals(4000, config.sceneMailboxPressurePolicy().maxGroupQueuedTasks());
+        assertEquals(80, config.sceneMailboxPressurePolicy().retryAfter().toMillis());
     }
 
     @Test
@@ -475,6 +627,29 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.event.subscription.lease.ttl.millis", "0");
         properties.setProperty("cluster.event.subscription.lease.renew.interval.millis", "0");
         properties.setProperty("cluster.event.subscription.lease.scan.interval.millis", "0");
+        properties.setProperty("cluster.event.repair.scheduler.enabled", "maybe");
+        properties.setProperty("cluster.event.repair.dispatcher.enabled", "maybe");
+        properties.setProperty("cluster.event.repair.dispatcher.interval.millis", "0");
+        properties.setProperty("cluster.event.repair.dispatcher.max.drains.per.tick", "0");
+        properties.setProperty("cluster.event.repair.interval.millis", "0");
+        properties.setProperty("cluster.event.repair.max.batch.size", "-1");
+        properties.setProperty("cluster.event.repair.priority", "-1");
+        properties.setProperty("cluster.event.repair.backoff.initial.millis", "-1");
+        properties.setProperty("cluster.event.repair.backoff.max.millis", "bad");
+        properties.setProperty("cluster.event.repair.backoff.multiplier", "0.5");
+        properties.setProperty("cluster.event.repair.owner.isolation.max.failures", "-1");
+        properties.setProperty("cluster.event.repair.owner.isolation.duration.millis", "-1");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.scheduler.enabled", "bad");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.interval.millis", "0");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.priority", "-1");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.backoff.initial.millis", "2000");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.backoff.max.millis", "1000");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.backoff.multiplier", "bad");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.owner.isolation.max.failures", "-1");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.owner.isolation.duration.millis", "-1");
+        properties.setProperty("cluster.event.repair.topic.alliance.member.changed.max.batch.size", "-1");
+        properties.setProperty("cluster.event.repair.topic..interval.millis", "1000");
+        properties.setProperty("cluster.event.repair.topic.friend.changed.unknown", "1");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
 
@@ -488,6 +663,28 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.event.subscription.lease.ttl.millis"));
         assertTrue(keys.contains("cluster.event.subscription.lease.renew.interval.millis"));
         assertTrue(keys.contains("cluster.event.subscription.lease.scan.interval.millis"));
+        assertTrue(keys.contains("cluster.event.repair.scheduler.enabled"));
+        assertTrue(keys.contains("cluster.event.repair.dispatcher.enabled"));
+        assertTrue(keys.contains("cluster.event.repair.dispatcher.interval.millis"));
+        assertTrue(keys.contains("cluster.event.repair.dispatcher.max.drains.per.tick"));
+        assertTrue(keys.contains("cluster.event.repair.interval.millis"));
+        assertTrue(keys.contains("cluster.event.repair.max.batch.size"));
+        assertTrue(keys.contains("cluster.event.repair.priority"));
+        assertTrue(keys.contains("cluster.event.repair.backoff.initial.millis"));
+        assertTrue(keys.contains("cluster.event.repair.backoff.max.millis"));
+        assertTrue(keys.contains("cluster.event.repair.backoff.multiplier"));
+        assertTrue(keys.contains("cluster.event.repair.owner.isolation.max.failures"));
+        assertTrue(keys.contains("cluster.event.repair.owner.isolation.duration.millis"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.scheduler.enabled"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.interval.millis"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.priority"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.backoff.max.millis"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.backoff.multiplier"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.owner.isolation.max.failures"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.owner.isolation.duration.millis"));
+        assertTrue(keys.contains("cluster.event.repair.topic.alliance.member.changed.max.batch.size"));
+        assertTrue(keys.contains("cluster.event.repair.topic..interval.millis"));
+        assertTrue(keys.contains("cluster.event.repair.topic.friend.changed.unknown"));
     }
 
     @Test

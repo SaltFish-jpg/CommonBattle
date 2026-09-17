@@ -8,10 +8,20 @@ import java.util.Objects;
 public record PlayerClientRejectResponse(
         PlayerClientErrorCode code,
         String message,
+        long retryAfterMillis,
         boolean closeConnection
 ) {
     public PlayerClientRejectResponse {
         code = Objects.requireNonNull(code, "code");
         message = Objects.requireNonNullElse(message, "").trim();
+        retryAfterMillis = Math.max(0, retryAfterMillis);
+    }
+
+    public PlayerClientRejectResponse(
+            PlayerClientErrorCode code,
+            String message,
+            boolean closeConnection
+    ) {
+        this(code, message, 0, closeConnection);
     }
 }

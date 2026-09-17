@@ -181,7 +181,8 @@ final class BootOpsHttp {
                 probe,
                 new ServerDrainController(probe, clock, duration -> Thread.sleep(duration.toMillis()),
                         registry.drainableComponents()),
-                config.drainConfig()
+                config.drainConfig(),
+                registry.ownerEventRepairIsolationAdmins()
         );
         server.start();
         return server;

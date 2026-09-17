@@ -1,12 +1,17 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.agent.remote.RemoteAgentDirectory;
 import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.backpressure.TokenBucketAgentAdmissionController;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -46,10 +51,13 @@ import com.commonbattle.game.session.PlayerLoginService;
 import com.commonbattle.game.session.PlayerOutboundDeliveryHub;
 import com.commonbattle.game.session.PlayerSessionRegistry;
 import com.commonbattle.game.social.AllianceAgentManager;
+import com.commonbattle.game.social.AllianceSnapshotRepository;
 import com.commonbattle.game.social.FriendAgentManager;
 import com.commonbattle.game.social.InMemoryAllianceSnapshotRepository;
 import com.commonbattle.game.social.FriendSnapshotRepository;
 import com.commonbattle.game.social.InMemoryFriendSnapshotRepository;
+import com.commonbattle.game.social.ReliableAllianceMemberEventPublisher;
+import com.commonbattle.game.social.ReliableFriendChangePublisher;
 import com.commonbattle.game.social.SocialAgentOperationBinder;
 import com.commonbattle.game.shop.ShopStockAsyncClient;
 
@@ -104,6 +112,7 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 new InMemoryFriendSnapshotRepository(),
+                new InMemoryAllianceSnapshotRepository(),
                 playerDomainEvents,
                 profileEvents,
                 playerDomainEvents,
@@ -121,6 +130,7 @@ record BootGamePlayerRuntime(
             LocalGameConfigCache configCache,
             ProfileSnapshotRepository profileSnapshots,
             FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
             EventPublisher playerDomainEvents,
             EventPublisher profileEvents,
             EventPublisher friendEvents,
@@ -135,10 +145,11 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 friendSnapshots,
+                allianceSnapshots,
                 playerDomainEvents,
                 profileEvents,
                 friendEvents,
-                new com.commonbattle.game.shop.RemoteShopStockAsyncClient(routedPlayerRpc(config, gateway)),
+                (ActorScheduleRegistry) null,
                 clock
         );
     }
@@ -152,10 +163,82 @@ record BootGamePlayerRuntime(
             LocalGameConfigCache configCache,
             ProfileSnapshotRepository profileSnapshots,
             FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
+            EventPublisher playerDomainEvents,
+            EventPublisher profileEvents,
+            EventPublisher friendEvents,
+            ActorScheduleRegistry actorSchedules,
+            Clock clock
+    ) {
+        return configure(
+                runtime,
+                config,
+                local,
+                actors,
+                gateway,
+                configCache,
+                profileSnapshots,
+                friendSnapshots,
+                allianceSnapshots,
+                playerDomainEvents,
+                profileEvents,
+                friendEvents,
+                new com.commonbattle.game.shop.RemoteShopStockAsyncClient(routedPlayerRpc(config, gateway)),
+                actorSchedules,
+                clock
+        );
+    }
+
+    static BootGamePlayerRuntime configure(
+            BootRuntime runtime,
+            ClusterNodeConfig config,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            ClusterRpcGateway gateway,
+            LocalGameConfigCache configCache,
+            ProfileSnapshotRepository profileSnapshots,
+            FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
             EventPublisher playerDomainEvents,
             EventPublisher profileEvents,
             EventPublisher friendEvents,
             ShopStockAsyncClient shopStockAsyncClient,
+            Clock clock
+    ) {
+        return configure(
+                runtime,
+                config,
+                local,
+                actors,
+                gateway,
+                configCache,
+                profileSnapshots,
+                friendSnapshots,
+                allianceSnapshots,
+                playerDomainEvents,
+                profileEvents,
+                friendEvents,
+                shopStockAsyncClient,
+                null,
+                clock
+        );
+    }
+
+    static BootGamePlayerRuntime configure(
+            BootRuntime runtime,
+            ClusterNodeConfig config,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            ClusterRpcGateway gateway,
+            LocalGameConfigCache configCache,
+            ProfileSnapshotRepository profileSnapshots,
+            FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
+            EventPublisher playerDomainEvents,
+            EventPublisher profileEvents,
+            EventPublisher friendEvents,
+            ShopStockAsyncClient shopStockAsyncClient,
+            ActorScheduleRegistry actorSchedules,
             Clock clock
     ) {
         return configure(
@@ -168,6 +251,7 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 friendSnapshots,
+                allianceSnapshots,
                 playerDomainEvents,
                 profileEvents,
                 friendEvents,
@@ -175,11 +259,17 @@ record BootGamePlayerRuntime(
                 clock,
                 config.gameServerOpenTime(),
                 config.playerCommandRateLimitPolicy(),
+                config.playerCommandMailboxPressurePolicy(),
+                config.businessAgentMailboxPressurePolicy(),
+                actorSchedules,
                 config.playerAutoSaveEnabled(),
                 config.playerAutoSaveInitialDelay(),
                 config.playerAutoSaveInterval(),
                 config.playerBusinessResponseTimeout(),
-                config.playerGatewayConfig().maxPendingAckMessages()
+                config.playerGatewayConfig().maxPendingAckMessages(),
+                config.playerGrowthStaminaRecoveryEnabled(),
+                config.playerGrowthStaminaRecoveryInitialDelay(),
+                config.playerGrowthStaminaRecoveryInterval()
         );
     }
 
@@ -208,6 +298,7 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 new InMemoryFriendSnapshotRepository(),
+                new InMemoryAllianceSnapshotRepository(),
                 playerDomainEvents,
                 profileEvents,
                 playerDomainEvents,
@@ -228,6 +319,7 @@ record BootGamePlayerRuntime(
             LocalGameConfigCache configCache,
             ProfileSnapshotRepository profileSnapshots,
             FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
             EventPublisher playerDomainEvents,
             EventPublisher profileEvents,
             EventPublisher friendEvents,
@@ -245,6 +337,7 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 friendSnapshots,
+                allianceSnapshots,
                 playerDomainEvents,
                 profileEvents,
                 friendEvents,
@@ -265,6 +358,7 @@ record BootGamePlayerRuntime(
             LocalGameConfigCache configCache,
             ProfileSnapshotRepository profileSnapshots,
             FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
             EventPublisher playerDomainEvents,
             EventPublisher profileEvents,
             EventPublisher friendEvents,
@@ -283,6 +377,7 @@ record BootGamePlayerRuntime(
                 configCache,
                 profileSnapshots,
                 friendSnapshots,
+                allianceSnapshots,
                 playerDomainEvents,
                 profileEvents,
                 friendEvents,
@@ -290,11 +385,17 @@ record BootGamePlayerRuntime(
                 clock,
                 serverOpenTime,
                 commandRateLimitPolicy,
+                ActorMailboxPressurePolicy.disabled(),
+                ActorMailboxPressurePolicy.disabled(),
+                null,
                 false,
                 Duration.ZERO,
                 Duration.ofSeconds(60),
                 PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT,
-                PlayerGatewayConfig.defaults().maxPendingAckMessages()
+                PlayerGatewayConfig.defaults().maxPendingAckMessages(),
+                false,
+                Duration.ZERO,
+                Duration.ofMinutes(5)
         );
     }
 
@@ -308,6 +409,7 @@ record BootGamePlayerRuntime(
             LocalGameConfigCache configCache,
             ProfileSnapshotRepository profileSnapshots,
             FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
             EventPublisher playerDomainEvents,
             EventPublisher profileEvents,
             EventPublisher friendEvents,
@@ -315,11 +417,77 @@ record BootGamePlayerRuntime(
             Clock clock,
             Instant serverOpenTime,
             AgentRateLimitPolicy commandRateLimitPolicy,
+            ActorScheduleRegistry actorSchedules,
             boolean autoSaveEnabled,
             Duration autoSaveInitialDelay,
             Duration autoSaveInterval,
             Duration businessResponseTimeout,
-            int maxPendingAckMessagesPerPlayer
+            int maxPendingAckMessagesPerPlayer,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaRecoveryInitialDelay,
+            Duration growthStaminaRecoveryInterval
+    ) {
+        return configure(
+                runtime,
+                local,
+                actors,
+                rpc,
+                agentDirectory,
+                stateRepository,
+                configCache,
+                profileSnapshots,
+                friendSnapshots,
+                allianceSnapshots,
+                playerDomainEvents,
+                profileEvents,
+                friendEvents,
+                shopStockAsyncClient,
+                clock,
+                serverOpenTime,
+                commandRateLimitPolicy,
+                ActorMailboxPressurePolicy.disabled(),
+                ActorMailboxPressurePolicy.disabled(),
+                actorSchedules,
+                autoSaveEnabled,
+                autoSaveInitialDelay,
+                autoSaveInterval,
+                businessResponseTimeout,
+                maxPendingAckMessagesPerPlayer,
+                growthStaminaRecoveryEnabled,
+                growthStaminaRecoveryInitialDelay,
+                growthStaminaRecoveryInterval
+        );
+    }
+
+    static BootGamePlayerRuntime configure(
+            BootRuntime runtime,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            RpcGateway rpc,
+            AgentDirectory agentDirectory,
+            PlayerStateRepository stateRepository,
+            LocalGameConfigCache configCache,
+            ProfileSnapshotRepository profileSnapshots,
+            FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
+            EventPublisher playerDomainEvents,
+            EventPublisher profileEvents,
+            EventPublisher friendEvents,
+            ShopStockAsyncClient shopStockAsyncClient,
+            Clock clock,
+            Instant serverOpenTime,
+            AgentRateLimitPolicy commandRateLimitPolicy,
+            ActorMailboxPressurePolicy commandMailboxPressurePolicy,
+            ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy,
+            ActorScheduleRegistry actorSchedules,
+            boolean autoSaveEnabled,
+            Duration autoSaveInitialDelay,
+            Duration autoSaveInterval,
+            Duration businessResponseTimeout,
+            int maxPendingAckMessagesPerPlayer,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaRecoveryInitialDelay,
+            Duration growthStaminaRecoveryInterval
     ) {
         Objects.requireNonNull(runtime, "runtime");
         Objects.requireNonNull(local, "local");
@@ -330,15 +498,20 @@ record BootGamePlayerRuntime(
         Objects.requireNonNull(configCache, "configCache");
         Objects.requireNonNull(profileSnapshots, "profileSnapshots");
         Objects.requireNonNull(friendSnapshots, "friendSnapshots");
+        Objects.requireNonNull(allianceSnapshots, "allianceSnapshots");
         Objects.requireNonNull(playerDomainEvents, "playerDomainEvents");
         Objects.requireNonNull(profileEvents, "profileEvents");
         Objects.requireNonNull(friendEvents, "friendEvents");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(serverOpenTime, "serverOpenTime");
         Objects.requireNonNull(commandRateLimitPolicy, "commandRateLimitPolicy");
+        Objects.requireNonNull(commandMailboxPressurePolicy, "commandMailboxPressurePolicy");
+        Objects.requireNonNull(businessAgentMailboxPressurePolicy, "businessAgentMailboxPressurePolicy");
         Objects.requireNonNull(autoSaveInitialDelay, "autoSaveInitialDelay");
         Objects.requireNonNull(autoSaveInterval, "autoSaveInterval");
         Objects.requireNonNull(businessResponseTimeout, "businessResponseTimeout");
+        Objects.requireNonNull(growthStaminaRecoveryInitialDelay, "growthStaminaRecoveryInitialDelay");
+        Objects.requireNonNull(growthStaminaRecoveryInterval, "growthStaminaRecoveryInterval");
         if (maxPendingAckMessagesPerPlayer <= 0) {
             throw new IllegalArgumentException("maxPendingAckMessagesPerPlayer must be positive");
         }
@@ -359,7 +532,7 @@ record BootGamePlayerRuntime(
         AllianceAgentManager allianceAgents = new AllianceAgentManager(
                 actors,
                 messages,
-                new InMemoryAllianceSnapshotRepository(),
+                allianceSnapshots,
                 playerDomainEvents,
                 lifecycles
         );
@@ -383,16 +556,32 @@ record BootGamePlayerRuntime(
                 new PlayerProfileEventProjector(profileSnapshots, profileEvents, clock)::onPlayerDomainEvent,
                 new PlayerProfileSnapshotProjector(profileSnapshots)::project,
                 shopStockAsyncClient,
-                new OutboundPlayerPushPort(outbound)
+                new OutboundPlayerPushPort(outbound),
+                actorSchedules,
+                growthStaminaRecoveryEnabled,
+                growthStaminaRecoveryInitialDelay,
+                growthStaminaRecoveryInterval
         );
         PlayerLoginService logins = new PlayerLoginService(agents, sessions);
         InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
         LifecycleAwareAgentRouter lifecycleRouter = new LifecycleAwareAgentRouter(lifecycles, messages);
+        InboundAdmissionController commandAdmissions = new ActorMailboxPressureAdmissionController(
+                new TokenBucketAgentAdmissionController(commandRateLimitPolicy, clock),
+                actors,
+                commandMailboxPressurePolicy
+        );
+        InboundAdmissionController businessAgentAdmissions = new ActorMailboxPressureAdmissionController(
+                (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept(),
+                actors,
+                businessAgentMailboxPressurePolicy
+        );
+        runtime.observe("playerCommandMailboxPressure", commandAdmissions);
+        runtime.observe("businessAgentMailboxPressure", businessAgentAdmissions);
         PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                 sessions,
                 new PlayerCommandSequencer(),
                 new AdmissionControlledAgentRouter(
-                        new TokenBucketAgentAdmissionController(commandRateLimitPolicy, clock),
+                        commandAdmissions,
                         lifecycleRouter
                 ),
                 audit,
@@ -418,7 +607,8 @@ record BootGamePlayerRuntime(
                 messages,
                 businessCommands,
                 lifecycleRouter,
-                businessAgentHandlers
+                businessAgentHandlers,
+                businessAgentAdmissions
         );
         PlayerBusinessCommandBinder.registerExamples(
                 dispatcher,
@@ -426,15 +616,24 @@ record BootGamePlayerRuntime(
         );
         if (rpc instanceof ClusterRpcGateway clusterRpc) {
             new PlayerBusinessCommandEndpoint(businessCommands).bind(clusterRpc);
-            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers).bind(clusterRpc);
+            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers, businessAgentAdmissions).bind(clusterRpc);
         } else if (rpc instanceof RoutedRpcGateway routed && routed.delegate() instanceof ClusterRpcGateway clusterRpc) {
             new PlayerBusinessCommandEndpoint(businessCommands).bind(clusterRpc);
-            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers).bind(clusterRpc);
+            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers, businessAgentAdmissions).bind(clusterRpc);
         }
         PlayerAutoSaveScheduler autoSaves = null;
         if (autoSaveEnabled) {
+            ActorRef autoSaveActor = actors.actor("player-autosave:" + local.id().wireName());
             autoSaves = runtime.add("playerAutoSaves",
-                    new PlayerAutoSaveScheduler(agents, autoSaveInitialDelay, autoSaveInterval));
+                    actorSchedules == null
+                            ? new PlayerAutoSaveScheduler(agents, autoSaveInitialDelay, autoSaveInterval)
+                            : new PlayerAutoSaveScheduler(
+                                    agents,
+                                    actorSchedules,
+                                    autoSaveActor,
+                                    autoSaveInitialDelay,
+                                    autoSaveInterval
+                            ));
             autoSaves.start();
         }
         PlayerAgentDrainService drain = new PlayerAgentDrainService(agents);

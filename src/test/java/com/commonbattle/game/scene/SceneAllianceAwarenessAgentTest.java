@@ -72,6 +72,7 @@ class SceneAllianceAwarenessAgentTest {
         assertTrue(view.stale());
         assertEquals(3, view.revision());
         assertEquals(List.of(AllianceOwnerKeyParser.ownerKey(100)), interests.repairs);
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 0, 0, 1), scene.projectionStats());
     }
 
     @Test
@@ -90,6 +91,7 @@ class SceneAllianceAwarenessAgentTest {
         assertEquals(List.of(AllianceOwnerKeyParser.ownerKey(100)), interests.repairs);
         assertFalse(scene.allianceOf(10001L).isPresent());
         assertEquals(3, scene.revisionOf(100));
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 0, 0, 0), scene.projectionStats());
     }
 
     @Test
@@ -148,6 +150,64 @@ class SceneAllianceAwarenessAgentTest {
         ScenePlayerAllianceView view = scene.allianceOf(10001L).orElseThrow();
         assertFalse(view.stale());
         assertEquals(3, view.revision());
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void ignoredSnapshotAndDuplicateEventAreCounted() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneAllianceAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.watchAlliance(100);
+        executor.runNext();
+        scene.refresh(new AllianceSnapshot(100, 2, java.util.Set.of(10001L)));
+        executor.runNext();
+        scene.refresh(new AllianceSnapshot(100, 1, java.util.Set.of()));
+        executor.runNext();
+        scene.refresh(new AllianceSnapshot(200, 1, java.util.Set.of(10001L)));
+        executor.runNext();
+        scene.onAllianceChanged(new AllianceMemberChangedEvent(100, 10001L, AllianceMemberAction.JOIN, 1));
+        executor.runNext();
+
+        assertEquals(new SceneProjectionStats(1, 0, 1, 0, 0, 1, 2, 0), scene.projectionStats());
+    }
+
+    @Test
+    void cachedAllianceSnapshotRestoresViewWhenPlayerEntersLater() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneAllianceAwarenessAgent scene = createScene(executor);
+
+        scene.watchAlliance(100);
+        executor.runNext();
+        scene.refresh(new AllianceSnapshot(100, 2, java.util.Set.of(10001L, 20002L)));
+        executor.runNext();
+        scene.enter(20002L);
+        executor.runNext();
+
+        ScenePlayerAllianceView view = scene.allianceOf(20002L).orElseThrow();
+        assertEquals(100, view.allianceId());
+        assertEquals(2, view.revision());
+        assertFalse(view.stale());
+    }
+
+    @Test
+    void unwatchAllianceDropsCachedSnapshotRevisionAndDerivedViews() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneAllianceAwarenessAgent scene = createScene(executor);
+
+        scene.watchAlliance(100);
+        executor.runNext();
+        scene.refresh(new AllianceSnapshot(100, 2, java.util.Set.of(10001L)));
+        executor.runNext();
+        scene.enter(10001L);
+        executor.runNext();
+        scene.unwatchAlliance(100);
+        executor.runNext();
+
+        assertFalse(scene.allianceOf(10001L).isPresent());
+        assertEquals(0, scene.revisionOf(100));
     }
 
     private static SceneAllianceAwarenessAgent createScene(Executor executor) {

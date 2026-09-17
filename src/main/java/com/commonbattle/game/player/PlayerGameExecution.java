@@ -1,7 +1,10 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.game.activity.ActivityAccessContext;
+import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.battle.BattleStaminaNotEnoughException;
+import com.commonbattle.game.growth.GrowthRecoveryResult;
 import com.commonbattle.game.player.event.PlayerDomainEvent;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 
@@ -82,8 +85,32 @@ public record PlayerGameExecution(
     public void pushBattleSettlementSnapshots(BattleSettlementResult result) {
         pushBattleSnapshot();
         pushBagSnapshot();
-        if (!result.progressActivityId().isBlank() && result.progressDelta() > 0) {
-            pushActivitySnapshot();
+        pushActivitySnapshot();
+        pushTaskSnapshot();
+        pushAchievementSnapshot();
+    }
+
+    public void consumeBattleStaminaForNewSettlement(BattleStageDefinition definition, String settlementId) {
+        Objects.requireNonNull(definition, "definition");
+        settlementId = Objects.requireNonNullElse(settlementId, "");
+        if (profile.battle().replay(settlementId, definition.stageId()).isPresent()) {
+            return;
         }
+        if (definition.staminaCost() <= 0) {
+            return;
+        }
+        GrowthRecoveryResult recovery = runtime.growthService().recoverStamina(profile.growth(), activityAccess.now());
+        if (!runtime.growthService().consumeStamina(profile.growth(), definition.staminaCost(), activityAccess.now())) {
+            if (recovery.changed()) {
+                pushGrowthSnapshot();
+            }
+            throw new BattleStaminaNotEnoughException(
+                    definition.stageId(),
+                    definition.staminaCost(),
+                    profile.growth().stamina()
+            );
+        }
+        // 战斗入口资源边界：先按当前时间恢复体力，再扣除本次战斗消耗，成功后才允许进入战斗结算。
+        pushGrowthSnapshot();
     }
 }

@@ -3,6 +3,7 @@ package com.commonbattle.cluster.protocol;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.ClusterEnvelope;
+import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneRequest;
@@ -114,6 +115,25 @@ class ProtoClusterCodecTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals("room-1", requestPayload.sceneId());
         assertEquals(true, responsePayload.left());
+    }
+
+    @Test
+    void encodesStructuredRpcErrorPayload() {
+        ProtoClusterCodec codec = new ProtoClusterCodec(CrossPayloadCodecs.create());
+        ClusterEnvelope response = new ClusterEnvelope(
+                12,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                "$rpc.failure",
+                new ClusterRpcGateway.RpcError("mailbox_pressure:target", "mailbox_pressure:target", 50)
+        );
+
+        ClusterEnvelope decoded = codec.decode(codec.encode(response));
+
+        ClusterRpcGateway.RpcError error = assertInstanceOf(ClusterRpcGateway.RpcError.class, decoded.payload());
+        assertEquals("mailbox_pressure:target", error.code());
+        assertEquals("mailbox_pressure:target", error.message());
+        assertEquals(50, error.retryAfterMillis());
     }
 
     @Test

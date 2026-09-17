@@ -18,10 +18,13 @@ public record ChatRuntimeHealthStats(
         long droppedHistoryMessages,
         long acceptedDeliveryRecipients,
         long droppedDeliveryRecipients,
-        long failedDeliveryRecipients
+        long failedDeliveryRecipients,
+        long allianceRemovedMembers,
+        long allianceEventRemovedMembers,
+        long allianceSnapshotRemovedMembers
 ) {
     public static ChatRuntimeHealthStats empty() {
-        return new ChatRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new ChatRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static ChatRuntimeHealthStats from(int runtimeCount, ChatServiceStats stats) {
@@ -38,7 +41,10 @@ public record ChatRuntimeHealthStats(
                 stats.droppedHistoryMessages(),
                 stats.acceptedDeliveryRecipients(),
                 stats.droppedDeliveryRecipients(),
-                stats.failedDeliveryRecipients()
+                stats.failedDeliveryRecipients(),
+                stats.allianceRemovedMembers(),
+                stats.allianceEventRemovedMembers(),
+                stats.allianceSnapshotRemovedMembers()
         );
     }
 }

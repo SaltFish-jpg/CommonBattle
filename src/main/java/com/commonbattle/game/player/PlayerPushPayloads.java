@@ -42,6 +42,9 @@ public final class PlayerPushPayloads {
         GrowthSnapshotPayload payload = new GrowthSnapshotPayload();
         payload.level = snapshot.level();
         payload.exp = snapshot.exp();
+        payload.stamina = snapshot.stamina();
+        payload.maxStamina = snapshot.maxStamina();
+        payload.staminaUpdatedAtMillis = snapshot.staminaUpdatedAt().toEpochMilli();
         return payload;
     }
 
@@ -119,6 +122,9 @@ public final class PlayerPushPayloads {
     public static class GrowthSnapshotPayload {
         public int level;
         public int exp;
+        public int stamina;
+        public int maxStamina;
+        public long staminaUpdatedAtMillis;
     }
 
     public static class ShopSnapshotPayload {

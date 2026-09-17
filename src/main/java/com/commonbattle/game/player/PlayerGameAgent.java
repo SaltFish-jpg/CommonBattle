@@ -15,6 +15,7 @@ import com.commonbattle.game.battle.BattleService;
 import com.commonbattle.game.config.GameConfigRegistry;
 import com.commonbattle.game.config.GameConfigView;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.growth.GrowthRecoveryResult;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
@@ -456,6 +457,18 @@ public final class PlayerGameAgent {
         });
     }
 
+    public void recoverGrowthStamina(Consumer<GrowthRecoveryResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> {
+            GrowthRecoveryResult result = execution.runtime().growthService()
+                    .recoverStamina(profile.growth(), execution.activityAccess().now());
+            if (result.changed()) {
+                execution.pushGrowthSnapshot();
+            }
+            callback.accept(result);
+        });
+    }
+
     public void buyShopItem(String sku, int quantity, Consumer<ShopPurchaseResult> callback) {
         buyShopItem("", sku, quantity, callback);
     }
@@ -553,6 +566,10 @@ public final class PlayerGameAgent {
     public void clearBattleStage(String settlementId, String stageId, Consumer<BattleSettlementResult> callback) {
         Objects.requireNonNull(callback, "callback");
         execute(execution -> {
+            execution.consumeBattleStaminaForNewSettlement(
+                    execution.runtime().requireBattleService().requireStage(stageId),
+                    settlementId
+            );
             BattleSettlementResult result = execution.runtime().requireBattleService()
                     .clear(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             if (result.victory()) {
@@ -572,6 +589,10 @@ public final class PlayerGameAgent {
     public void sweepBattleStage(String settlementId, String stageId, Consumer<BattleSettlementResult> callback) {
         Objects.requireNonNull(callback, "callback");
         execute(execution -> {
+            execution.consumeBattleStaminaForNewSettlement(
+                    execution.runtime().requireBattleService().requireStage(stageId),
+                    settlementId
+            );
             BattleSettlementResult result = execution.runtime().requireBattleService()
                     .sweep(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
@@ -677,6 +698,28 @@ public final class PlayerGameAgent {
                 initialDelay,
                 interval,
                 ignored -> execution().pushActivitySnapshot()
+        );
+    }
+
+    public ActorTimerHandle scheduleGrowthStaminaRecovery(
+            ActorScheduleRegistry schedules,
+            Duration initialDelay,
+            Duration interval
+    ) {
+        Objects.requireNonNull(schedules, "schedules");
+        return schedules.scheduleAtFixedRate(
+                ActorScheduleKey.of("player.growth.stamina", profile.playerId()),
+                self,
+                initialDelay,
+                interval,
+                ignored -> {
+                    PlayerGameExecution execution = execution();
+                    GrowthRecoveryResult result = execution.runtime().growthService()
+                            .recoverStamina(profile.growth(), execution.activityAccess().now());
+                    if (result.changed()) {
+                        execution.pushGrowthSnapshot();
+                    }
+                }
         );
     }
 

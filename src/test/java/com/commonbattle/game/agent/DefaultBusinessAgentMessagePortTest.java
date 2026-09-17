@@ -9,6 +9,9 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -22,6 +25,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
 import com.commonbattle.game.player.PlayerBusinessCommandEndpoint;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
 import com.commonbattle.game.player.PlayerBusinessResponse;
@@ -44,6 +48,7 @@ import com.commonbattle.game.social.SocialAgentOperations;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -55,6 +60,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class DefaultBusinessAgentMessagePortTest {
@@ -154,6 +160,44 @@ class DefaultBusinessAgentMessagePortTest {
     }
 
     @Test
+    void localBusinessAgentRequestIsRejectedBeforeHotOwnerMailbox() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                rpc,
+                ActorMailboxPressurePolicy.disabled()
+        )) {
+            node.lifecycles().activate(AgentIdentity.alliance(100), "alliance-100");
+            node.executor().runAll();
+            node.actors().send(new ActorRef("alliance-100"), ignored -> {
+            });
+            DefaultBusinessAgentMessagePort pressured = node.businessWithPolicy(
+                    new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)));
+            ActorRef requester = node.actors().actor("requester");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicInteger handled = new AtomicInteger();
+            node.handlers().handle("alliance.memberCount", (context, request) -> {
+                handled.incrementAndGet();
+                return "unexpected";
+            });
+
+            pressured.requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.memberCount",
+                    null,
+                    String.class,
+                    failureOnly(failure)
+            );
+            node.executor().runAll();
+
+            assertEquals(0, handled.get());
+            assertEquals("mailbox_pressure:target", ((BusinessAgentRequestException) failure.get()).reason());
+            assertEquals(0, rpc.calls.get());
+        }
+    }
+
+    @Test
     void requestsRemoteBusinessAgentThroughRpcOwnerMailboxAndRequesterCallbackMailbox() {
         try (RemoteFixture fixture = RemoteFixture.create()) {
             AgentLocation allianceOwner = fixture.owner().lifecycles()
@@ -192,6 +236,46 @@ class DefaultBusinessAgentMessagePortTest {
 
             assertEquals("alliance-100", response.get());
             assertEquals("requester", callbackActor.get());
+        }
+    }
+
+    @Test
+    void remoteBusinessAgentRpcIsRejectedBeforeHotOwnerMailbox() {
+        try (RemoteFixture fixture = RemoteFixture.create(owner -> new ActorMailboxPressureAdmissionController(
+                (target, operation) -> AdmissionDecision.accept(),
+                owner.actors(),
+                new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50))
+        ))) {
+            AgentLocation allianceOwner = fixture.owner().lifecycles()
+                    .activate(AgentIdentity.alliance(100), "alliance-100");
+            fixture.owner().executor().runAll();
+            fixture.owner().actors().send(allianceOwner.actorRef(), ignored -> {
+            });
+            fixture.caller().directory().claim(AgentIdentity.alliance(100), allianceOwner);
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicInteger handled = new AtomicInteger();
+            fixture.owner().handlers().handle("alliance.owner", (context, request) -> {
+                handled.incrementAndGet();
+                return context.self().id();
+            });
+
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.owner",
+                    null,
+                    String.class,
+                    failureOnly(failure)
+            );
+            fixture.owner().executor().runAll();
+            fixture.caller().executor().runAll();
+
+            assertEquals(0, handled.get());
+            RpcStructuredException rejected = assertInstanceOf(RpcStructuredException.class, failure.get());
+            assertEquals("mailbox_pressure:target", rejected.code());
+            assertEquals("mailbox_pressure:target", rejected.getMessage());
+            assertEquals(50, rejected.retryAfter().toMillis());
         }
     }
 
@@ -362,6 +446,20 @@ class DefaultBusinessAgentMessagePortTest {
         };
     }
 
+    private static <T> com.commonbattle.actor.message.LocalAskCallback<T> failureOnly(AtomicReference<Throwable> failure) {
+        return new com.commonbattle.actor.message.LocalAskCallback<>() {
+            @Override
+            public void success(com.commonbattle.actor.ActorContext context, T result) {
+                throw new AssertionError(result);
+            }
+
+            @Override
+            public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                failure.set(error);
+            }
+        };
+    }
+
     private static ServiceDescriptor descriptor(String node, int port) {
         return new ServiceDescriptor(
                 ServiceId.of(ServiceKind.GAME, "r1", node),
@@ -388,16 +486,21 @@ class DefaultBusinessAgentMessagePortTest {
             BusinessAgentHandlerRegistry handlers,
             PlayerBusinessResponseHub responses,
             PlayerBusinessCommandGateway gateway,
+            RpcGateway rpc,
             DefaultBusinessAgentMessagePort business
     ) implements AutoCloseable {
         static PlayerNode localOwner(ServiceId local, RpcGateway rpc) {
+            return localOwner(local, rpc, ActorMailboxPressurePolicy.disabled());
+        }
+
+        static PlayerNode localOwner(ServiceId local, RpcGateway rpc, ActorMailboxPressurePolicy businessPolicy) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
             AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
             lifecycles.activate(AgentIdentity.player(10001L), "player-10001");
             executor.runAll();
-            return create(rpc, actors, executor, directory, lifecycles);
+            return create(rpc, actors, executor, directory, lifecycles, businessPolicy);
         }
 
         static PlayerNode remoteCaller(ServiceId local, RpcGateway rpc, AgentLocation ownerLocation) {
@@ -406,7 +509,7 @@ class DefaultBusinessAgentMessagePortTest {
             InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
             directory.claim(AgentIdentity.player(10001L), ownerLocation);
             AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
-            return create(rpc, actors, executor, directory, lifecycles);
+            return create(rpc, actors, executor, directory, lifecycles, ActorMailboxPressurePolicy.disabled());
         }
 
         private static PlayerNode create(
@@ -414,7 +517,8 @@ class DefaultBusinessAgentMessagePortTest {
                 ActorSystem actors,
                 RecordingExecutor executor,
                 InMemoryAgentDirectory directory,
-                AgentLifecycleManager lifecycles
+                AgentLifecycleManager lifecycles,
+                ActorMailboxPressurePolicy businessPolicy
         ) {
             DefaultAgentMessagePort baseMessages = new DefaultAgentMessagePort(actors, rpc);
             LifecycleAwareAgentRouter router = new LifecycleAwareAgentRouter(lifecycles, baseMessages);
@@ -440,9 +544,31 @@ class DefaultBusinessAgentMessagePortTest {
                     baseMessages,
                     gateway,
                     router,
-                    handlers
+                    handlers,
+                    businessAdmissions(actors, businessPolicy)
             );
-            return new PlayerNode(executor, actors, directory, lifecycles, router, handlers, responses, gateway, business);
+            return new PlayerNode(executor, actors, directory, lifecycles, router, handlers, responses, gateway, rpc, business);
+        }
+
+        private DefaultBusinessAgentMessagePort businessWithPolicy(ActorMailboxPressurePolicy policy) {
+            return new DefaultBusinessAgentMessagePort(
+                    new DefaultAgentMessagePort(actors, rpc),
+                    gateway,
+                    router,
+                    handlers,
+                    businessAdmissions(actors, policy)
+            );
+        }
+
+        private static InboundAdmissionController businessAdmissions(
+                ActorSystem actors,
+                ActorMailboxPressurePolicy policy
+        ) {
+            return new ActorMailboxPressureAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    policy
+            );
         }
 
         @Override
@@ -460,6 +586,10 @@ class DefaultBusinessAgentMessagePortTest {
             PlayerNode owner
     ) implements AutoCloseable {
         static RemoteFixture create() {
+            return create(owner -> (target, operation) -> AdmissionDecision.accept());
+        }
+
+        static RemoteFixture create(java.util.function.Function<PlayerNode, InboundAdmissionController> ownerAdmissions) {
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
             LocalClusterTransport transport = new LocalClusterTransport();
             ClusterTopology topology = new ClusterTopology().allow(ServiceKind.GAME, ServiceKind.GAME);
@@ -471,7 +601,7 @@ class DefaultBusinessAgentMessagePortTest {
             ClusterRpcGateway ownerGateway = new ClusterRpcGateway(ownerDescriptor, directory(registry), topology, transport);
             PlayerNode owner = PlayerNode.localOwner(ownerDescriptor.id(), ownerGateway);
             new PlayerBusinessCommandEndpoint(owner.gateway()).bind(ownerGateway);
-            new BusinessAgentRpcEndpoint(owner.router(), owner.handlers()).bind(ownerGateway);
+            new BusinessAgentRpcEndpoint(owner.router(), owner.handlers(), ownerAdmissions.apply(owner)).bind(ownerGateway);
             PlayerNode caller = PlayerNode.remoteCaller(
                     callerDescriptor.id(),
                     callerGateway,

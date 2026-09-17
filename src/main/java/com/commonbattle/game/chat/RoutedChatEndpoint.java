@@ -1,7 +1,10 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.RpcResponder;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -18,18 +21,42 @@ public final class RoutedChatEndpoint {
     public void bind(ClusterRpcGateway gateway) {
         Objects.requireNonNull(gateway, "gateway");
         gateway.handle(ChatOperations.JOIN_WORLD, (request, responder) ->
-                chat.joinWorld((WorldChatJoinRequest) request.payload(), responder::success));
+                chat.joinWorld((WorldChatJoinRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.LEAVE_WORLD, (request, responder) ->
-                chat.leaveWorld((WorldChatLeaveRequest) request.payload(), responder::success));
+                chat.leaveWorld((WorldChatLeaveRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.SEND_WORLD, (request, responder) ->
-                chat.sendWorld((WorldChatSendRequest) request.payload(), responder::success));
+                chat.sendWorld((WorldChatSendRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.JOIN_ALLIANCE, (request, responder) ->
-                chat.joinAlliance((AllianceChatJoinRequest) request.payload(), responder::success));
+                chat.joinAlliance((AllianceChatJoinRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.LEAVE_ALLIANCE, (request, responder) ->
-                chat.leaveAlliance((AllianceChatLeaveRequest) request.payload(), responder::success));
+                chat.leaveAlliance((AllianceChatLeaveRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.SEND_ALLIANCE, (request, responder) ->
-                chat.sendAlliance((AllianceChatSendRequest) request.payload(), responder::success));
+                chat.sendAlliance((AllianceChatSendRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.SEND_DIRECT, (request, responder) ->
-                chat.sendDirect((DirectChatSendRequest) request.payload(), responder::success));
+                chat.sendDirect((DirectChatSendRequest) request.payload(), result -> respond(responder, result)));
+    }
+
+    private static void respond(RpcResponder responder, ChatJoinResult result) {
+        if (result.status() == ChatJoinStatus.BACKPRESSURED) {
+            responder.failure(RpcStructuredException.rejected("mailbox_pressure:target", Duration.ZERO));
+            return;
+        }
+        responder.success(result);
+    }
+
+    private static void respond(RpcResponder responder, ChatLeaveResult result) {
+        if (result.status() == ChatLeaveStatus.BACKPRESSURED) {
+            responder.failure(RpcStructuredException.rejected("mailbox_pressure:target", Duration.ZERO));
+            return;
+        }
+        responder.success(result);
+    }
+
+    private static void respond(RpcResponder responder, ChatSendResult result) {
+        if (result.status() == ChatSendStatus.BACKPRESSURED) {
+            responder.failure(RpcStructuredException.rejected("mailbox_pressure:target", Duration.ZERO));
+            return;
+        }
+        responder.success(result);
     }
 }

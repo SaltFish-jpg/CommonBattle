@@ -31,6 +31,7 @@ import com.commonbattle.game.battle.BattleStageCatalog;
 import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
+import com.commonbattle.game.growth.GrowthSnapshot;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
@@ -100,6 +101,7 @@ class PlayerBusinessCommandHandlerTest {
         assertEquals(10, fixture.agent.profile().bag().count("gem"));
         assertEquals(2, fixture.agent.profile().activities().progress("battle-win-1").value());
         assertEquals(1, fixture.agent.profile().shop().lifetimePurchased("growth_pack"));
+        assertEquals(110, fixture.agent.profile().growth().stamina());
         assertEquals(6, fixture.audit.records().size());
         assertEquals(PlayerCommandAuditOutcome.EXECUTED, fixture.audit.last().outcome());
         assertEquals(7, fixture.audit.last().configVersion());
@@ -159,6 +161,30 @@ class PlayerBusinessCommandHandlerTest {
                 results.failures.getFirst()
         );
         assertEquals(response, error.response());
+    }
+
+    @Test
+    void battleCommandReportsBusinessRejectedWhenStaminaIsNotEnough() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        Fixture fixture = Fixture.create(results);
+        fixture.agent.profile().growth().restore(new GrowthSnapshot(
+                1,
+                0,
+                3,
+                GrowthSnapshot.DEFAULT_MAX_STAMINA,
+                CLOCK.instant()
+        ));
+
+        fixture.dispatch(new BattleStageClearCommand("settle-10001-1", "forest-1"));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(PlayerBusinessResponse.BUSINESS_REJECTED, response.code());
+        assertTrue(response.message().contains("Not enough stamina"));
+        assertEquals(0, fixture.agent.profile().bag().count("gold"));
+        assertEquals(3, fixture.agent.profile().growth().stamina());
+        assertEquals(PlayerCommandAuditOutcome.FAILED, fixture.audit.last().outcome());
     }
 
     private record Fixture(
@@ -268,7 +294,8 @@ class PlayerBusinessCommandHandlerTest {
                 "battle-win-1",
                 1,
                 Reward.of(new ItemStack("gem", 5)),
-                3
+                3,
+                5
         ));
         return new BattleService(battles, bagService(), activityService());
     }

@@ -42,9 +42,18 @@ class PlayerPushPayloadCodecsTest {
         assertEquals(true, activity.progress.get("daily-login").claimed);
 
         PlayerPushPayloads.GrowthSnapshotPayload growth = roundTrip(registry,
-                PlayerPushPayloads.growth(new GrowthSnapshot(3, 25)));
+                PlayerPushPayloads.growth(new GrowthSnapshot(
+                        3,
+                        25,
+                        7,
+                        120,
+                        Instant.parse("2026-09-01T00:00:00Z")
+                )));
         assertEquals(3, growth.level);
         assertEquals(25, growth.exp);
+        assertEquals(7, growth.stamina);
+        assertEquals(120, growth.maxStamina);
+        assertEquals(Instant.parse("2026-09-01T00:00:00Z").toEpochMilli(), growth.staminaUpdatedAtMillis);
 
         PlayerPushPayloads.ShopSnapshotPayload shop = roundTrip(registry,
                 PlayerPushPayloads.shop(new PlayerShopSnapshot(Map.of("growth_pack", 2), Map.of("growth_pack", 1))));

@@ -5,5 +5,8 @@ package com.commonbattle.game.chat;
  */
 public enum ChatJoinStatus {
     JOINED,
-    ALREADY_JOINED
+    ALREADY_JOINED,
+    STALE_ALLIANCE,
+    NOT_ALLIANCE_MEMBER,
+    BACKPRESSURED
 }

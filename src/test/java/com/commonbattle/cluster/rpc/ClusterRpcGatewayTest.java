@@ -1,6 +1,7 @@
 package com.commonbattle.cluster.rpc;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ClusterDirectory;
@@ -15,6 +16,7 @@ import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.example.cross.AgentStatus;
 import com.commonbattle.example.cross.CrossServerPlayerAgent;
+import com.commonbattle.example.cross.EnterSceneFailureCode;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.EnterSceneResult;
 import com.commonbattle.example.cross.LeaveSceneRequest;
@@ -89,6 +91,49 @@ class ClusterRpcGatewayTest {
             executor.runNext();
             assertEquals(AgentStatus.IN_SCENE, agent.status());
             assertEquals("room-9", agent.sceneId());
+        }
+    }
+
+    @Test
+    void playerAgentReceivesStructuredSceneMailboxPressureFailureThroughRpc() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        RecordingExecutor executor = new RecordingExecutor();
+
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+        registry.register(game);
+        registry.register(scene);
+        ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+        gameDirectory.watch(ServiceKind.SCENE);
+        ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+        sceneDirectory.watch(ServiceKind.GAME);
+        try (ActorSystem actors = new ActorSystem(executor, 1)) {
+            ClusterRpcGateway sceneGateway = new ClusterRpcGateway(scene, sceneDirectory, topology, transport);
+            sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> responder.failure(
+                    new RpcStructuredException(
+                            "mailbox_pressure:target",
+                            "mailbox_pressure:target",
+                            Duration.ofMillis(50)
+                    )
+            ));
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+            CrossServerPlayerAgent agent = new CrossServerPlayerAgent(actors, gameGateway, 10001L);
+
+            agent.enterScene("room-9");
+            executor.runNext();
+            executor.runNext();
+
+            assertEquals(AgentStatus.FAILED, agent.status());
+            assertEquals(AgentDeliveryStatus.REJECTED, agent.lastDeliveryStatus());
+            assertEquals(EnterSceneFailureCode.RPC_REJECTED, agent.lastEnterSceneFailure().code());
+            assertEquals("mailbox_pressure:target", agent.lastEnterSceneFailure().message());
+            assertEquals(50, agent.lastEnterSceneFailure().retryAfter().toMillis());
+            assertEquals(0, gameGateway.stats().pendingRequests());
+            assertEquals(1, gameGateway.stats().failedRequests());
         }
     }
 

@@ -23,6 +23,7 @@ public final class ChatChannelAgent {
     private final ActorRef self;
     private final String channelId;
     private final ScenePlayerInterestCoordinator interests;
+    private final ChatChannelAccessPolicy accessPolicy;
     private final ChatMessagePolicy messagePolicy;
     private final ChatDeliverySink deliverySink;
     private final Clock clock;
@@ -31,6 +32,8 @@ public final class ChatChannelAgent {
     private final List<ChatDelivery> history = new ArrayList<>();
     private long revision;
     private long droppedHistoryMessages;
+    private long allianceEventRemovedMembers;
+    private long allianceSnapshotRemovedMembers;
     private ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
 
     public ChatChannelAgent(
@@ -41,7 +44,9 @@ public final class ChatChannelAgent {
             ChatMessagePolicy messagePolicy,
             Clock clock
     ) {
-        this(messages, self, channelId, interests, messagePolicy, clock, ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
+        this(messages, self, channelId, interests, ChatChannelAccessPolicy.allowAll(), messagePolicy,
+                ChatDeliverySink.noop(), clock,
+                ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
     }
 
     public ChatChannelAgent(
@@ -53,7 +58,8 @@ public final class ChatChannelAgent {
             Clock clock,
             int maxHistoryMessages
     ) {
-        this(messages, self, channelId, interests, messagePolicy, ChatDeliverySink.noop(), clock, maxHistoryMessages);
+        this(messages, self, channelId, interests, ChatChannelAccessPolicy.allowAll(), messagePolicy,
+                ChatDeliverySink.noop(), clock, maxHistoryMessages);
     }
 
     public ChatChannelAgent(
@@ -66,10 +72,26 @@ public final class ChatChannelAgent {
             Clock clock,
             int maxHistoryMessages
     ) {
+        this(messages, self, channelId, interests, ChatChannelAccessPolicy.allowAll(), messagePolicy,
+                deliverySink, clock, maxHistoryMessages);
+    }
+
+    public ChatChannelAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            String channelId,
+            ScenePlayerInterestCoordinator interests,
+            ChatChannelAccessPolicy accessPolicy,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.channelId = ChatJoinRequest.normalizeChannelId(channelId);
         this.interests = Objects.requireNonNull(interests, "interests");
+        this.accessPolicy = Objects.requireNonNull(accessPolicy, "accessPolicy");
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
         this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -105,11 +127,34 @@ public final class ChatChannelAgent {
         messages.tellLocal(self, ActorTaskCategory.OBSERVABILITY, ignored -> callback.accept(snapshotNow()));
     }
 
+    public void removeMemberDueToAllianceChange(long playerId) {
+        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> {
+            if (removeMemberNow(playerId)) {
+                allianceEventRemovedMembers++;
+            }
+        });
+    }
+
+    public void retainMembersDueToAllianceSnapshot(Set<Long> memberIds) {
+        Set<Long> retained = Set.copyOf(Objects.requireNonNull(memberIds, "memberIds"));
+        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> {
+            for (long memberId : Set.copyOf(members)) {
+                if (!retained.contains(memberId) && removeMemberNow(memberId)) {
+                    allianceSnapshotRemovedMembers++;
+                }
+            }
+        });
+    }
+
     public ChatChannelSnapshot snapshotNow() {
         return new ChatChannelSnapshot(channelId, members, history, revision);
     }
 
     private ChatJoinResult joinNow(ChatJoinRequest request) {
+        ChatJoinStatus accessStatus = accessPolicy.inspectJoin(request);
+        if (accessStatus != ChatJoinStatus.JOINED) {
+            return new ChatJoinResult(accessStatus, channelId, request.playerId(), members.size());
+        }
         boolean added = members.add(request.playerId());
         if (added) {
             interests.enter(ScenePlayerInterest.withAlliance(
@@ -127,10 +172,7 @@ public final class ChatChannelAgent {
     }
 
     private ChatLeaveResult leaveNow(ChatLeaveRequest request) {
-        boolean removed = members.remove(request.playerId());
-        if (removed) {
-            interests.leave(request.playerId(), interestKey());
-        }
+        boolean removed = removeMemberNow(request.playerId());
         return new ChatLeaveResult(
                 removed ? ChatLeaveStatus.LEFT : ChatLeaveStatus.NOT_IN_CHANNEL,
                 channelId,
@@ -139,9 +181,21 @@ public final class ChatChannelAgent {
         );
     }
 
+    private boolean removeMemberNow(long playerId) {
+        boolean removed = members.remove(playerId);
+        if (removed) {
+            interests.leave(playerId, interestKey());
+        }
+        return removed;
+    }
+
     private ChatSendResult sendNow(ChatSendRequest request) {
         if (!members.contains(request.senderId())) {
             return ChatSendResult.rejected(ChatSendStatus.NOT_IN_CHANNEL);
+        }
+        ChatSendStatus accessStatus = accessPolicy.inspectSend(request);
+        if (accessStatus != ChatSendStatus.SENT) {
+            return ChatSendResult.rejected(accessStatus);
         }
         ChatMessageDecision decision = messagePolicy.inspect(request);
         if (decision.status() != ChatSendStatus.SENT) {
@@ -172,6 +226,14 @@ public final class ChatChannelAgent {
 
     ChatDeliveryResult deliveryStats() {
         return deliveryStats;
+    }
+
+    long allianceEventRemovedMembers() {
+        return allianceEventRemovedMembers;
+    }
+
+    long allianceSnapshotRemovedMembers() {
+        return allianceSnapshotRemovedMembers;
     }
 
     private void trimHistory() {

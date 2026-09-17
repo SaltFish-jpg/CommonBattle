@@ -4,9 +4,14 @@ import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorScheduleStats;
 import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.agent.migration.AgentMigrationAcceptResponse;
@@ -64,6 +69,10 @@ import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
+import com.commonbattle.game.event.OwnerEventRepairDispatcherStats;
+import com.commonbattle.game.event.OwnerEventRepairDispatcherView;
+import com.commonbattle.game.event.OwnerEventRepairSchedulerStats;
+import com.commonbattle.game.event.OwnerEventRepairSchedulerView;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.config.GameConfigChangedEvent;
@@ -107,6 +116,8 @@ import java.net.ServerSocket;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -187,6 +198,92 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_cluster_directory_version{kind=\"SCENE\"} 4"));
         assertTrue(metrics.contains("commonbattle_cluster_route_tag_services{kind=\"GAME\",tag=\"gray\"} 1"));
         assertTrue(metrics.contains("commonbattle_cluster_deployment_group_services{kind=\"GAME\",group=\"canary-1\"} 1"));
+    }
+
+    @Test
+    void snapshotFormatsActorMailboxDiagnosticsByBusinessGroup() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        actors.send(actors.actor("player-10001"),
+                ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+                }));
+        actors.send(actors.actor("player-10001"),
+                ActorTask.categorized(ActorTaskCategory.RPC_CALLBACK, ignored -> {
+                }));
+        actors.send(actors.actor("scene-shard:world-1:0"),
+                ActorTask.categorized(ActorTaskCategory.TIMER, ignored -> {
+                }));
+        actors.send(actors.actor("player-autosave:game-1"),
+                ActorTask.categorized(ActorTaskCategory.TIMER, ignored -> {
+                }));
+        InMemoryAgentDirectory agentDirectory = new InMemoryAgentDirectory();
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), actors, agentDirectory, CLOCK),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(3, snapshot.actorMailboxes().activeMailboxes());
+        assertEquals(4, snapshot.actorMailboxes().queuedTasks());
+        assertEquals("player-10001", snapshot.actorMailboxes().largestMailboxActorId());
+        assertTrue(json.contains("\"actorMailboxes\""));
+        assertTrue(json.contains("\"group\":\"player\""));
+        assertTrue(json.contains("\"group\":\"scene-shard\""));
+        assertTrue(json.contains("\"group\":\"player-autosave\""));
+        assertTrue(json.contains("\"actorId\":\"player-10001\""));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_diagnostic_queued_tasks 4"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_group_queued_tasks{group=\"player\"} 2"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_group_queued_tasks_by_category{group=\"player\",category=\"PLAYER_COMMAND\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_group_queued_tasks{group=\"scene-shard\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_group_queued_tasks{group=\"player-autosave\"} 1"));
+    }
+
+    @Test
+    void snapshotFormatsActorMailboxPressureStats() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        actors.send(actors.actor("friend-10001"), ActorTask.categorized(ActorTaskCategory.DEFAULT, ignored -> {
+        }));
+        ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
+                (target, operation) -> AdmissionDecision.accept(),
+                actors,
+                new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50))
+        );
+        pressure.admit(AgentIdentity.friend(10001L), "friend.add");
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(pressure);
+        InMemoryAgentDirectory agentDirectory = new InMemoryAgentDirectory();
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), actors, agentDirectory, CLOCK),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.actorMailboxPressures().controllerCount());
+        assertEquals(1, snapshot.actorMailboxPressures().pressureRejected());
+        assertEquals(1, snapshot.actorMailboxPressures().rejectedByTargetType().get(AgentIdentity.FRIEND));
+        assertEquals(1, snapshot.actorMailboxPressures().rejectedByActorGroup().get("friend"));
+        assertTrue(json.contains("\"actorMailboxPressures\""));
+        assertTrue(json.contains("\"rejectedByTargetType\":{\"friend\":1}"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_total 1"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_target_type_total{target_type=\"friend\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_actor_group_total{group=\"friend\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_reason_total{reason=\"mailbox_pressure:target\"} 1"));
     }
 
     @Test
@@ -1571,6 +1668,129 @@ class RuntimeHealthProbeTest {
     }
 
     @Test
+    void snapshotAggregatesOwnerEventRepairSchedulerStatsAndDegradesOnFailures() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        OwnerEventRepairSchedulerView repairScheduler = () -> new OwnerEventRepairSchedulerStats(
+                3,
+                6,
+                9,
+                4,
+                8,
+                5,
+                3,
+                2,
+                4,
+                1,
+                1,
+                7,
+                3,
+                true,
+                5000,
+                2,
+                5,
+                4,
+                3,
+                true,
+                false
+        );
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(repairScheduler);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.ownerEventRepairSchedulers().schedulerCount());
+        assertEquals(3, snapshot.ownerEventRepairSchedulers().pendingOwners());
+        assertEquals(6, snapshot.ownerEventRepairSchedulers().maxDefaultPriority());
+        assertEquals(9, snapshot.ownerEventRepairSchedulers().highestPendingPriority());
+        assertEquals(1, snapshot.ownerEventRepairSchedulers().failedRuns());
+        assertEquals(7, snapshot.ownerEventRepairSchedulers().backoffSkips());
+        assertEquals(3, snapshot.ownerEventRepairSchedulers().maxConsecutiveFailures());
+        assertEquals(5000, snapshot.ownerEventRepairSchedulers().maxBackoffRemainingMillis());
+        assertEquals(2, snapshot.ownerEventRepairSchedulers().isolatedOwners());
+        assertEquals(5, snapshot.ownerEventRepairSchedulers().isolatedOwnersTotal());
+        assertEquals(4, snapshot.ownerEventRepairSchedulers().isolationSkips());
+        assertEquals(3, snapshot.ownerEventRepairSchedulers().releasedIsolatedOwners());
+        assertTrue(json.contains("\"ownerEventRepairSchedulers\":{\"schedulerCount\":1,\"pendingOwners\":3,"
+                + "\"maxDefaultPriority\":6,\"highestPendingPriority\":9"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_pending_owners 3"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_max_default_priority 6"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_highest_pending_priority 9"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_failed_runs_total 1"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_backoff_skips_total 7"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_backoff_active 1"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_isolated_owners 2"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_isolation_skips_total 4"));
+    }
+
+    @Test
+    void snapshotAggregatesOwnerEventRepairDispatcherStatsAndDegradesOnFailures() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        OwnerEventRepairDispatcherView dispatcher = () -> new OwnerEventRepairDispatcherStats(
+                2,
+                1,
+                2,
+                1,
+                9,
+                4,
+                1000,
+                5,
+                4,
+                12,
+                1,
+                2,
+                1,
+                0,
+                false
+        );
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(dispatcher);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.ownerEventRepairDispatchers().dispatcherCount());
+        assertEquals(2, snapshot.ownerEventRepairDispatchers().registeredSchedulers());
+        assertEquals(1, snapshot.ownerEventRepairDispatchers().failedSchedulerRuns());
+        assertTrue(json.contains("\"ownerEventRepairDispatchers\":{\"dispatcherCount\":1,"
+                + "\"registeredSchedulers\":2"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_dispatchers 1"));
+        assertTrue(metrics.contains("commonbattle_owner_event_repair_dispatcher_failed_scheduler_runs_total 1"));
+    }
+
+    @Test
     void shopRuntimeStatsAreReportedAndOrderConflictsDegradeHealth() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         ShopRuntimeView shops = () -> new ShopRuntimeStats(3, 1, 1, 0, 0, 0, 0, 0, 1, 1,
@@ -1767,8 +1987,10 @@ class RuntimeHealthProbeTest {
     @Test
     void sceneRuntimeStatsAreReported() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
-        SceneRuntimeView first = () -> new SceneRuntimeStats(2, 30, 8, 12, 4, 2, 1, 0);
-        SceneRuntimeView second = () -> new SceneRuntimeStats(1, 10, 4, 7, 3, 1, 2, 0);
+        SceneRuntimeView first = () -> new SceneRuntimeStats(2, 30, 8, 12, 4, 2, 1, 0,
+                5, 4, 1, 1, 1, 2, 1, 0);
+        SceneRuntimeView second = () -> new SceneRuntimeStats(1, 10, 4, 7, 3, 1, 2, 0,
+                3, 2, 1, 0, 0, 1, 2, 0);
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
         registry.register(java.util.List.of(first, second));
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -1800,7 +2022,17 @@ class RuntimeHealthProbeTest {
         assertEquals(3, snapshot.sceneRuntimes().allianceReferences());
         assertEquals(3, snapshot.sceneRuntimes().duplicateEnters());
         assertEquals(0, snapshot.sceneRuntimes().missingLeaves());
+        assertEquals(8, snapshot.sceneRuntimes().projectionReceivedEvents());
+        assertEquals(6, snapshot.sceneRuntimes().projectionAppliedEvents());
+        assertEquals(2, snapshot.sceneRuntimes().projectionDuplicateEvents());
+        assertEquals(1, snapshot.sceneRuntimes().projectionGapEvents());
+        assertEquals(1, snapshot.sceneRuntimes().projectionRepairRequests());
+        assertEquals(3, snapshot.sceneRuntimes().projectionAppliedSnapshots());
+        assertEquals(3, snapshot.sceneRuntimes().projectionIgnoredSnapshots());
+        assertEquals(0, snapshot.sceneRuntimes().projectionStaleViews());
         assertTrue(json.contains("\"sceneRuntimes\":{\"runtimeCount\":2,\"activeScenes\":3,\"activePlayers\":40"));
+        assertTrue(json.contains("\"projectionGapEvents\":1"));
+        assertTrue(json.contains("\"projectionIgnoredSnapshots\":3"));
         assertTrue(metrics.contains("commonbattle_scene_runtimes 2"));
         assertTrue(metrics.contains("commonbattle_scene_active_scenes 3"));
         assertTrue(metrics.contains("commonbattle_scene_active_players 40"));
@@ -1808,6 +2040,9 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_scene_player_interests 7"));
         assertTrue(metrics.contains("commonbattle_scene_alliance_references 3"));
         assertTrue(metrics.contains("commonbattle_scene_duplicate_enters_total 3"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_received_events_total 8"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_gap_events_total 1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_ignored_snapshots_total 3"));
     }
 
     @Test
@@ -1865,6 +2100,36 @@ class RuntimeHealthProbeTest {
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(1, snapshot.sceneRuntimes().missingLeaves());
         assertTrue(metrics.contains("commonbattle_scene_missing_leaves_total 1"));
+    }
+
+    @Test
+    void sceneProjectionStaleViewsDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        SceneRuntimeView scenes = () -> new SceneRuntimeStats(1, 1, 1, 1, 0, 0, 0, 0,
+                1, 1, 0, 1, 1, 0, 0, 1);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(scenes);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.sceneRuntimes().projectionStaleViews());
+        assertTrue(metrics.contains("commonbattle_scene_projection_stale_views 1"));
     }
 
     @Test
@@ -2130,6 +2395,15 @@ class RuntimeHealthProbeTest {
         @Override
         public void execute(Runnable command) {
             command.run();
+        }
+    }
+
+    private static final class RecordingExecutor implements Executor {
+        private final List<Runnable> commands = new ArrayList<>();
+
+        @Override
+        public void execute(Runnable command) {
+            commands.add(command);
         }
     }
 

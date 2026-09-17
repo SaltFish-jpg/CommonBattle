@@ -80,7 +80,8 @@ public final class ExampleGameConfigs {
                         "",
                         0,
                         Reward.of(new ItemStack("gem", 5)),
-                        3
+                        3,
+                        5
                 )),
                 List.of(new TaskDefinition(
                         "task-clear-forest",

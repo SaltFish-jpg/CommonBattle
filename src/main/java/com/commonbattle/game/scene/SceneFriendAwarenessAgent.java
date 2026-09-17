@@ -28,6 +28,13 @@ public final class SceneFriendAwarenessAgent {
     private final Set<Long> onlinePlayers = new HashSet<>();
     private final Map<Long, ScenePlayerFriendView> friends = new HashMap<>();
     private final SubscriptionCheckpoint checkpoint = new SubscriptionCheckpoint();
+    private long receivedEvents;
+    private long appliedEvents;
+    private long duplicateEvents;
+    private long gapEvents;
+    private long repairRequests;
+    private long appliedSnapshots;
+    private long ignoredSnapshots;
 
     public SceneFriendAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, OwnerEventInterestControl.noop());
@@ -49,17 +56,22 @@ public final class SceneFriendAwarenessAgent {
 
     public void enter(long playerId) {
         messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.add(playerId)) {
-                interests.watchOwner(FriendOwnerKeyParser.ownerKey(playerId));
+            synchronized (this) {
+                if (onlinePlayers.add(playerId)) {
+                    interests.watchOwner(FriendOwnerKeyParser.ownerKey(playerId));
+                }
             }
         });
     }
 
     public void leave(long playerId) {
         messages.tellLocal(self, ignored -> {
-            if (onlinePlayers.remove(playerId)) {
-                friends.remove(playerId);
-                interests.unwatchOwner(FriendOwnerKeyParser.ownerKey(playerId));
+            synchronized (this) {
+                if (onlinePlayers.remove(playerId)) {
+                    friends.remove(playerId);
+                    checkpoint.remove(FriendOwnerKeyParser.ownerKey(playerId));
+                    interests.unwatchOwner(FriendOwnerKeyParser.ownerKey(playerId));
+                }
             }
         });
     }
@@ -68,7 +80,7 @@ public final class SceneFriendAwarenessAgent {
         messages.tellLocal(self, ignored -> handleFriendChanged(event));
     }
 
-    public void handleFriendChanged(FriendChangedEvent event) {
+    public synchronized void handleFriendChanged(FriendChangedEvent event) {
         Objects.requireNonNull(event, "event");
         apply(event);
     }
@@ -77,14 +89,17 @@ public final class SceneFriendAwarenessAgent {
         messages.tellLocal(self, ignored -> handleSnapshot(snapshot));
     }
 
-    public void handleSnapshot(FriendSnapshot snapshot) {
+    public synchronized void handleSnapshot(FriendSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         if (!onlinePlayers.contains(snapshot.playerId())) {
+            ignoredSnapshots++;
             return;
         }
         if (snapshot.revision() < revisionOf(snapshot.playerId())) {
+            ignoredSnapshots++;
             return;
         }
+        appliedSnapshots++;
         friends.put(snapshot.playerId(), new ScenePlayerFriendView(
                 snapshot.playerId(),
                 snapshot.revision(),
@@ -94,28 +109,50 @@ public final class SceneFriendAwarenessAgent {
         checkpoint.reset(snapshot.ownerKey(), snapshot.revision());
     }
 
-    public Optional<ScenePlayerFriendView> friendsOf(long playerId) {
+    public synchronized Optional<ScenePlayerFriendView> friendsOf(long playerId) {
         return Optional.ofNullable(friends.get(playerId));
     }
 
-    public boolean stale(long playerId) {
+    public synchronized boolean stale(long playerId) {
         return friendsOf(playerId).map(ScenePlayerFriendView::stale).orElse(false);
     }
 
-    public long revisionOf(long playerId) {
+    public synchronized long revisionOf(long playerId) {
         return checkpoint.revisionOf(FriendOwnerKeyParser.ownerKey(playerId));
     }
 
+    public synchronized SceneProjectionStats projectionStats() {
+        int staleViews = 0;
+        for (ScenePlayerFriendView view : friends.values()) {
+            if (view.stale()) {
+                staleViews++;
+            }
+        }
+        return new SceneProjectionStats(
+                receivedEvents,
+                appliedEvents,
+                duplicateEvents,
+                gapEvents,
+                repairRequests,
+                appliedSnapshots,
+                ignoredSnapshots,
+                staleViews
+        );
+    }
+
     private void apply(FriendChangedEvent event) {
+        receivedEvents++;
         SubscriptionDecision decision = checkpoint.inspect(event);
         if (decision == SubscriptionDecision.DUPLICATE_OR_OLD) {
+            duplicateEvents++;
             return;
         }
         if (decision == SubscriptionDecision.GAP) {
+            gapEvents++;
+            repairRequests++;
             interests.requestRepairOwner(event.ownerKey());
         }
         if (!onlinePlayers.contains(event.playerId())) {
-            checkpoint.markApplied(event);
             return;
         }
         ScenePlayerFriendView current = friends.get(event.playerId());
@@ -132,5 +169,6 @@ public final class SceneFriendAwarenessAgent {
                 decision == SubscriptionDecision.GAP
         ));
         checkpoint.markApplied(event);
+        appliedEvents++;
     }
 }

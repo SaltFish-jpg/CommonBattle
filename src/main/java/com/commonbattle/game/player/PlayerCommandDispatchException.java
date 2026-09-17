@@ -3,6 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.game.session.PlayerCommandResult;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -10,10 +11,12 @@ import java.util.Objects;
  */
 public final class PlayerCommandDispatchException extends RuntimeException {
     private final PlayerCommandStatus status;
+    private final Duration retryAfter;
 
     public PlayerCommandDispatchException(PlayerCommandResult result) {
         super(message(result));
         this.status = Objects.requireNonNull(result, "result").status();
+        this.retryAfter = result.retryAfter();
     }
 
     public PlayerCommandStatus status() {
@@ -22,6 +25,10 @@ public final class PlayerCommandDispatchException extends RuntimeException {
 
     public String code() {
         return status.name();
+    }
+
+    public Duration retryAfter() {
+        return retryAfter;
     }
 
     private static String message(PlayerCommandResult result) {

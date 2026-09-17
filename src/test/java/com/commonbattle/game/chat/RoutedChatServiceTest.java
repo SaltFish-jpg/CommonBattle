@@ -1,6 +1,9 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -15,6 +18,7 @@ import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -132,6 +136,21 @@ class RoutedChatServiceTest {
     }
 
     @Test
+    void directChatMailboxPressureRejectsBeforeSessionActorTaskIsQueued() {
+        Fixture fixture = Fixture.create(new ChatRouteConfig(4, 10),
+                new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)));
+        fixture.actors.send(fixture.actors.actor(ChatActorIds.directActorId(10001L, 10002L)), ignored -> {
+        });
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.chat.sendDirect(new DirectChatSendRequest(10001L, 10002L, "private", 0), sent::set);
+
+        assertEquals(ChatSendStatus.BACKPRESSURED, sent.get().status());
+        assertEquals(1, fixture.pressure.mailboxPressureStats().pressureRejected());
+        assertEquals(0, fixture.directSessions.activeSessions());
+    }
+
+    @Test
     void slowConsumerQueueDropsOldestDelivery() {
         BoundedInMemoryChatDeliverySink sink = new BoundedInMemoryChatDeliverySink(
                 2,
@@ -174,15 +193,21 @@ class RoutedChatServiceTest {
 
     private record Fixture(
             RecordingExecutor executor,
+            ActorSystem actors,
             RecordingProfileInterests profileInterests,
             ChatAccessControl accessControl,
             BoundedInMemoryChatDeliverySink deliverySink,
             ScenePlayerInterestCoordinator interests,
+            ActorMailboxPressureAdmissionController pressure,
             ChatChannelManager channels,
             DirectChatSessionManager directSessions,
             RoutedChatService chat
     ) {
         private static Fixture create(ChatRouteConfig config) {
+            return create(config, ActorMailboxPressurePolicy.disabled());
+        }
+
+        private static Fixture create(ChatRouteConfig config, ActorMailboxPressurePolicy pressurePolicy) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
@@ -201,6 +226,12 @@ class RoutedChatServiceTest {
             ChatMessagePolicy basePolicy = request ->
                     ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());
             ChatMessagePolicy policy = new AccessControlledChatMessagePolicy(accessControl, basePolicy);
+            ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    pressurePolicy,
+                    ChatActorIds::actorIdOf
+            );
             ChatChannelManager channels = new ChatChannelManager(
                     actors,
                     messages,
@@ -208,7 +239,8 @@ class RoutedChatServiceTest {
                     policy,
                     deliverySink,
                     CLOCK,
-                    config.maxHistoryMessages()
+                    config.maxHistoryMessages(),
+                    pressure
             );
             DirectChatSessionManager directSessions = new DirectChatSessionManager(
                     actors,
@@ -216,14 +248,17 @@ class RoutedChatServiceTest {
                     policy,
                     deliverySink,
                     CLOCK,
-                    config.maxHistoryMessages()
+                    config.maxHistoryMessages(),
+                    pressure
             );
             return new Fixture(
                     executor,
+                    actors,
                     profileInterests,
                     accessControl,
                     deliverySink,
                     interests,
+                    pressure,
                     channels,
                     directSessions,
                     new RoutedChatService(channels, directSessions, config, accessControl)

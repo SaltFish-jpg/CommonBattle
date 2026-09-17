@@ -12,21 +12,47 @@ public record SceneRuntimeStats(
         int playerInterests,
         int allianceReferences,
         long duplicateEnters,
-        long missingLeaves
+        long missingLeaves,
+        long projectionReceivedEvents,
+        long projectionAppliedEvents,
+        long projectionDuplicateEvents,
+        long projectionGapEvents,
+        long projectionRepairRequests,
+        long projectionAppliedSnapshots,
+        long projectionIgnoredSnapshots,
+        int projectionStaleViews
 ) {
     public SceneRuntimeStats(int activeScenes, int activePlayers, int shardCount, int maxShardPlayers) {
-        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0);
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    public SceneRuntimeStats(
+            int activeScenes,
+            int activePlayers,
+            int shardCount,
+            int maxShardPlayers,
+            int playerInterests,
+            int allianceReferences,
+            long duplicateEnters,
+            long missingLeaves
+    ) {
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, playerInterests, allianceReferences,
+                duplicateEnters, missingLeaves, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats {
         if (activeScenes < 0 || activePlayers < 0 || shardCount < 0 || maxShardPlayers < 0
-                || playerInterests < 0 || allianceReferences < 0 || duplicateEnters < 0 || missingLeaves < 0) {
+                || playerInterests < 0 || allianceReferences < 0 || duplicateEnters < 0 || missingLeaves < 0
+                || projectionReceivedEvents < 0 || projectionAppliedEvents < 0 || projectionDuplicateEvents < 0
+                || projectionGapEvents < 0 || projectionRepairRequests < 0 || projectionAppliedSnapshots < 0
+                || projectionIgnoredSnapshots < 0 || projectionStaleViews < 0) {
             throw new IllegalArgumentException("scene runtime stats must not be negative");
         }
     }
 
     public static SceneRuntimeStats empty() {
-        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats plus(SceneRuntimeStats other) {
@@ -38,7 +64,15 @@ public record SceneRuntimeStats(
                 playerInterests + other.playerInterests,
                 allianceReferences + other.allianceReferences,
                 duplicateEnters + other.duplicateEnters,
-                missingLeaves + other.missingLeaves
+                missingLeaves + other.missingLeaves,
+                projectionReceivedEvents + other.projectionReceivedEvents,
+                projectionAppliedEvents + other.projectionAppliedEvents,
+                projectionDuplicateEvents + other.projectionDuplicateEvents,
+                projectionGapEvents + other.projectionGapEvents,
+                projectionRepairRequests + other.projectionRepairRequests,
+                projectionAppliedSnapshots + other.projectionAppliedSnapshots,
+                projectionIgnoredSnapshots + other.projectionIgnoredSnapshots,
+                projectionStaleViews + other.projectionStaleViews
         );
     }
 }

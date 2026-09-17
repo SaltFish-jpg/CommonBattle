@@ -104,7 +104,8 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         if (!routed.admission().accepted()) {
             PlayerCommandResult rejected = PlayerCommandResult.reject(
                     rejectedStatus(routed.admission().reason()),
-                    routed.admission().reason()
+                    routed.admission().reason(),
+                    routed.admission().retryAfter()
             );
             return result(command, rejected, PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO,
                     routed.admission().reason());
@@ -142,7 +143,7 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
             PlayerCommandStatus status = delivery.status() == AgentDeliveryStatus.MAILBOX_FULL
                     ? PlayerCommandStatus.MAILBOX_FULL
                     : PlayerCommandStatus.AGENT_MISSING;
-            return result(command, PlayerCommandResult.reject(status, delivery.reason()),
+            return result(command, PlayerCommandResult.reject(status, delivery.reason(), delivery.retryAfter()),
                     PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, delivery.reason());
         }
         sequencer.commit(command, PlayerCommandStatus.ACCEPTED);
@@ -169,6 +170,9 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
     private PlayerCommandStatus rejectedStatus(String reason) {
         if ("rate_limited".equals(reason)) {
             return PlayerCommandStatus.RATE_LIMITED;
+        }
+        if (reason != null && reason.startsWith("mailbox_pressure")) {
+            return PlayerCommandStatus.BACKPRESSURED;
         }
         if ("agent_migrating".equals(reason)) {
             return PlayerCommandStatus.AGENT_MIGRATING;

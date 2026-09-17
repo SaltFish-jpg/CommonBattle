@@ -28,6 +28,10 @@ public record BattleStageSweepCommand(String settlementId, String stageId) imple
 
     @Override
     public BattleSettlementResult execute(PlayerGameExecution execution) {
+        execution.consumeBattleStaminaForNewSettlement(
+                execution.runtime().requireBattleService().requireStage(stageId),
+                settlementId
+        );
         BattleSettlementResult result = execution.runtime().requireBattleService().sweep(
                 execution.profile().bag(),
                 execution.profile().battle(),

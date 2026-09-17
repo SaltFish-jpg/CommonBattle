@@ -290,6 +290,7 @@ class NettyPlayerGatewayHandlerTest {
         PlayerClientRejectResponse reject = assertInstanceOf(PlayerClientRejectResponse.class,
                 fixture.readOutbound(channel).payload());
         assertEquals(PlayerClientErrorCode.COMMAND_RATE_LIMITED, reject.code());
+        assertEquals(1000, reject.retryAfterMillis());
         assertEquals(List.of(first), fixture.commands);
         assertEquals(1, fixture.stats().acceptedCommands());
         assertEquals(1, fixture.stats().rateLimitedCommands());
@@ -324,6 +325,7 @@ class NettyPlayerGatewayHandlerTest {
         PlayerClientRejectResponse reject = assertInstanceOf(PlayerClientRejectResponse.class,
                 fixture.readOutbound(channel).payload());
         assertEquals(PlayerClientErrorCode.HEARTBEAT_RATE_LIMITED, reject.code());
+        assertEquals(1000, reject.retryAfterMillis());
         assertEquals(1, fixture.stats().acceptedHeartbeats());
         assertEquals(1, fixture.stats().rateLimitedHeartbeats());
         assertFalse(channel.isOpen());

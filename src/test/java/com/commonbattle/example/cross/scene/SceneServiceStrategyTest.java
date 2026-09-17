@@ -2,6 +2,9 @@ package com.commonbattle.example.cross.scene;
 
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -37,6 +40,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -260,6 +264,37 @@ class SceneServiceStrategyTest {
             assertEquals(0, service.tickStats().completedTicks());
             assertEquals(2, service.tickStats().failedTicks());
             assertEquals(2, actors.stats().failedTasks());
+        }
+    }
+
+    @Test
+    void sceneMailboxPressureGateRejectsHotShardBeforeEnterMutatesState() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    2
+            );
+            ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)),
+                    SceneMailboxPressureGate::actorIdOf
+            );
+            SceneMailboxPressureGate gate = new SceneMailboxPressureGate(service, pressure);
+            actors.send(service.place("world-1", 0, 0).actor(), ignored -> {
+            });
+
+            SceneMailboxPressureGate.SceneAdmission admission = gate.admitEnter("world-1", 0, 0);
+
+            assertFalse(admission.accepted());
+            assertEquals("mailbox_pressure:target", admission.decision().reason());
+            assertEquals(1, pressure.mailboxPressureStats().pressureRejected());
+            assertEquals(new SceneRuntimeStats(0, 0, 2, 0), service.stats());
         }
     }
 

@@ -28,7 +28,9 @@ class ChatRuntimeHealthStatsTest {
     @Test
     void snapshotFormatsChatRuntimeStats() {
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
-        registry.register((ChatRuntimeView) () -> new ChatServiceStats(3, 2, 4, 1, 9, 1, 2, 40, 5, 20, 3, 1));
+        registry.register((ChatRuntimeView) () -> new ChatServiceStats(
+                3, 2, 4, 1, 9, 1, 2, 40, 5, 20, 3, 1, 6, 4
+        ));
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
@@ -51,10 +53,16 @@ class ChatRuntimeHealthStatsTest {
 
         assertEquals(3, snapshot.chatRuntimes().activeChannels());
         assertEquals(2, snapshot.chatRuntimes().activeDirectSessions());
+        assertEquals(10, snapshot.chatRuntimes().allianceRemovedMembers());
+        assertEquals(6, snapshot.chatRuntimes().allianceEventRemovedMembers());
+        assertEquals(4, snapshot.chatRuntimes().allianceSnapshotRemovedMembers());
         assertTrue(json.contains("\"chatRuntimes\":{\"runtimeCount\":1,\"activeChannels\":3"));
+        assertTrue(json.contains("\"allianceRemovedMembers\":10"));
         assertTrue(metrics.contains("commonbattle_chat_active_channels 3"));
         assertTrue(metrics.contains("commonbattle_chat_dropped_history_messages_total 5"));
         assertTrue(metrics.contains("commonbattle_chat_dropped_delivery_recipients_total 3"));
+        assertTrue(metrics.contains("commonbattle_chat_alliance_event_removed_members_total 6"));
+        assertTrue(metrics.contains("commonbattle_chat_alliance_snapshot_removed_members_total 4"));
     }
 
     private static final class InlineExecutor implements Executor {

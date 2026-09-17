@@ -1,6 +1,8 @@
 package com.commonbattle.actor;
 
 import java.util.EnumMap;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -137,6 +139,19 @@ public final class ActorSystem implements AutoCloseable {
             }
         }
         return metrics.snapshot(activeMailboxes, largestMailboxQueuedTasks, largestMailboxActorId, queuedByCategory);
+    }
+
+    /**
+     * 返回当前仍有排队消息的邮箱快照，按积压量从高到低排序。
+     */
+    public List<ActorMailboxStats> queuedMailboxStats() {
+        return mailboxes.values().stream()
+                .map(mailbox -> new ActorMailboxStats(mailbox.ref(), mailbox.size(), mailbox.categorySizes()))
+                .filter(stats -> stats.queuedTasks() > 0)
+                .sorted(Comparator.comparingInt(ActorMailboxStats::queuedTasks)
+                        .reversed()
+                        .thenComparing(stats -> stats.actor().id()))
+                .toList();
     }
 
     public boolean isAccepting() {

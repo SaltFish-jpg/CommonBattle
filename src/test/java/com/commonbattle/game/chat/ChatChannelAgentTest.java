@@ -1,6 +1,9 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -23,6 +26,7 @@ import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -110,6 +114,23 @@ class ChatChannelAgentTest {
         assertEquals(List.of(), fixture.manager.channel("world").snapshotNow().history());
     }
 
+    @Test
+    void mailboxPressureRejectsBeforeChannelActorTaskIsQueued() {
+        Fixture fixture = Fixture.create(new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)));
+        fixture.actors.send(fixture.actors.actor(ChatActorIds.channelActorId("world")), ignored -> {
+        });
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.manager.join(new ChatJoinRequest("world", 10001L, 0), joined::set);
+        fixture.manager.send(new ChatSendRequest("world", 10001L, "hello", 0), sent::set);
+
+        assertEquals(ChatJoinStatus.BACKPRESSURED, joined.get().status());
+        assertEquals(ChatSendStatus.BACKPRESSURED, sent.get().status());
+        assertEquals(2, fixture.pressure.mailboxPressureStats().pressureRejected());
+        assertEquals(1, fixture.executor.queued());
+    }
+
     private static PlayerProfileSnapshot snapshot(long playerId, String name, long revision) {
         return new PlayerProfileSnapshot(
                 playerId,
@@ -125,12 +146,18 @@ class ChatChannelAgentTest {
 
     private record Fixture(
             RecordingExecutor executor,
+            ActorSystem actors,
             ProfileRuntime profiles,
             RecordingProfileInterests profileInterests,
             ScenePlayerInterestCoordinator interests,
+            ActorMailboxPressureAdmissionController pressure,
             ChatChannelManager manager
     ) {
         private static Fixture create() {
+            return create(ActorMailboxPressurePolicy.disabled());
+        }
+
+        private static Fixture create(ActorMailboxPressurePolicy pressurePolicy) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
@@ -154,12 +181,29 @@ class ChatChannelAgentTest {
                     ),
                     new SceneAllianceAwarenessAgent(messages, actors.actor("chat-alliance-awareness"), allianceInterests)
             );
+            ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    pressurePolicy,
+                    ChatActorIds::actorIdOf
+            );
             return new Fixture(
                     executor,
+                    actors,
                     profiles,
                     profileInterests,
                     interests,
-                    new ChatChannelManager(actors, messages, interests, profiles, CLOCK)
+                    pressure,
+                    new ChatChannelManager(
+                            actors,
+                            messages,
+                            interests,
+                            new ProfileAwareChatMessagePolicy(profiles),
+                            ChatDeliverySink.noop(),
+                            CLOCK,
+                            ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                            pressure
+                    )
             );
         }
     }
@@ -205,6 +249,10 @@ class ChatChannelAgentTest {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
+        }
+
+        private int queued() {
+            return commands.size();
         }
     }
 

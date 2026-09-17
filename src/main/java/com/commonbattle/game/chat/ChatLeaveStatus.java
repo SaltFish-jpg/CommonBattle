@@ -5,5 +5,6 @@ package com.commonbattle.game.chat;
  */
 public enum ChatLeaveStatus {
     LEFT,
-    NOT_IN_CHANNEL
+    NOT_IN_CHANNEL,
+    BACKPRESSURED
 }

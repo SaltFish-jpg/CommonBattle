@@ -1,5 +1,6 @@
 package com.commonbattle.cluster.boot;
 
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
@@ -42,6 +43,7 @@ import com.commonbattle.game.social.FriendChangedEvent;
 import com.commonbattle.game.social.FriendRelationRequest;
 import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.game.social.FriendSnapshot;
+import com.commonbattle.game.social.InMemoryAllianceSnapshotRepository;
 import com.commonbattle.game.social.InMemoryFriendSnapshotRepository;
 import com.commonbattle.game.social.SocialAgentOperations;
 import com.commonbattle.observability.RuntimeHealthJsonFormatter;
@@ -52,6 +54,7 @@ import com.commonbattle.observability.RuntimeMetricsFormatter;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -83,6 +86,7 @@ class BootGamePlayerRuntimeTest {
         InMemoryPlayerStateRepository stateRepository = new InMemoryPlayerStateRepository();
         InMemoryProfileSnapshotRepository profileSnapshots = new InMemoryProfileSnapshotRepository();
         InMemoryFriendSnapshotRepository friendSnapshots = new InMemoryFriendSnapshotRepository();
+        InMemoryAllianceSnapshotRepository allianceSnapshots = new InMemoryAllianceSnapshotRepository();
         PlayerProfile seed = new PlayerProfile(10001L, SERVER_OPEN_TIME);
         seed.bag().restore(new BagSnapshot(Map.of("exp_potion", 3)));
         stateRepository.save(10001L, seed.snapshot(4, 2, CLOCK.instant()));
@@ -98,6 +102,7 @@ class BootGamePlayerRuntimeTest {
                 configCache,
                 profileSnapshots,
                 friendSnapshots,
+                allianceSnapshots,
                 publishedEvents::add,
                 publishedEvents::add,
                 publishedEvents::add,
@@ -198,6 +203,7 @@ class BootGamePlayerRuntimeTest {
         executor.runAll();
         assertEquals(1, allianceResponse.get().revision());
         assertEquals(java.util.Set.of(10001L), allianceResponse.get().members());
+        assertEquals(java.util.Set.of(10001L), allianceSnapshots.find(100L).orElseThrow().members());
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
                 actors,
@@ -228,6 +234,7 @@ class BootGamePlayerRuntimeTest {
         assertEquals(1, runtime.healthRegistry().playerOutboundDeliveries().size());
         assertEquals(1, runtime.healthRegistry().commandAudits().size());
         assertEquals(1, runtime.healthRegistry().lifecycleManagers().size());
+        assertEquals(2, runtime.healthRegistry().actorMailboxPressures().size());
         assertNull(players.autoSaves());
         assertTrue(runtime.healthRegistry().drainableComponents().contains(players.logins()));
         assertTrue(runtime.healthRegistry().drainableComponents().contains(players.dispatcher()));
@@ -259,6 +266,7 @@ class BootGamePlayerRuntimeTest {
                 configCache,
                 new InMemoryProfileSnapshotRepository(),
                 new InMemoryFriendSnapshotRepository(),
+                new InMemoryAllianceSnapshotRepository(),
                 ignored -> {
                 },
                 ignored -> {
@@ -269,6 +277,118 @@ class BootGamePlayerRuntimeTest {
         );
 
         assertEquals(1, runtime.healthRegistry().rpcRoutePolicies().size());
+    }
+
+    @Test
+    void clusterConfiguredAutoSaveUsesActorScheduleRegistry() {
+        BootRuntime runtime = new BootRuntime();
+        try {
+            ActorSystem actors = runtime.add("actors", new ActorSystem(new RecordingExecutor(), 64));
+            ActorScheduleRegistry schedules = BootActorSchedules.configure(runtime, actors);
+            Properties properties = properties();
+            properties.setProperty("cluster.player.auto.save.enabled", "true");
+            properties.setProperty("cluster.player.auto.save.initial.delay.millis", "60000");
+            properties.setProperty("cluster.player.auto.save.interval.millis", "60000");
+            ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+            ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+            ClusterRpcGateway gateway = runtime.add("gateway", new ClusterRpcGateway(
+                    local,
+                    new ClusterDirectory(new InMemoryServiceRegistry()),
+                    new ClusterTopology(),
+                    new LocalClusterTransport(),
+                    false
+            ));
+            LocalGameConfigCache configCache = runtime.add("configCache",
+                    new LocalGameConfigCache(new GameConfigValidator(), CLOCK));
+
+            BootGamePlayerRuntime.configure(
+                    runtime,
+                    config,
+                    local,
+                    actors,
+                    gateway,
+                    configCache,
+                    new InMemoryProfileSnapshotRepository(),
+                    new InMemoryFriendSnapshotRepository(),
+                    new InMemoryAllianceSnapshotRepository(),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    schedules,
+                    CLOCK
+            );
+
+            assertEquals(1, runtime.healthRegistry().playerAutoSaves().size());
+            assertEquals(1, schedules.stats().activeJobs());
+            assertEquals(1, schedules.stats().scheduledJobs());
+        } finally {
+            runtime.close();
+        }
+    }
+
+    @Test
+    void clusterConfiguredGrowthStaminaRecoverySchedulesPerLoadedPlayer() {
+        BootRuntime runtime = new BootRuntime();
+        RecordingExecutor executor = new RecordingExecutor();
+        try {
+            ActorSystem actors = runtime.add("actors", new ActorSystem(executor, 64));
+            ActorScheduleRegistry schedules = BootActorSchedules.configure(runtime, actors);
+            Properties properties = properties();
+            properties.setProperty("cluster.player.growth.stamina.recovery.enabled", "true");
+            properties.setProperty("cluster.player.growth.stamina.recovery.initial.delay.millis", "60000");
+            properties.setProperty("cluster.player.growth.stamina.recovery.interval.millis", "60000");
+            ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+            ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+            LocalGameConfigCache configCache = runtime.add("configCache",
+                    new LocalGameConfigCache(new GameConfigValidator(), CLOCK));
+            configCache.apply(GameConfigChangedEvent.activePublished(1, ExampleGameConfigs.basic(7, CLOCK.instant())));
+
+            BootGamePlayerRuntime players = BootGamePlayerRuntime.configure(
+                    runtime,
+                    local,
+                    actors,
+                    new NoopRpcGateway(),
+                    new InMemoryAgentDirectory(),
+                    new InMemoryPlayerStateRepository(),
+                    configCache,
+                    new InMemoryProfileSnapshotRepository(),
+                    new InMemoryFriendSnapshotRepository(),
+                    new InMemoryAllianceSnapshotRepository(),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    (com.commonbattle.game.shop.ShopStockAsyncClient) null,
+                    CLOCK,
+                    SERVER_OPEN_TIME,
+                    AgentRateLimitPolicy.perSecond(100, 100),
+                    schedules,
+                    false,
+                    Duration.ZERO,
+                    Duration.ofSeconds(60),
+                    Duration.ofSeconds(5),
+                    512,
+                    true,
+                    config.playerGrowthStaminaRecoveryInitialDelay(),
+                    config.playerGrowthStaminaRecoveryInterval()
+            );
+
+            PlayerLoginResult login = players.logins().login(10001L, "session-1");
+            executor.runAll();
+
+            assertEquals(1, schedules.stats().activeJobs());
+            assertTrue(players.logins().logoutAndPassivate(login.session(), ignored -> {
+            }));
+            executor.runAll();
+            assertEquals(0, schedules.stats().activeJobs());
+        } finally {
+            runtime.close();
+        }
     }
 
     private static Properties properties() {

@@ -24,6 +24,8 @@ import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.session.PlayerOutboundDeliveryResult;
+import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.task.TaskClaimResult;
 import org.junit.jupiter.api.Test;
 
@@ -32,6 +34,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -147,6 +150,28 @@ class PlayerGameAgentConfigRuntimeTest {
     }
 
     @Test
+    void battleEventPushesDerivedBusinessSnapshotsInsideSameMailboxMessage() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(ExampleGameConfigs.basic(1, CLOCK.instant()));
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, registry, pushes);
+
+        agent.clearBattleStage("settle-10001-1", "forest-1", ignored -> {
+        });
+        executor.runNext();
+
+        assertEquals(List.of(
+                PlayerOutboundTopicPolicies.GROWTH_SNAPSHOT,
+                PlayerOutboundTopicPolicies.BATTLE_SNAPSHOT,
+                PlayerOutboundTopicPolicies.BAG_SNAPSHOT,
+                PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS,
+                PlayerOutboundTopicPolicies.TASK_PROGRESS,
+                PlayerOutboundTopicPolicies.ACHIEVEMENT_PROGRESS
+        ), pushes.messages.stream().map(PushedMessage::topic).toList());
+    }
+
+    @Test
     void playerDomainEventPublishFailureKeepsOutboxPendingWithoutBlockingLocalSettlement() {
         RecordingExecutor executor = new RecordingExecutor();
         GameConfigRegistry registry = registry();
@@ -181,6 +206,30 @@ class PlayerGameAgentConfigRuntimeTest {
 
     private static PlayerGameAgent createAgent(Executor executor, GameConfigRegistry registry) {
         return createAgent(executor, registry, null, 0, 0);
+    }
+
+    private static PlayerGameAgent createAgent(
+            Executor executor,
+            GameConfigRegistry registry,
+            PlayerPushPort pushes
+    ) {
+        ActorSystem actors = new ActorSystem(executor, 64);
+        ActorRef self = actors.actor("player-10001");
+        return new PlayerGameAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                self,
+                new PlayerProfile(10001L),
+                registry,
+                CLOCK,
+                Instant.parse("2026-08-01T00:00:00Z"),
+                null,
+                0,
+                0,
+                null,
+                null,
+                new AsyncShopPurchaseMetrics(),
+                pushes
+        );
     }
 
     private static PlayerGameAgent createAgent(
@@ -238,6 +287,19 @@ class PlayerGameAgentConfigRuntimeTest {
         void runNext() {
             commands.removeFirst().run();
         }
+    }
+
+    private static final class RecordingPushPort implements PlayerPushPort {
+        private final List<PushedMessage> messages = new ArrayList<>();
+
+        @Override
+        public PlayerOutboundDeliveryResult push(Set<Long> recipients, String topic, Object payload) {
+            messages.add(new PushedMessage(Set.copyOf(recipients), topic, payload));
+            return PlayerOutboundDeliveryResult.empty();
+        }
+    }
+
+    private record PushedMessage(Set<Long> recipients, String topic, Object payload) {
     }
 
     private static final class NoopRpcGateway implements RpcGateway {

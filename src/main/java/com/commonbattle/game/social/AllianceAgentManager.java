@@ -5,6 +5,7 @@ import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.event.SnapshotEventPublisher;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -17,8 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class AllianceAgentManager {
     private final ActorSystem actors;
     private final AgentMessagePort messages;
-    private final AllianceSnapshotRepository snapshots;
-    private final EventPublisher events;
+    private final SnapshotEventPublisher<AllianceSnapshot, AllianceMemberChangedEvent> publisher;
     private final Optional<AgentLifecycleManager> lifecycles;
     private final ConcurrentHashMap<Long, AllianceAgent> agents = new ConcurrentHashMap<>();
 
@@ -38,10 +38,23 @@ public final class AllianceAgentManager {
             EventPublisher events,
             AgentLifecycleManager lifecycles
     ) {
+        this(actors, messages, (snapshot, event) -> {
+            snapshots.save(snapshot);
+            events.publish(event);
+        }, lifecycles);
+        Objects.requireNonNull(snapshots, "snapshots");
+        Objects.requireNonNull(events, "events");
+    }
+
+    public AllianceAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            SnapshotEventPublisher<AllianceSnapshot, AllianceMemberChangedEvent> publisher,
+            AgentLifecycleManager lifecycles
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
-        this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
-        this.events = Objects.requireNonNull(events, "events");
+        this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.lifecycles = Optional.ofNullable(lifecycles);
     }
 
@@ -66,13 +79,12 @@ public final class AllianceAgentManager {
 
     private AllianceAgent create(long allianceId) {
         String actorId = "alliance-" + allianceId;
-        return new AllianceAgent(
+        return AllianceAgent.withSnapshotPublisher(
                 messages,
                 lifecycles.map(manager -> manager.activate(AgentIdentity.alliance(allianceId), actorId).actorRef())
                         .orElseGet(() -> actors.actor(actorId)),
                 allianceId,
-                events,
-                snapshots
+                publisher
         );
     }
 }

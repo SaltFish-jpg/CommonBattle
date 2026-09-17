@@ -1,12 +1,15 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.profile.ProfileReadPort;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
 
 import java.time.Clock;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,8 +23,10 @@ public final class ChatChannelManager implements ChatRuntimeView {
     private final ActorSystem actors;
     private final AgentMessagePort messages;
     private final ScenePlayerInterestCoordinator interests;
+    private final ChatChannelAccessPolicy accessPolicy;
     private final ChatMessagePolicy messagePolicy;
     private final ChatDeliverySink deliverySink;
+    private final InboundAdmissionController admissions;
     private final Clock clock;
     private final int maxHistoryMessages;
     private final ConcurrentMap<String, ChatChannelAgent> channels = new ConcurrentHashMap<>();
@@ -59,11 +64,43 @@ public final class ChatChannelManager implements ChatRuntimeView {
             Clock clock,
             int maxHistoryMessages
     ) {
+        this(actors, messages, interests, ChatChannelAccessPolicy.allowAll(), messagePolicy, deliverySink, clock,
+                maxHistoryMessages,
+                (target, operation) -> AdmissionDecision.accept());
+    }
+
+    public ChatChannelManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            ScenePlayerInterestCoordinator interests,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages,
+            InboundAdmissionController admissions
+    ) {
+        this(actors, messages, interests, ChatChannelAccessPolicy.allowAll(), messagePolicy, deliverySink, clock,
+                maxHistoryMessages, admissions);
+    }
+
+    public ChatChannelManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            ScenePlayerInterestCoordinator interests,
+            ChatChannelAccessPolicy accessPolicy,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages,
+            InboundAdmissionController admissions
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.interests = Objects.requireNonNull(interests, "interests");
+        this.accessPolicy = Objects.requireNonNull(accessPolicy, "accessPolicy");
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
         this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
+        this.admissions = Objects.requireNonNull(admissions, "admissions");
         this.clock = Objects.requireNonNull(clock, "clock");
         if (maxHistoryMessages <= 0) {
             throw new IllegalArgumentException("maxHistoryMessages must be positive");
@@ -84,26 +121,63 @@ public final class ChatChannelManager implements ChatRuntimeView {
 
     public void join(ChatJoinRequest request, Consumer<ChatJoinResult> callback) {
         joinRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
+                ChatOperations.JOIN_CHANNEL);
+        if (!admission.accepted()) {
+            callback.accept(new ChatJoinResult(ChatJoinStatus.BACKPRESSURED, request.channelId(), request.playerId(), 0));
+            return;
+        }
         channel(request.channelId()).join(request, callback);
     }
 
     public void leave(ChatLeaveRequest request, Consumer<ChatLeaveResult> callback) {
         leaveRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
+                ChatOperations.LEAVE_CHANNEL);
+        if (!admission.accepted()) {
+            callback.accept(new ChatLeaveResult(ChatLeaveStatus.BACKPRESSURED, request.channelId(), request.playerId(), 0));
+            return;
+        }
         channel(request.channelId()).leave(request, callback);
     }
 
     public void send(ChatSendRequest request, Consumer<ChatSendResult> callback) {
         sendRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
+                ChatOperations.SEND_CHANNEL);
+        if (!admission.accepted()) {
+            callback.accept(ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED));
+            return;
+        }
         channel(request.channelId()).send(request, callback);
+    }
+
+    public void removeAllianceMember(long allianceId, long playerId) {
+        ChatChannelAgent channel = channels.get(ChatChannelIds.alliance(allianceId));
+        if (channel != null) {
+            channel.removeMemberDueToAllianceChange(playerId);
+        }
+    }
+
+    public void retainAllianceMembers(long allianceId, Set<Long> memberIds) {
+        Objects.requireNonNull(memberIds, "memberIds");
+        ChatChannelAgent channel = channels.get(ChatChannelIds.alliance(allianceId));
+        if (channel != null) {
+            channel.retainMembersDueToAllianceSnapshot(memberIds);
+        }
     }
 
     public ChatServiceStats stats() {
         long retainedMessages = 0;
         long droppedHistoryMessages = 0;
+        long allianceEventRemovedMembers = 0;
+        long allianceSnapshotRemovedMembers = 0;
         ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
         for (ChatChannelAgent channel : channels.values()) {
             retainedMessages += channel.retainedMessages();
             droppedHistoryMessages += channel.droppedHistoryMessages();
+            allianceEventRemovedMembers += channel.allianceEventRemovedMembers();
+            allianceSnapshotRemovedMembers += channel.allianceSnapshotRemovedMembers();
             deliveryStats = deliveryStats.plus(channel.deliveryStats());
         }
         return new ChatServiceStats(
@@ -118,7 +192,9 @@ public final class ChatChannelManager implements ChatRuntimeView {
                 droppedHistoryMessages,
                 deliveryStats.acceptedRecipients(),
                 deliveryStats.droppedRecipients(),
-                deliveryStats.failedRecipients()
+                deliveryStats.failedRecipients(),
+                allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers
         );
     }
 
@@ -130,9 +206,10 @@ public final class ChatChannelManager implements ChatRuntimeView {
     private ChatChannelAgent createChannel(String channelId) {
         return new ChatChannelAgent(
                 messages,
-                actors.actor("chat-channel-" + channelId),
+                actors.actor(ChatActorIds.channelActorId(channelId)),
                 channelId,
                 interests,
+                accessPolicy,
                 messagePolicy,
                 deliverySink,
                 clock,

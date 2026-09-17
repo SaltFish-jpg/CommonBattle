@@ -3,6 +3,8 @@ package com.commonbattle.observability;
 import com.commonbattle.actor.ActorScheduleStats;
 import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureStats;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureView;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinatorStats;
 import com.commonbattle.actor.agent.migration.AgentMigrationExecutor;
@@ -52,6 +54,10 @@ import com.commonbattle.game.event.ActorEventSubscriberStats;
 import com.commonbattle.game.event.ActorEventSubscriberView;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
+import com.commonbattle.game.event.OwnerEventRepairDispatcherStats;
+import com.commonbattle.game.event.OwnerEventRepairDispatcherView;
+import com.commonbattle.game.event.OwnerEventRepairSchedulerStats;
+import com.commonbattle.game.event.OwnerEventRepairSchedulerView;
 import com.commonbattle.game.event.PendingVersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.chat.ChatRuntimeView;
@@ -108,6 +114,7 @@ public final class RuntimeHealthProbe {
     private Collection<RpcRoutePolicyView> rpcRoutePolicies = List.of();
     private final Collection<ActorRpcClient> actorRpcClients;
     private Collection<ActorScheduleView> actorSchedules = List.of();
+    private Collection<ActorMailboxPressureView> actorMailboxPressures = List.of();
     private final Collection<PlayerCommandDispatcher> commandDispatchers;
     private final Collection<NettyClusterTransport> networkTransports;
     private final Collection<RegistryLeaseRenewer> leaseRenewers;
@@ -122,6 +129,8 @@ public final class RuntimeHealthProbe {
     private final Collection<ClusterEventSubscriptionManager> eventSubscriptions;
     private Collection<ActorEventSubscriberView> actorEventSubscribers = List.of();
     private Collection<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions = List.of();
+    private Collection<OwnerEventRepairSchedulerView> ownerEventRepairSchedulers = List.of();
+    private Collection<OwnerEventRepairDispatcherView> ownerEventRepairDispatchers = List.of();
     private final Collection<ProfileInterestView> profileInterests;
     private final Collection<ProfileRuntimeView> profileRuntimes;
     private Collection<ChatRuntimeView> chatRuntimes = List.of();
@@ -199,10 +208,13 @@ public final class RuntimeHealthProbe {
         this.chatRuntimes = registry.chatRuntimes();
         this.actorEventSubscribers = registry.actorEventSubscribers();
         this.ownerActorEventSubscriptions = registry.ownerActorEventSubscriptions();
+        this.ownerEventRepairSchedulers = registry.ownerEventRepairSchedulers();
+        this.ownerEventRepairDispatchers = registry.ownerEventRepairDispatchers();
         this.registryHistories = registry.registryHistories();
         this.registrySubscriptions = registry.registrySubscriptions();
         this.remoteRegistryRecoveries = registry.remoteRegistryRecoveries();
         this.actorSchedules = registry.actorSchedules();
+        this.actorMailboxPressures = registry.actorMailboxPressures();
     }
 
     public RuntimeHealthProbe(
@@ -503,6 +515,8 @@ public final class RuntimeHealthProbe {
 
     public RuntimeHealthSnapshot snapshot() {
         var actorStats = actors.stats();
+        ActorMailboxDiagnostics actorMailboxDiagnostics = ActorMailboxDiagnostics.from(actors.queuedMailboxStats());
+        ActorMailboxPressureHealthStats actorMailboxPressureStats = actorMailboxPressureStats();
         ActorScheduleHealthStats actorScheduleStats = actorScheduleStats();
         RpcGatewayStats rpcStats = rpcStats();
         RpcResilienceHealthStats rpcResilienceStats = rpcResilienceStats();
@@ -536,6 +550,8 @@ public final class RuntimeHealthProbe {
         EventSubscriptionHealthStats eventSubscriptionStats = eventSubscriptionStats();
         ActorEventSubscriberHealthStats actorEventSubscriberStats = actorEventSubscriberStats();
         OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptionStats = ownerActorEventSubscriptionStats();
+        OwnerEventRepairSchedulerHealthStats ownerEventRepairSchedulerStats = ownerEventRepairSchedulerStats();
+        OwnerEventRepairDispatcherHealthStats ownerEventRepairDispatcherStats = ownerEventRepairDispatcherStats();
         ProfileInterestHealthStats profileInterestStats = profileInterestStats();
         ProfileRuntimeHealthStats profileRuntimeStats = profileRuntimeStats();
         ChatRuntimeHealthStats chatRuntimeStats = chatRuntimeStats();
@@ -557,6 +573,8 @@ public final class RuntimeHealthProbe {
                 eventSubscriptionStats,
                 actorEventSubscriberStats,
                 ownerActorEventSubscriptionStats,
+                ownerEventRepairSchedulerStats,
+                ownerEventRepairDispatcherStats,
                 profileInterestStats,
                 profileRuntimeStats,
                 sceneRuntimeStats,
@@ -569,10 +587,22 @@ public final class RuntimeHealthProbe {
                 migrationTaskRetentionStats,
                 migrationTaskStoreStats
         );
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, actorScheduleStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, actorMailboxDiagnostics, actorMailboxPressureStats, actorScheduleStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
                 migrationStats, migrationExecutorStats, migrationRecoveryStats, migrationRecoverySchedulerStats, migrationTaskRetentionStats, migrationTaskStoreStats, outboxStats, clusterStats, leaseStats, registryHistoryStats, registrySubscriptionStats, remoteRegistryRecoveryStats, descriptorPublisherStats, networkStats, configStats, recoveryStats,
                 eventCenterStats, eventSubscriptionStats, actorEventSubscriberStats, ownerActorEventSubscriptionStats,
+                ownerEventRepairSchedulerStats,
+                ownerEventRepairDispatcherStats,
                 profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats, auditStats);
+    }
+
+    private ActorMailboxPressureHealthStats actorMailboxPressureStats() {
+        if (actorMailboxPressures.isEmpty()) {
+            return ActorMailboxPressureHealthStats.empty();
+        }
+        ActorMailboxPressureStats stats = actorMailboxPressures.stream()
+                .map(ActorMailboxPressureView::mailboxPressureStats)
+                .reduce(ActorMailboxPressureStats.empty(), ActorMailboxPressureStats::plus);
+        return ActorMailboxPressureHealthStats.from(actorMailboxPressures.size(), stats);
     }
 
     private ActorScheduleHealthStats actorScheduleStats() {
@@ -1142,6 +1172,26 @@ public final class RuntimeHealthProbe {
         return OwnerActorEventSubscriptionHealthStats.from(ownerActorEventSubscriptions.size(), stats);
     }
 
+    private OwnerEventRepairSchedulerHealthStats ownerEventRepairSchedulerStats() {
+        if (ownerEventRepairSchedulers.isEmpty()) {
+            return OwnerEventRepairSchedulerHealthStats.empty();
+        }
+        OwnerEventRepairSchedulerStats stats = ownerEventRepairSchedulers.stream()
+                .map(OwnerEventRepairSchedulerView::repairSchedulerStats)
+                .reduce(OwnerEventRepairSchedulerStats.empty(), OwnerEventRepairSchedulerStats::plus);
+        return OwnerEventRepairSchedulerHealthStats.from(ownerEventRepairSchedulers.size(), stats);
+    }
+
+    private OwnerEventRepairDispatcherHealthStats ownerEventRepairDispatcherStats() {
+        if (ownerEventRepairDispatchers.isEmpty()) {
+            return OwnerEventRepairDispatcherHealthStats.empty();
+        }
+        OwnerEventRepairDispatcherStats stats = ownerEventRepairDispatchers.stream()
+                .map(OwnerEventRepairDispatcherView::repairDispatcherStats)
+                .reduce(OwnerEventRepairDispatcherStats.empty(), OwnerEventRepairDispatcherStats::plus);
+        return OwnerEventRepairDispatcherHealthStats.from(ownerEventRepairDispatchers.size(), stats);
+    }
+
     private ProfileRuntimeHealthStats profileRuntimeStats() {
         if (profileRuntimes.isEmpty()) {
             return ProfileRuntimeHealthStats.empty();
@@ -1292,6 +1342,8 @@ public final class RuntimeHealthProbe {
             EventSubscriptionHealthStats eventSubscriptionStats,
             ActorEventSubscriberHealthStats actorEventSubscriberStats,
             OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptionStats,
+            OwnerEventRepairSchedulerHealthStats ownerEventRepairSchedulerStats,
+            OwnerEventRepairDispatcherHealthStats ownerEventRepairDispatcherStats,
             ProfileInterestHealthStats profileInterestStats,
             ProfileRuntimeHealthStats profileRuntimeStats,
             SceneRuntimeHealthStats sceneRuntimeStats,
@@ -1360,6 +1412,13 @@ public final class RuntimeHealthProbe {
                 || ownerActorEventSubscriptionStats.repairFailures() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
+        if (ownerEventRepairSchedulerStats.failedRuns() > 0
+                || ownerEventRepairSchedulerStats.isolatedOwners() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (ownerEventRepairDispatcherStats.failedSchedulerRuns() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
         if (profileInterestStats.replayFailures() > 0 || profileInterestStats.repairFailures() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
@@ -1369,7 +1428,8 @@ public final class RuntimeHealthProbe {
         if (exceedsEnabledLimit(sceneRuntimeStats.activeScenes(), policy.maxSceneActiveScenes())
                 || exceedsEnabledLimit(sceneRuntimeStats.activePlayers(), policy.maxSceneActivePlayers())
                 || exceedsEnabledLimit(sceneRuntimeStats.maxShardPlayers(), policy.maxSceneShardHotspotPlayers())
-                || sceneRuntimeStats.missingLeaves() > 0) {
+                || sceneRuntimeStats.missingLeaves() > 0
+                || sceneRuntimeStats.projectionStaleViews() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (shopRuntimeStats.orderConflicts() > 0 || shopRuntimeStats.reservationReapFailures() > 0) {

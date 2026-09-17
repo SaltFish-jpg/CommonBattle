@@ -130,13 +130,15 @@ public final class PlayerClientPayloadCodecs {
         public byte[] encode(PlayerClientRejectResponse payload) {
             int size = CodedOutputStream.computeStringSize(1, payload.code().name())
                     + CodedOutputStream.computeStringSize(2, payload.message())
-                    + CodedOutputStream.computeBoolSize(3, payload.closeConnection());
+                    + CodedOutputStream.computeBoolSize(3, payload.closeConnection())
+                    + CodedOutputStream.computeInt64Size(4, payload.retryAfterMillis());
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
                 output.writeString(1, payload.code().name());
                 output.writeString(2, payload.message());
                 output.writeBool(3, payload.closeConnection());
+                output.writeInt64(4, payload.retryAfterMillis());
                 output.flush();
                 return bytes;
             } catch (IOException e) {
@@ -150,6 +152,7 @@ public final class PlayerClientPayloadCodecs {
             PlayerClientErrorCode code = PlayerClientErrorCode.INVALID_FRAME;
             String message = "";
             boolean closeConnection = true;
+            long retryAfterMillis = 0;
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
@@ -157,10 +160,11 @@ public final class PlayerClientPayloadCodecs {
                         case 1 -> code = PlayerClientErrorCode.valueOf(input.readString());
                         case 2 -> message = input.readString();
                         case 3 -> closeConnection = input.readBool();
+                        case 4 -> retryAfterMillis = input.readInt64();
                         default -> input.skipField(tag);
                     }
                 }
-                return new PlayerClientRejectResponse(code, message, closeConnection);
+                return new PlayerClientRejectResponse(code, message, retryAfterMillis, closeConnection);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode player reject response", e);
             }
@@ -198,7 +202,8 @@ public final class PlayerClientPayloadCodecs {
                     + CodedOutputStream.computeBoolSize(9, payload.replayed())
                     + CodedOutputStream.computeStringSize(10, nested.codecName())
                     + CodedOutputStream.computeStringSize(11, nested.typeName())
-                    + CodedOutputStream.computeByteArraySize(12, nested.bytes());
+                    + CodedOutputStream.computeByteArraySize(12, nested.bytes())
+                    + CodedOutputStream.computeInt64Size(13, payload.retryAfterMillis());
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -214,6 +219,7 @@ public final class PlayerClientPayloadCodecs {
                 output.writeString(10, nested.codecName());
                 output.writeString(11, nested.typeName());
                 output.writeByteArray(12, nested.bytes());
+                output.writeInt64(13, payload.retryAfterMillis());
                 output.flush();
                 return bytes;
             } catch (IOException e) {
@@ -236,6 +242,7 @@ public final class PlayerClientPayloadCodecs {
             String payloadCodecName = PayloadEncoding.NONE;
             String payloadTypeName = "";
             byte[] payloadBytes = new byte[0];
+            long retryAfterMillis = 0;
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
@@ -252,6 +259,7 @@ public final class PlayerClientPayloadCodecs {
                         case 10 -> payloadCodecName = input.readString();
                         case 11 -> payloadTypeName = input.readString();
                         case 12 -> payloadBytes = input.readByteArray();
+                        case 13 -> retryAfterMillis = input.readInt64();
                         default -> input.skipField(tag);
                     }
                 }
@@ -264,6 +272,7 @@ public final class PlayerClientPayloadCodecs {
                         status,
                         code,
                         message,
+                        retryAfterMillis,
                         replayed,
                         registry.decode(payloadCodecName, payloadTypeName, payloadBytes)
                 );

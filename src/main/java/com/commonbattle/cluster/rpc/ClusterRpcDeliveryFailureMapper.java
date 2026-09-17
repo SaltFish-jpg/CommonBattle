@@ -21,6 +21,12 @@ public final class ClusterRpcDeliveryFailureMapper implements RemoteCallFailureM
         if (error instanceof RpcRejectedException) {
             return AgentDeliveryResult.rejected("rpc_rejected", java.time.Duration.ZERO);
         }
+        if (error instanceof RpcStructuredException structured) {
+            if (isAdmissionRejected(structured)) {
+                return AgentDeliveryResult.rejected(structured.getMessage(), structured.retryAfter());
+            }
+            return AgentDeliveryResult.remoteUnavailable(structured.getMessage());
+        }
         if (error instanceof RpcNoRoutableServiceException) {
             return AgentDeliveryResult.remoteUnavailable(error.getMessage());
         }
@@ -29,5 +35,14 @@ public final class ClusterRpcDeliveryFailureMapper implements RemoteCallFailureM
             return AgentDeliveryResult.systemClosed();
         }
         return AgentDeliveryResult.remoteUnavailable(message);
+    }
+
+    private static boolean isAdmissionRejected(RpcStructuredException error) {
+        String code = error.code().toLowerCase(Locale.ROOT);
+        String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase(Locale.ROOT);
+        return code.startsWith("mailbox_pressure")
+                || code.equals("rate_limited")
+                || message.startsWith("mailbox_pressure")
+                || message.equals("rate_limited");
     }
 }

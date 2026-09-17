@@ -25,6 +25,8 @@ public final class RuntimeHealthJsonFormatter {
         field(json, "timestamp", snapshot.timestamp().toString()).append(',');
         field(json, "status", snapshot.status().name()).append(',');
         object(json, "actorSystem", actorSystem(snapshot)).append(',');
+        object(json, "actorMailboxes", actorMailboxes(snapshot)).append(',');
+        object(json, "actorMailboxPressures", actorMailboxPressures(snapshot)).append(',');
         object(json, "actorSchedules", actorSchedules(snapshot)).append(',');
         object(json, "rpc", rpc(snapshot)).append(',');
         object(json, "rpcResilience", rpcResilience(snapshot)).append(',');
@@ -57,6 +59,8 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "eventSubscriptions", eventSubscriptions(snapshot)).append(',');
         object(json, "actorEventSubscribers", actorEventSubscribers(snapshot)).append(',');
         object(json, "ownerActorEventSubscriptions", ownerActorEventSubscriptions(snapshot)).append(',');
+        object(json, "ownerEventRepairSchedulers", ownerEventRepairSchedulers(snapshot)).append(',');
+        object(json, "ownerEventRepairDispatchers", ownerEventRepairDispatchers(snapshot)).append(',');
         object(json, "profileInterests", profileInterests(snapshot)).append(',');
         object(json, "profileRuntimes", profileRuntimes(snapshot)).append(',');
         object(json, "chatRuntimes", chatRuntimes(snapshot)).append(',');
@@ -92,6 +96,70 @@ public final class RuntimeHealthJsonFormatter {
                 ActorTaskCategory.values())).append(',');
         object(json, "droppedTasksByCategory", enumMap(snapshot.actorSystem().droppedTasksByCategory(),
                 ActorTaskCategory.values()));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder actorMailboxes(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        ActorMailboxDiagnostics diagnostics = snapshot.actorMailboxes();
+        number(json, "activeMailboxes", diagnostics.activeMailboxes()).append(',');
+        number(json, "queuedTasks", diagnostics.queuedTasks()).append(',');
+        number(json, "largestMailboxQueuedTasks", diagnostics.largestMailboxQueuedTasks()).append(',');
+        field(json, "largestMailboxActorId", diagnostics.largestMailboxActorId()).append(',');
+        name(json, "groups").append('[');
+        for (int i = 0; i < diagnostics.groups().size(); i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            actorMailboxGroup(json, diagnostics.groups().get(i));
+        }
+        json.append("],");
+        name(json, "hottestMailboxes").append('[');
+        for (int i = 0; i < diagnostics.hottestMailboxes().size(); i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            var mailbox = diagnostics.hottestMailboxes().get(i);
+            json.append('{');
+            field(json, "actorId", mailbox.actor().id()).append(',');
+            number(json, "queuedTasks", mailbox.queuedTasks()).append(',');
+            object(json, "queuedTasksByCategory", enumMap(mailbox.queuedTasksByCategory(),
+                    ActorTaskCategory.values()));
+            json.append('}');
+        }
+        json.append(']');
+        json.append('}');
+        return json;
+    }
+
+    private static void actorMailboxGroup(StringBuilder json, ActorMailboxGroupStats group) {
+        json.append('{');
+        field(json, "group", group.group()).append(',');
+        number(json, "activeMailboxes", group.activeMailboxes()).append(',');
+        number(json, "queuedTasks", group.queuedTasks()).append(',');
+        number(json, "largestMailboxQueuedTasks", group.largestMailboxQueuedTasks()).append(',');
+        field(json, "largestMailboxActorId", group.largestMailboxActorId()).append(',');
+        object(json, "queuedTasksByCategory", enumMap(group.queuedTasksByCategory(),
+                ActorTaskCategory.values()));
+        json.append('}');
+    }
+
+    private static StringBuilder actorMailboxPressures(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        ActorMailboxPressureHealthStats stats = snapshot.actorMailboxPressures();
+        json.append('{');
+        number(json, "controllerCount", stats.controllerCount()).append(',');
+        number(json, "admissions", stats.admissions()).append(',');
+        number(json, "accepted", stats.accepted()).append(',');
+        number(json, "delegateRejected", stats.delegateRejected()).append(',');
+        number(json, "pressureRejected", stats.pressureRejected()).append(',');
+        number(json, "targetPressureRejected", stats.targetPressureRejected()).append(',');
+        number(json, "groupPressureRejected", stats.groupPressureRejected()).append(',');
+        object(json, "rejectedByTargetType", stringNumberMap(stats.rejectedByTargetType())).append(',');
+        object(json, "rejectedByActorGroup", stringNumberMap(stats.rejectedByActorGroup())).append(',');
+        object(json, "rejectedByReason", stringNumberMap(stats.rejectedByReason()));
         json.append('}');
         return json;
     }
@@ -546,6 +614,58 @@ public final class RuntimeHealthJsonFormatter {
         return json;
     }
 
+    private static StringBuilder ownerEventRepairSchedulers(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "schedulerCount", snapshot.ownerEventRepairSchedulers().schedulerCount()).append(',');
+        number(json, "pendingOwners", snapshot.ownerEventRepairSchedulers().pendingOwners()).append(',');
+        number(json, "maxDefaultPriority", snapshot.ownerEventRepairSchedulers().maxDefaultPriority()).append(',');
+        number(json, "highestPendingPriority", snapshot.ownerEventRepairSchedulers().highestPendingPriority()).append(',');
+        number(json, "repairRequests", snapshot.ownerEventRepairSchedulers().repairRequests()).append(',');
+        number(json, "requestedOwners", snapshot.ownerEventRepairSchedulers().requestedOwners()).append(',');
+        number(json, "enqueuedOwners", snapshot.ownerEventRepairSchedulers().enqueuedOwners()).append(',');
+        number(json, "duplicateOwners", snapshot.ownerEventRepairSchedulers().duplicateOwners()).append(',');
+        number(json, "dispatchRuns", snapshot.ownerEventRepairSchedulers().dispatchRuns()).append(',');
+        number(json, "dispatchedOwners", snapshot.ownerEventRepairSchedulers().dispatchedOwners()).append(',');
+        number(json, "failedRuns", snapshot.ownerEventRepairSchedulers().failedRuns()).append(',');
+        number(json, "skippedRuns", snapshot.ownerEventRepairSchedulers().skippedRuns()).append(',');
+        number(json, "backoffSkips", snapshot.ownerEventRepairSchedulers().backoffSkips()).append(',');
+        number(json, "maxConsecutiveFailures", snapshot.ownerEventRepairSchedulers().maxConsecutiveFailures()).append(',');
+        name(json, "backoffActive").append(snapshot.ownerEventRepairSchedulers().backoffActive()).append(',');
+        number(json, "maxBackoffRemainingMillis", snapshot.ownerEventRepairSchedulers().maxBackoffRemainingMillis()).append(',');
+        number(json, "isolatedOwners", snapshot.ownerEventRepairSchedulers().isolatedOwners()).append(',');
+        number(json, "isolatedOwnersTotal", snapshot.ownerEventRepairSchedulers().isolatedOwnersTotal()).append(',');
+        number(json, "isolationSkips", snapshot.ownerEventRepairSchedulers().isolationSkips()).append(',');
+        number(json, "releasedIsolatedOwners", snapshot.ownerEventRepairSchedulers().releasedIsolatedOwners()).append(',');
+        name(json, "singleOwnerProbeMode").append(snapshot.ownerEventRepairSchedulers().singleOwnerProbeMode()).append(',');
+        name(json, "inFlight").append(snapshot.ownerEventRepairSchedulers().inFlight());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder ownerEventRepairDispatchers(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "dispatcherCount", snapshot.ownerEventRepairDispatchers().dispatcherCount()).append(',');
+        number(json, "registeredSchedulers", snapshot.ownerEventRepairDispatchers().registeredSchedulers()).append(',');
+        number(json, "dueSchedulers", snapshot.ownerEventRepairDispatchers().dueSchedulers()).append(',');
+        number(json, "pendingSchedulers", snapshot.ownerEventRepairDispatchers().pendingSchedulers()).append(',');
+        number(json, "eligibleSchedulers", snapshot.ownerEventRepairDispatchers().eligibleSchedulers()).append(',');
+        number(json, "highestPendingPriority", snapshot.ownerEventRepairDispatchers().highestPendingPriority()).append(',');
+        number(json, "maxDrainsPerTick", snapshot.ownerEventRepairDispatchers().maxDrainsPerTick()).append(',');
+        number(json, "maxTickIntervalMillis", snapshot.ownerEventRepairDispatchers().maxTickIntervalMillis()).append(',');
+        number(json, "drainAttempts", snapshot.ownerEventRepairDispatchers().drainAttempts()).append(',');
+        number(json, "selectedSchedulers", snapshot.ownerEventRepairDispatchers().selectedSchedulers()).append(',');
+        number(json, "drainedOwners", snapshot.ownerEventRepairDispatchers().drainedOwners()).append(',');
+        number(json, "failedSchedulerRuns", snapshot.ownerEventRepairDispatchers().failedSchedulerRuns()).append(',');
+        number(json, "limitedRuns", snapshot.ownerEventRepairDispatchers().limitedRuns()).append(',');
+        number(json, "emptyRuns", snapshot.ownerEventRepairDispatchers().emptyRuns()).append(',');
+        number(json, "skippedRuns", snapshot.ownerEventRepairDispatchers().skippedRuns()).append(',');
+        name(json, "inFlight").append(snapshot.ownerEventRepairDispatchers().inFlight());
+        json.append('}');
+        return json;
+    }
+
     private static StringBuilder profileInterests(RuntimeHealthSnapshot snapshot) {
         StringBuilder json = new StringBuilder();
         json.append('{');
@@ -593,7 +713,10 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "droppedHistoryMessages", snapshot.chatRuntimes().droppedHistoryMessages()).append(',');
         number(json, "acceptedDeliveryRecipients", snapshot.chatRuntimes().acceptedDeliveryRecipients()).append(',');
         number(json, "droppedDeliveryRecipients", snapshot.chatRuntimes().droppedDeliveryRecipients()).append(',');
-        number(json, "failedDeliveryRecipients", snapshot.chatRuntimes().failedDeliveryRecipients());
+        number(json, "failedDeliveryRecipients", snapshot.chatRuntimes().failedDeliveryRecipients()).append(',');
+        number(json, "allianceRemovedMembers", snapshot.chatRuntimes().allianceRemovedMembers()).append(',');
+        number(json, "allianceEventRemovedMembers", snapshot.chatRuntimes().allianceEventRemovedMembers()).append(',');
+        number(json, "allianceSnapshotRemovedMembers", snapshot.chatRuntimes().allianceSnapshotRemovedMembers());
         json.append('}');
         return json;
     }
@@ -686,7 +809,15 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "playerInterests", snapshot.sceneRuntimes().playerInterests()).append(',');
         number(json, "allianceReferences", snapshot.sceneRuntimes().allianceReferences()).append(',');
         number(json, "duplicateEnters", snapshot.sceneRuntimes().duplicateEnters()).append(',');
-        number(json, "missingLeaves", snapshot.sceneRuntimes().missingLeaves());
+        number(json, "missingLeaves", snapshot.sceneRuntimes().missingLeaves()).append(',');
+        number(json, "projectionReceivedEvents", snapshot.sceneRuntimes().projectionReceivedEvents()).append(',');
+        number(json, "projectionAppliedEvents", snapshot.sceneRuntimes().projectionAppliedEvents()).append(',');
+        number(json, "projectionDuplicateEvents", snapshot.sceneRuntimes().projectionDuplicateEvents()).append(',');
+        number(json, "projectionGapEvents", snapshot.sceneRuntimes().projectionGapEvents()).append(',');
+        number(json, "projectionRepairRequests", snapshot.sceneRuntimes().projectionRepairRequests()).append(',');
+        number(json, "projectionAppliedSnapshots", snapshot.sceneRuntimes().projectionAppliedSnapshots()).append(',');
+        number(json, "projectionIgnoredSnapshots", snapshot.sceneRuntimes().projectionIgnoredSnapshots()).append(',');
+        number(json, "projectionStaleViews", snapshot.sceneRuntimes().projectionStaleViews());
         json.append('}');
         return json;
     }

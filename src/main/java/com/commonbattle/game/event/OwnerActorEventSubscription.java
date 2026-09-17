@@ -22,7 +22,7 @@ import java.util.function.ToLongFunction;
  * 它统一处理引用计数、远端订阅、replay 补偿和本地事件过滤，最终把事件交给 ActorMailboxEventSubscriber。
  */
 public final class OwnerActorEventSubscription
-        implements OwnerEventInterestControl, OwnerActorEventSubscriptionView, AutoCloseable {
+        implements OwnerEventInterestControl, OwnerActorEventSubscriptionView, OwnerActorEventRecoveryTarget, AutoCloseable {
     private final ClusterVersionedEventBus bus;
     private final String topic;
     private final VersionedEventSubscriber subscriber;
@@ -137,6 +137,11 @@ public final class OwnerActorEventSubscription
         subscribeRequests.incrementAndGet();
         bus.renewRemote(topic, watched.keySet());
         replay(watched, watched.keySet());
+    }
+
+    @Override
+    public void recoverOwnerSubscriptions() {
+        recover();
     }
 
     @Override

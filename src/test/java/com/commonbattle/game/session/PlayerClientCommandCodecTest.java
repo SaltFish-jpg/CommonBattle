@@ -95,13 +95,19 @@ class PlayerClientCommandCodecTest {
         PlayerClientEnvelope reject = codec.decode(codec.encode(new PlayerClientEnvelope(
                 10001L,
                 NettyPlayerGatewayHandler.REJECT_TOPIC,
-                new PlayerClientRejectResponse(PlayerClientErrorCode.COMMAND_RATE_LIMITED, "command rate limited", true),
+                new PlayerClientRejectResponse(
+                        PlayerClientErrorCode.COMMAND_RATE_LIMITED,
+                        "command rate limited",
+                        1000,
+                        true
+                ),
                 7,
                 Instant.parse("2026-09-01T00:00:00Z")
         )));
         PlayerClientRejectResponse rejectPayload = assertInstanceOf(PlayerClientRejectResponse.class, reject.payload());
         assertEquals(PlayerClientErrorCode.COMMAND_RATE_LIMITED, rejectPayload.code());
         assertEquals("command rate limited", rejectPayload.message());
+        assertEquals(1000, rejectPayload.retryAfterMillis());
         assertEquals(true, rejectPayload.closeConnection());
     }
 
@@ -124,6 +130,7 @@ class PlayerClientCommandCodecTest {
                         com.commonbattle.game.player.PlayerBusinessResponseStatus.SUCCESS,
                         "OK",
                         "",
+                        75,
                         true,
                         com.commonbattle.game.player.PlayerBusinessAck.OK
                 ),
@@ -134,6 +141,7 @@ class PlayerClientCommandCodecTest {
         PlayerClientCommandResponse response = assertInstanceOf(PlayerClientCommandResponse.class, decoded.payload());
         assertEquals(10001L, response.playerId());
         assertEquals(3, response.sequence());
+        assertEquals(75, response.retryAfterMillis());
         assertEquals(true, response.replayed());
         assertEquals(com.commonbattle.game.player.PlayerBusinessAck.OK, response.payload());
     }

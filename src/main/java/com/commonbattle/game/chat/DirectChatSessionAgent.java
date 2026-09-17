@@ -20,6 +20,7 @@ public final class DirectChatSessionAgent {
     private final String sessionId;
     private final long firstPlayerId;
     private final long secondPlayerId;
+    private final DirectChatAccessPolicy accessPolicy;
     private final ChatMessagePolicy messagePolicy;
     private final ChatDeliverySink deliverySink;
     private final Clock clock;
@@ -37,7 +38,8 @@ public final class DirectChatSessionAgent {
             ChatMessagePolicy messagePolicy,
             Clock clock
     ) {
-        this(messages, self, firstPlayerId, secondPlayerId, messagePolicy, clock,
+        this(messages, self, firstPlayerId, secondPlayerId, DirectChatAccessPolicy.allowAll(), messagePolicy,
+                ChatDeliverySink.noop(), clock,
                 ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES);
     }
 
@@ -50,7 +52,8 @@ public final class DirectChatSessionAgent {
             Clock clock,
             int maxHistoryMessages
     ) {
-        this(messages, self, firstPlayerId, secondPlayerId, messagePolicy, ChatDeliverySink.noop(), clock,
+        this(messages, self, firstPlayerId, secondPlayerId, DirectChatAccessPolicy.allowAll(), messagePolicy,
+                ChatDeliverySink.noop(), clock,
                 maxHistoryMessages);
     }
 
@@ -64,11 +67,27 @@ public final class DirectChatSessionAgent {
             Clock clock,
             int maxHistoryMessages
     ) {
+        this(messages, self, firstPlayerId, secondPlayerId, DirectChatAccessPolicy.allowAll(), messagePolicy,
+                deliverySink, clock, maxHistoryMessages);
+    }
+
+    public DirectChatSessionAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            long firstPlayerId,
+            long secondPlayerId,
+            DirectChatAccessPolicy accessPolicy,
+            ChatMessagePolicy messagePolicy,
+            ChatDeliverySink deliverySink,
+            Clock clock,
+            int maxHistoryMessages
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.firstPlayerId = Math.min(firstPlayerId, secondPlayerId);
         this.secondPlayerId = Math.max(firstPlayerId, secondPlayerId);
         this.sessionId = ChatChannelIds.direct(firstPlayerId, secondPlayerId);
+        this.accessPolicy = Objects.requireNonNull(accessPolicy, "accessPolicy");
         this.messagePolicy = Objects.requireNonNull(messagePolicy, "messagePolicy");
         this.deliverySink = Objects.requireNonNull(deliverySink, "deliverySink");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -91,6 +110,10 @@ public final class DirectChatSessionAgent {
     }
 
     private ChatSendResult sendNow(DirectChatSendRequest request) {
+        ChatSendStatus accessStatus = accessPolicy.inspect(request);
+        if (accessStatus != ChatSendStatus.SENT) {
+            return ChatSendResult.rejected(accessStatus);
+        }
         ChatSendRequest policyRequest = new ChatSendRequest(
                 sessionId,
                 request.senderId(),

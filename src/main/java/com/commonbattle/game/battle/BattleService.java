@@ -36,6 +36,10 @@ public final class BattleService {
         this(catalog, bagService);
     }
 
+    public BattleStageDefinition requireStage(String stageId) {
+        return catalog.require(stageId);
+    }
+
     public BattleSettlementResult clear(
             PlayerBag bag,
             PlayerBattleState battleState,

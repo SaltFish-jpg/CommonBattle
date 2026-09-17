@@ -17,6 +17,7 @@ public record PlayerBusinessResponse(
         PlayerBusinessResponseStatus status,
         String code,
         String message,
+        long retryAfterMillis,
         Object payload
 ) {
     public static final String OK = "OK";
@@ -31,6 +32,7 @@ public record PlayerBusinessResponse(
         Objects.requireNonNull(status, "status");
         code = code == null || code.isBlank() ? OK : code;
         message = message == null ? "" : message;
+        retryAfterMillis = Math.max(0, retryAfterMillis);
         if (playerId <= 0) {
             throw new IllegalArgumentException("playerId must be positive");
         }
@@ -48,6 +50,20 @@ public record PlayerBusinessResponse(
         }
     }
 
+    public PlayerBusinessResponse(
+            long playerId,
+            String sessionId,
+            long sessionEpoch,
+            long sequence,
+            String operation,
+            PlayerBusinessResponseStatus status,
+            String code,
+            String message,
+            Object payload
+    ) {
+        this(playerId, sessionId, sessionEpoch, sequence, operation, status, code, message, 0, payload);
+    }
+
     public boolean succeeded() {
         return status == PlayerBusinessResponseStatus.SUCCESS;
     }
@@ -62,6 +78,7 @@ public record PlayerBusinessResponse(
                 PlayerBusinessResponseStatus.SUCCESS,
                 OK,
                 "",
+                0,
                 payload
         );
     }
@@ -76,6 +93,7 @@ public record PlayerBusinessResponse(
                 PlayerBusinessResponseStatus.FAILED,
                 failureCode(error),
                 error == null || error.getMessage() == null ? "" : error.getMessage(),
+                retryAfterMillis(error),
                 null
         );
     }
@@ -94,5 +112,12 @@ public record PlayerBusinessResponse(
             return BUSINESS_REJECTED;
         }
         return SYSTEM_ERROR;
+    }
+
+    private static long retryAfterMillis(Throwable error) {
+        if (error instanceof PlayerCommandDispatchException dispatch) {
+            return dispatch.retryAfter().toMillis();
+        }
+        return 0;
     }
 }

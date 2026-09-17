@@ -65,6 +65,9 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
         dto.activities = progressEntries(snapshot.activities().progress());
         dto.growthLevel = snapshot.growth().level();
         dto.growthExp = snapshot.growth().exp();
+        dto.growthStamina = snapshot.growth().stamina();
+        dto.growthMaxStamina = snapshot.growth().maxStamina();
+        dto.growthStaminaUpdatedAtMillis = snapshot.growth().staminaUpdatedAt().toEpochMilli();
         dto.shopLifetime = intEntries(snapshot.shop().lifetimePurchases());
         dto.shopDaily = intEntries(snapshot.shop().dailyPurchases());
         dto.battleSettlements = settlementEntries(snapshot.battle().settlements());
@@ -80,7 +83,7 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
                 instant(dto.createdAtMillis),
                 new BagSnapshot(intMap(dto.bag)),
                 new PlayerActivitiesSnapshot(activityMap(dto.activities)),
-                new GrowthSnapshot(dto.growthLevel <= 0 ? 1 : dto.growthLevel, Math.max(0, dto.growthExp)),
+                growth(dto),
                 new PlayerShopSnapshot(intMap(dto.shopLifetime), intMap(dto.shopDaily)),
                 new PlayerBattleSnapshot(settlementMap(dto.battleSettlements), stageMap(dto.battleStages)),
                 new PlayerTasksSnapshot(taskMap(dto.tasks)),
@@ -88,6 +91,18 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
                 dto.eventRevision,
                 dto.revision,
                 instant(dto.savedAtMillis)
+        );
+    }
+
+    private GrowthSnapshot growth(StateDto dto) {
+        int maxStamina = dto.growthMaxStamina <= 0 ? GrowthSnapshot.DEFAULT_MAX_STAMINA : dto.growthMaxStamina;
+        int stamina = dto.growthMaxStamina <= 0 ? maxStamina : Math.max(0, Math.min(dto.growthStamina, maxStamina));
+        return new GrowthSnapshot(
+                dto.growthLevel <= 0 ? 1 : dto.growthLevel,
+                Math.max(0, dto.growthExp),
+                stamina,
+                maxStamina,
+                instant(dto.growthStaminaUpdatedAtMillis)
         );
     }
 
@@ -276,6 +291,9 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
         public List<ProgressDto> activities = new ArrayList<>();
         public int growthLevel;
         public int growthExp;
+        public int growthStamina;
+        public int growthMaxStamina;
+        public long growthStaminaUpdatedAtMillis;
         public List<IntEntryDto> shopLifetime = new ArrayList<>();
         public List<IntEntryDto> shopDaily = new ArrayList<>();
         public List<BattleSettlementDto> battleSettlements = new ArrayList<>();

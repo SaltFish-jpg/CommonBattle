@@ -251,6 +251,44 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
     }
 
     @Test
+    void mailboxPressureRespondsWithRetryAfterOverTcp() throws Exception {
+        int port = freePort();
+        Fixture fixture = Fixture.create((target, operation) ->
+                AdmissionDecision.reject("mailbox_pressure:target", Duration.ofMillis(50)));
+        try (fixture;
+             NettyPlayerGatewayServer server = new NettyPlayerGatewayServer(
+                     new ServiceEndpoint("127.0.0.1", port),
+                     fixture.connections,
+                     fixture.ingress,
+                     fixture.codecs,
+                     CLOCK
+             )) {
+            server.start();
+            try (TestClient client = TestClient.connect(port, fixture.codecs)) {
+                client.send(PlayerClientInboundEnvelope.login(new PlayerClientLoginRequest(10001L, "session-1")));
+                assertPayload(client.nextEnvelope(), PlayerClientLoginResponse.class);
+
+                client.send(PlayerClientInboundEnvelope.command(new PlayerClientCommandEnvelope(
+                        10001L,
+                        "session-1",
+                        1,
+                        1,
+                        "test.echo",
+                        "hello"
+                )));
+
+                PlayerClientCommandResponse response = assertPayload(client.nextEnvelope(), PlayerClientCommandResponse.class);
+                assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+                assertEquals("BACKPRESSURED", response.code());
+                assertEquals("mailbox_pressure:target", response.message());
+                assertEquals(50, response.retryAfterMillis());
+                assertFalse(response.replayed());
+                assertEquals(0, fixture.handled.get());
+            }
+        }
+    }
+
+    @Test
     void reconnectReplaysUnackedAndOfflinePushesOverTcp() throws Exception {
         int port = freePort();
         Fixture fixture = Fixture.create();
@@ -431,6 +469,10 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
             AtomicReference<List<String>> businessThreads
     ) implements AutoCloseable {
         private static Fixture create() {
+            return create((target, operation) -> AdmissionDecision.accept());
+        }
+
+        private static Fixture create(com.commonbattle.actor.backpressure.InboundAdmissionController admissions) {
             ExecutorService actorExecutor = Executors.newSingleThreadExecutor(runnable ->
                     new Thread(runnable, "test-player-actor"));
             ActorSystem actors = new ActorSystem(actorExecutor, 64);
@@ -466,7 +508,7 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
                     sessions,
                     new PlayerCommandSequencer(),
                     new AdmissionControlledAgentRouter(
-                            (target, operation) -> AdmissionDecision.accept(),
+                            admissions,
                             new LifecycleAwareAgentRouter(lifecycles, messages)
                     )
             );

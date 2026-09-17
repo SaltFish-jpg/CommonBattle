@@ -173,7 +173,8 @@ public final class PlayerBusinessCommandPayloadCodecs {
                     + CodedOutputStream.computeStringSize(8, payload.message())
                     + CodedOutputStream.computeStringSize(9, nested.codecName())
                     + CodedOutputStream.computeStringSize(10, nested.typeName())
-                    + CodedOutputStream.computeByteArraySize(11, nested.bytes());
+                    + CodedOutputStream.computeByteArraySize(11, nested.bytes())
+                    + CodedOutputStream.computeInt64Size(12, payload.retryAfterMillis());
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -188,6 +189,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
                 output.writeString(9, nested.codecName());
                 output.writeString(10, nested.typeName());
                 output.writeByteArray(11, nested.bytes());
+                output.writeInt64(12, payload.retryAfterMillis());
                 output.flush();
                 return bytes;
             } catch (IOException e) {
@@ -209,6 +211,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
             String payloadCodecName = PayloadEncoding.NONE;
             String payloadTypeName = "";
             byte[] payloadBytes = new byte[0];
+            long retryAfterMillis = 0;
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
@@ -224,6 +227,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
                         case 9 -> payloadCodecName = input.readString();
                         case 10 -> payloadTypeName = input.readString();
                         case 11 -> payloadBytes = input.readByteArray();
+                        case 12 -> retryAfterMillis = input.readInt64();
                         default -> input.skipField(tag);
                     }
                 }
@@ -237,6 +241,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
                         status,
                         code,
                         message,
+                        retryAfterMillis,
                         responsePayload
                 );
             } catch (IOException e) {

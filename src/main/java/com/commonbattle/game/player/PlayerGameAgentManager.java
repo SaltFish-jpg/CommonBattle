@@ -1,7 +1,9 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorTimerHandle;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.message.AgentMessagePort;
@@ -10,6 +12,7 @@ import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.shop.ShopStockAsyncClient;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +39,10 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     private final PlayerStateSaveListener saveListener;
     private final ShopStockAsyncClient shopStockAsyncClient;
     private final PlayerPushPort pushes;
+    private final ActorScheduleRegistry actorSchedules;
+    private final boolean growthStaminaRecoveryEnabled;
+    private final Duration growthStaminaInitialDelay;
+    private final Duration growthStaminaInterval;
     private final AsyncShopPurchaseMetrics asyncShopPurchases = new AsyncShopPurchaseMetrics();
     private final Map<Long, PlayerGameAgentHandle> agents = new ConcurrentHashMap<>();
 
@@ -127,6 +134,29 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
             ShopStockAsyncClient shopStockAsyncClient,
             PlayerPushPort pushes
     ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, pushes,
+                null, false, Duration.ZERO, Duration.ofMinutes(5));
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            PlayerPushPort pushes,
+            ActorScheduleRegistry actorSchedules,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaInitialDelay,
+            Duration growthStaminaInterval
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -141,6 +171,10 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         this.saveListener = Objects.requireNonNull(saveListener, "saveListener");
         this.shopStockAsyncClient = shopStockAsyncClient;
         this.pushes = Objects.requireNonNull(pushes, "pushes");
+        this.actorSchedules = actorSchedules;
+        this.growthStaminaRecoveryEnabled = growthStaminaRecoveryEnabled;
+        this.growthStaminaInitialDelay = positiveOrZero(growthStaminaInitialDelay, "growthStaminaInitialDelay");
+        this.growthStaminaInterval = positive(growthStaminaInterval, "growthStaminaInterval");
     }
 
     public PlayerGameAgent getOrCreate(long playerId) {
@@ -248,6 +282,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 PlayerStateSnapshot snapshot = handle.agent().saveInCurrentMailbox(repository);
                 saveListener.saved(snapshot);
                 agents.remove(playerId, handle);
+                handle.cancelTimers();
                 callback.saved(snapshot);
             } catch (RuntimeException e) {
                 callback.failed(playerId, e);
@@ -291,10 +326,33 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 asyncShopPurchases,
                 pushes
         );
-        return new PlayerGameAgentHandle(agent, snapshot, recovery.created());
+        return new PlayerGameAgentHandle(agent, snapshot, recovery.created(), scheduleGrowthStaminaRecovery(agent));
     }
 
     private String actorId(long playerId) {
         return "player-" + playerId;
+    }
+
+    private ActorTimerHandle scheduleGrowthStaminaRecovery(PlayerGameAgent agent) {
+        if (!growthStaminaRecoveryEnabled || actorSchedules == null) {
+            return null;
+        }
+        return agent.scheduleGrowthStaminaRecovery(actorSchedules, growthStaminaInitialDelay, growthStaminaInterval);
+    }
+
+    private static Duration positive(Duration value, String name) {
+        Objects.requireNonNull(value, name);
+        if (value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return value;
+    }
+
+    private static Duration positiveOrZero(Duration value, String name) {
+        Objects.requireNonNull(value, name);
+        if (value.isNegative()) {
+            throw new IllegalArgumentException(name + " must not be negative");
+        }
+        return value;
     }
 }

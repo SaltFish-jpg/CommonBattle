@@ -56,6 +56,7 @@ class ActorScheduleRegistryTest {
             executor.runNext();
 
             assertEquals(List.of("new"), runs);
+            awaitActiveJobs(schedules, 0);
             assertEquals(2, schedules.stats().scheduledJobs());
             assertEquals(1, schedules.stats().cancelledJobs());
             assertEquals(0, schedules.stats().activeJobs());
@@ -91,6 +92,14 @@ class ActorScheduleRegistryTest {
             TimeUnit.MILLISECONDS.sleep(5);
         }
         return executor.queued() >= expected;
+    }
+
+    private static void awaitActiveJobs(ActorScheduleRegistry schedules, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (System.nanoTime() < deadline && schedules.stats().activeJobs() != expected) {
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        assertEquals(expected, schedules.stats().activeJobs());
     }
 
     private static final class RecordingExecutor implements Executor {

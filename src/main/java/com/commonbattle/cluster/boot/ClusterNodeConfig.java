@@ -3,6 +3,7 @@ package com.commonbattle.cluster.boot;
 import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorSystemConfig;
 import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
@@ -11,6 +12,8 @@ import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
 import com.commonbattle.cluster.rpc.PlayerGrayRouteConfig;
 import com.commonbattle.game.chat.ChatRouteConfig;
+import com.commonbattle.game.event.OwnerEventRepairBackoffPolicy;
+import com.commonbattle.game.event.OwnerEventRepairIsolationPolicy;
 import com.commonbattle.game.player.PlayerGatewayConfig;
 import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import com.commonbattle.observability.DrainConfig;
@@ -37,6 +40,7 @@ import java.util.Set;
  * 配置可以来自外部 properties 文件，也可以来自 classpath 下的示例配置。
  */
 public final class ClusterNodeConfig {
+    private static final int DEFAULT_EVENT_REPAIR_MAX_BATCH_SIZE = 64;
     private final Properties properties;
 
     private ClusterNodeConfig(Properties properties) {
@@ -108,10 +112,29 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.player.command.rate.capacity");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.permits");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.interval.millis");
+        validateBoolean(issues, "cluster.player.command.mailbox.pressure.enabled");
+        validateNonNegativeInteger(issues, "cluster.player.command.mailbox.pressure.target.max.queued");
+        validateNonNegativeInteger(issues, "cluster.player.command.mailbox.pressure.group.max.queued");
+        validateNonNegativeInteger(issues, "cluster.player.command.mailbox.pressure.retry.after.millis");
+        validateBoolean(issues, "cluster.business.agent.mailbox.pressure.enabled");
+        validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.target.max.queued");
+        validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.group.max.queued");
+        validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.retry.after.millis");
+        validateBoolean(issues, "cluster.chat.mailbox.pressure.enabled");
+        validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.target.max.queued");
+        validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.group.max.queued");
+        validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.retry.after.millis");
+        validateBoolean(issues, "cluster.scene.mailbox.pressure.enabled");
+        validateNonNegativeInteger(issues, "cluster.scene.mailbox.pressure.target.max.queued");
+        validateNonNegativeInteger(issues, "cluster.scene.mailbox.pressure.group.max.queued");
+        validateNonNegativeInteger(issues, "cluster.scene.mailbox.pressure.retry.after.millis");
         validatePositiveInteger(issues, "cluster.player.business.response.timeout.millis");
         validateBoolean(issues, "cluster.player.auto.save.enabled");
         validateNonNegativeInteger(issues, "cluster.player.auto.save.initial.delay.millis");
         validatePositiveInteger(issues, "cluster.player.auto.save.interval.millis");
+        validateBoolean(issues, "cluster.player.growth.stamina.recovery.enabled");
+        validateNonNegativeInteger(issues, "cluster.player.growth.stamina.recovery.initial.delay.millis");
+        validatePositiveInteger(issues, "cluster.player.growth.stamina.recovery.interval.millis");
         validateInstant(issues, "game.server.open.time");
         validateActorOverflowStrategy(issues);
         validateActorCategoryCapacities(issues);
@@ -134,6 +157,22 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.event.subscription.lease.ttl.millis");
         validatePositiveInteger(issues, "cluster.event.subscription.lease.renew.interval.millis");
         validatePositiveInteger(issues, "cluster.event.subscription.lease.scan.interval.millis");
+        validateBoolean(issues, "cluster.event.repair.scheduler.enabled");
+        validateBoolean(issues, "cluster.event.repair.dispatcher.enabled");
+        validatePositiveInteger(issues, "cluster.event.repair.dispatcher.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.repair.dispatcher.max.drains.per.tick");
+        validatePositiveInteger(issues, "cluster.event.repair.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.repair.max.batch.size");
+        validateNonNegativeInteger(issues, "cluster.event.repair.priority");
+        validateNonNegativeInteger(issues, "cluster.event.repair.backoff.initial.millis");
+        validateNonNegativeInteger(issues, "cluster.event.repair.backoff.max.millis");
+        validateDoubleAtLeast(issues, "cluster.event.repair.backoff.multiplier", 1.0);
+        validateRepairBackoffBounds(issues,
+                "cluster.event.repair.backoff.initial.millis",
+                "cluster.event.repair.backoff.max.millis");
+        validateNonNegativeInteger(issues, "cluster.event.repair.owner.isolation.max.failures");
+        validateNonNegativeInteger(issues, "cluster.event.repair.owner.isolation.duration.millis");
+        validateEventRepairTopicOverrides(issues);
         validateJdbcEventOutboxStore(issues);
         validateMigrationTaskStoreKind(issues);
         validateBoolean(issues, "cluster.migration.task.jdbc.initialize.schema");
@@ -176,6 +215,9 @@ public final class ClusterNodeConfig {
         validateCenter(issues);
         if (actualKind == ServiceKind.SCENE || expectedKind == ServiceKind.SCENE) {
             validateScene(issues);
+            validateBoolean(issues, "scene.tick.enabled");
+            validateNonNegativeInteger(issues, "scene.tick.initial.delay.millis");
+            validatePositiveInteger(issues, "scene.tick.interval.millis");
         }
         if (actualKind == ServiceKind.CHAT || expectedKind == ServiceKind.CHAT) {
             validatePositiveInteger(issues, "chat.world.shards");
@@ -335,6 +377,31 @@ public final class ClusterNodeConfig {
         );
     }
 
+    public ActorMailboxPressurePolicy playerCommandMailboxPressurePolicy() {
+        return mailboxPressurePolicy("cluster.player.command.mailbox.pressure");
+    }
+
+    public ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy() {
+        return mailboxPressurePolicy("cluster.business.agent.mailbox.pressure");
+    }
+
+    public ActorMailboxPressurePolicy chatMailboxPressurePolicy() {
+        return mailboxPressurePolicy("cluster.chat.mailbox.pressure");
+    }
+
+    public ActorMailboxPressurePolicy sceneMailboxPressurePolicy() {
+        return mailboxPressurePolicy("cluster.scene.mailbox.pressure");
+    }
+
+    private ActorMailboxPressurePolicy mailboxPressurePolicy(String prefix) {
+        return new ActorMailboxPressurePolicy(
+                Boolean.parseBoolean(property(prefix + ".enabled", "false")),
+                integer(prefix + ".target.max.queued", 0),
+                integer(prefix + ".group.max.queued", 0),
+                Duration.ofMillis(integer(prefix + ".retry.after.millis", 50))
+        );
+    }
+
     public Duration playerBusinessResponseTimeout() {
         return Duration.ofMillis(integer("cluster.player.business.response.timeout.millis", 5_000));
     }
@@ -361,6 +428,18 @@ public final class ClusterNodeConfig {
 
     public Duration playerAutoSaveInterval() {
         return Duration.ofMillis(integer("cluster.player.auto.save.interval.millis", 60_000));
+    }
+
+    public boolean playerGrowthStaminaRecoveryEnabled() {
+        return Boolean.parseBoolean(property("cluster.player.growth.stamina.recovery.enabled", "false"));
+    }
+
+    public Duration playerGrowthStaminaRecoveryInitialDelay() {
+        return Duration.ofMillis(integer("cluster.player.growth.stamina.recovery.initial.delay.millis", 5_000));
+    }
+
+    public Duration playerGrowthStaminaRecoveryInterval() {
+        return Duration.ofMillis(integer("cluster.player.growth.stamina.recovery.interval.millis", 60_000));
     }
 
     public EventOutboxStoreKind eventOutboxStoreKind() {
@@ -411,8 +490,99 @@ public final class ClusterNodeConfig {
         return Duration.ofMillis(integer("cluster.event.subscription.lease.renew.interval.millis", 5_000));
     }
 
+    public Duration eventSubscriptionRecoveryInterval() {
+        return Duration.ofMillis(integer("cluster.event.subscription.recovery.interval.millis", 5_000));
+    }
+
     public Duration eventSubscriptionLeaseScanInterval() {
         return Duration.ofMillis(integer("cluster.event.subscription.lease.scan.interval.millis", 1_000));
+    }
+
+    public boolean eventRepairSchedulerEnabled() {
+        return Boolean.parseBoolean(property("cluster.event.repair.scheduler.enabled", "true"));
+    }
+
+    public boolean eventRepairSchedulerEnabled(String topic) {
+        return Boolean.parseBoolean(property(
+                eventRepairTopicKey(topic, "scheduler.enabled"),
+                property("cluster.event.repair.scheduler.enabled", "true")
+        ));
+    }
+
+    public boolean eventRepairDispatcherEnabled() {
+        return Boolean.parseBoolean(property("cluster.event.repair.dispatcher.enabled", "true"));
+    }
+
+    public Duration eventRepairDispatcherInterval() {
+        return Duration.ofMillis(integer("cluster.event.repair.dispatcher.interval.millis", 1_000));
+    }
+
+    public int eventRepairDispatcherMaxDrainsPerTick() {
+        return integer("cluster.event.repair.dispatcher.max.drains.per.tick", 4);
+    }
+
+    public Duration eventRepairInterval() {
+        return Duration.ofMillis(integer("cluster.event.repair.interval.millis", 5_000));
+    }
+
+    public Duration eventRepairInterval(String topic) {
+        return Duration.ofMillis(integer(
+                eventRepairTopicKey(topic, "interval.millis"),
+                integer("cluster.event.repair.interval.millis", 5_000)
+        ));
+    }
+
+    public int eventRepairMaxBatchSize() {
+        return integer("cluster.event.repair.max.batch.size", DEFAULT_EVENT_REPAIR_MAX_BATCH_SIZE);
+    }
+
+    public int eventRepairMaxBatchSize(String topic) {
+        return integer(
+                eventRepairTopicKey(topic, "max.batch.size"),
+                integer("cluster.event.repair.max.batch.size", DEFAULT_EVENT_REPAIR_MAX_BATCH_SIZE)
+        );
+    }
+
+    public int eventRepairPriority() {
+        return integer("cluster.event.repair.priority", 0);
+    }
+
+    public int eventRepairPriority(String topic) {
+        return integer(
+                eventRepairTopicKey(topic, "priority"),
+                integer("cluster.event.repair.priority", 0)
+        );
+    }
+
+    public OwnerEventRepairBackoffPolicy eventRepairBackoffPolicy(String topic) {
+        Duration initialDelay = Duration.ofMillis(integer(
+                eventRepairTopicKey(topic, "backoff.initial.millis"),
+                integer("cluster.event.repair.backoff.initial.millis", 1_000)
+        ));
+        Duration maxDelay = Duration.ofMillis(integer(
+                eventRepairTopicKey(topic, "backoff.max.millis"),
+                integer("cluster.event.repair.backoff.max.millis", 30_000)
+        ));
+        double multiplier = doubleValue(
+                eventRepairTopicKey(topic, "backoff.multiplier"),
+                doubleValue("cluster.event.repair.backoff.multiplier", 2.0)
+        );
+        if (initialDelay.isZero() || maxDelay.isZero()) {
+            return OwnerEventRepairBackoffPolicy.disabled();
+        }
+        return new OwnerEventRepairBackoffPolicy(initialDelay, maxDelay, multiplier);
+    }
+
+    public OwnerEventRepairIsolationPolicy eventRepairIsolationPolicy(String topic) {
+        int maxFailures = integer(
+                eventRepairTopicKey(topic, "owner.isolation.max.failures"),
+                integer("cluster.event.repair.owner.isolation.max.failures", 3)
+        );
+        Duration duration = Duration.ofMillis(integer(
+                eventRepairTopicKey(topic, "owner.isolation.duration.millis"),
+                integer("cluster.event.repair.owner.isolation.duration.millis", 60_000)
+        ));
+        return new OwnerEventRepairIsolationPolicy(maxFailures, duration);
     }
 
     public Duration configWarmupTimeout() {
@@ -560,6 +730,18 @@ public final class ClusterNodeConfig {
         return integer("scene.shards", actorWorkers());
     }
 
+    public boolean sceneTickEnabled() {
+        return Boolean.parseBoolean(property("scene.tick.enabled", "false"));
+    }
+
+    public Duration sceneTickInitialDelay() {
+        return Duration.ofMillis(integer("scene.tick.initial.delay.millis", 1_000));
+    }
+
+    public Duration sceneTickInterval() {
+        return Duration.ofMillis(integer("scene.tick.interval.millis", 100));
+    }
+
     public ChatRouteConfig chatRouteConfig() {
         ChatRouteConfig defaults = ChatRouteConfig.defaults();
         return new ChatRouteConfig(
@@ -588,6 +770,11 @@ public final class ClusterNodeConfig {
     private int integer(String key, int defaultValue) {
         String value = properties.getProperty(key);
         return value == null ? defaultValue : Integer.parseInt(value);
+    }
+
+    private double doubleValue(String key, double defaultValue) {
+        String value = properties.getProperty(key);
+        return value == null ? defaultValue : Double.parseDouble(value);
     }
 
     private void require(List<ClusterConfigIssue> issues, String key) {
@@ -689,6 +876,37 @@ public final class ClusterNodeConfig {
             }
         } catch (NumberFormatException e) {
             issues.add(new ClusterConfigIssue(key, "must be an integer"));
+        }
+    }
+
+    private void validateDoubleAtLeast(List<ClusterConfigIssue> issues, String key, double minValue) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            double number = Double.parseDouble(value);
+            if (Double.isNaN(number) || Double.isInfinite(number) || number < minValue) {
+                issues.add(new ClusterConfigIssue(key, "must be greater than or equal to " + minValue));
+            }
+        } catch (NumberFormatException e) {
+            issues.add(new ClusterConfigIssue(key, "must be a number"));
+        }
+    }
+
+    private void validateRepairBackoffBounds(List<ClusterConfigIssue> issues, String initialKey, String maxKey) {
+        String initialValue = properties.getProperty(initialKey);
+        String maxValue = properties.getProperty(maxKey);
+        if (initialValue == null || initialValue.isBlank() || maxValue == null || maxValue.isBlank()) {
+            return;
+        }
+        try {
+            int initialMillis = Integer.parseInt(initialValue);
+            int maxMillis = Integer.parseInt(maxValue);
+            if (initialMillis > 0 && maxMillis > 0 && maxMillis < initialMillis) {
+                issues.add(new ClusterConfigIssue(maxKey, "must be greater than or equal to initial backoff"));
+            }
+        } catch (NumberFormatException ignored) {
         }
     }
 
@@ -927,6 +1145,62 @@ public final class ClusterNodeConfig {
                 validatePositiveInteger(issues, key);
             }
         }
+    }
+
+    private void validateEventRepairTopicOverrides(List<ClusterConfigIssue> issues) {
+        String prefix = "cluster.event.repair.topic.";
+        for (String key : properties.stringPropertyNames()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            if (validTopicOverrideKey(key, prefix, ".scheduler.enabled")) {
+                validateBoolean(issues, key);
+            } else if (validTopicOverrideKey(key, prefix, ".interval.millis")
+                    || validTopicOverrideKey(key, prefix, ".max.batch.size")) {
+                validatePositiveInteger(issues, key);
+            } else if (validTopicOverrideKey(key, prefix, ".priority")) {
+                validateNonNegativeInteger(issues, key);
+            } else if (validTopicOverrideKey(key, prefix, ".backoff.initial.millis")
+                    || validTopicOverrideKey(key, prefix, ".backoff.max.millis")) {
+                validateNonNegativeInteger(issues, key);
+            } else if (validTopicOverrideKey(key, prefix, ".backoff.multiplier")) {
+                validateDoubleAtLeast(issues, key, 1.0);
+            } else if (validTopicOverrideKey(key, prefix, ".owner.isolation.max.failures")
+                    || validTopicOverrideKey(key, prefix, ".owner.isolation.duration.millis")) {
+                validateNonNegativeInteger(issues, key);
+            } else {
+                issues.add(new ClusterConfigIssue(key, "unknown event repair topic override"));
+            }
+        }
+        for (String topic : eventRepairBackoffOverrideTopics(prefix)) {
+            validateRepairBackoffBounds(issues,
+                    eventRepairTopicKey(topic, "backoff.initial.millis"),
+                    eventRepairTopicKey(topic, "backoff.max.millis"));
+        }
+    }
+
+    private Set<String> eventRepairBackoffOverrideTopics(String prefix) {
+        Set<String> topics = new HashSet<>();
+        for (String key : properties.stringPropertyNames()) {
+            if (validTopicOverrideKey(key, prefix, ".backoff.initial.millis")) {
+                topics.add(key.substring(prefix.length(), key.length() - ".backoff.initial.millis".length()));
+            } else if (validTopicOverrideKey(key, prefix, ".backoff.max.millis")) {
+                topics.add(key.substring(prefix.length(), key.length() - ".backoff.max.millis".length()));
+            }
+        }
+        return topics;
+    }
+
+    private static boolean validTopicOverrideKey(String key, String prefix, String suffix) {
+        return key.endsWith(suffix) && key.length() > prefix.length() + suffix.length();
+    }
+
+    private static String eventRepairTopicKey(String topic, String suffix) {
+        Objects.requireNonNull(topic, "topic");
+        if (topic.isBlank()) {
+            throw new IllegalArgumentException("topic must not be blank");
+        }
+        return "cluster.event.repair.topic." + topic + "." + suffix;
     }
 
     private void putIfPresent(Map<String, String> metadata, String metadataKey, String propertyKey) {

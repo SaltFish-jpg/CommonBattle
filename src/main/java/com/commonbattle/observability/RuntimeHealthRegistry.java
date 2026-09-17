@@ -2,6 +2,7 @@ package com.commonbattle.observability;
 
 import com.commonbattle.actor.rpc.ActorRpcClient;
 import com.commonbattle.actor.ActorScheduleView;
+import com.commonbattle.actor.backpressure.ActorMailboxPressureView;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationExecutor;
@@ -25,6 +26,9 @@ import com.commonbattle.cluster.rpc.RpcRoutePolicyView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.event.ActorEventSubscriberView;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
+import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
+import com.commonbattle.game.event.OwnerEventRepairDispatcherView;
+import com.commonbattle.game.event.OwnerEventRepairSchedulerView;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutboxReplayScheduler;
 import com.commonbattle.game.config.LocalGameConfigCache;
@@ -59,6 +63,7 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<RpcRoutePolicyView> rpcRoutePolicies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorRpcClient> actorRpcClients = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorScheduleView> actorSchedules = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorMailboxPressureView> actorMailboxPressures = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentLifecycleManager> lifecycleManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandDispatcher> commandDispatchers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<NettyClusterTransport> networkTransports = new CopyOnWriteArrayList<>();
@@ -75,6 +80,12 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ClusterEventSubscriptionManager> eventSubscriptions = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorEventSubscriberView> actorEventSubscribers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerEventRepairSchedulerView> ownerEventRepairSchedulers =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerEventRepairDispatcherView> ownerEventRepairDispatchers =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileRuntimeView> profileRuntimes = new CopyOnWriteArrayList<>();
@@ -113,6 +124,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, RpcRoutePolicyView.class, rpcRoutePolicies);
         addIf(component, ActorRpcClient.class, actorRpcClients);
         addIf(component, ActorScheduleView.class, actorSchedules);
+        addIf(component, ActorMailboxPressureView.class, actorMailboxPressures);
         addIf(component, AgentLifecycleManager.class, lifecycleManagers);
         addIf(component, PlayerCommandDispatcher.class, commandDispatchers);
         addIf(component, NettyClusterTransport.class, networkTransports);
@@ -129,6 +141,9 @@ public final class RuntimeHealthRegistry {
         addIf(component, ClusterEventSubscriptionManager.class, eventSubscriptions);
         addIf(component, ActorEventSubscriberView.class, actorEventSubscribers);
         addIf(component, OwnerActorEventSubscriptionView.class, ownerActorEventSubscriptions);
+        addIf(component, OwnerEventRepairSchedulerView.class, ownerEventRepairSchedulers);
+        addIf(component, OwnerEventRepairDispatcherView.class, ownerEventRepairDispatchers);
+        addIf(component, OwnerEventRepairIsolationAdmin.class, ownerEventRepairIsolationAdmins);
         addIf(component, ProfileInterestView.class, profileInterests);
         addIf(component, ProfileRuntimeView.class, profileRuntimes);
         addIf(component, ChatRuntimeView.class, chatRuntimes);
@@ -171,6 +186,10 @@ public final class RuntimeHealthRegistry {
 
     public List<ActorScheduleView> actorSchedules() {
         return List.copyOf(actorSchedules);
+    }
+
+    public List<ActorMailboxPressureView> actorMailboxPressures() {
+        return List.copyOf(actorMailboxPressures);
     }
 
     public List<AgentLifecycleManager> lifecycleManagers() {
@@ -239,6 +258,18 @@ public final class RuntimeHealthRegistry {
 
     public List<OwnerActorEventSubscriptionView> ownerActorEventSubscriptions() {
         return List.copyOf(ownerActorEventSubscriptions);
+    }
+
+    public List<OwnerEventRepairSchedulerView> ownerEventRepairSchedulers() {
+        return List.copyOf(ownerEventRepairSchedulers);
+    }
+
+    public List<OwnerEventRepairDispatcherView> ownerEventRepairDispatchers() {
+        return List.copyOf(ownerEventRepairDispatchers);
+    }
+
+    public List<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins() {
+        return List.copyOf(ownerEventRepairIsolationAdmins);
     }
 
     public List<ProfileInterestView> profileInterests() {

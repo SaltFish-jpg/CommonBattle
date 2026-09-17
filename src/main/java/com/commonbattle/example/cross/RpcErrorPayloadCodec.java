@@ -18,11 +18,32 @@ final class RpcErrorPayloadCodec implements PayloadCodec<ClusterRpcGateway.RpcEr
 
     @Override
     public byte[] encode(ClusterRpcGateway.RpcError payload) {
-        return payload.message().getBytes(StandardCharsets.UTF_8);
+        String text = payload.code() + "\n" + payload.retryAfterMillis() + "\n" + payload.message();
+        return text.getBytes(StandardCharsets.UTF_8);
     }
 
     @Override
     public ClusterRpcGateway.RpcError decode(byte[] bytes) {
-        return new ClusterRpcGateway.RpcError(new String(bytes, StandardCharsets.UTF_8));
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        int first = text.indexOf('\n');
+        if (first < 0) {
+            return new ClusterRpcGateway.RpcError(text);
+        }
+        int second = text.indexOf('\n', first + 1);
+        if (second < 0) {
+            return new ClusterRpcGateway.RpcError(text);
+        }
+        String code = text.substring(0, first);
+        long retryAfterMillis = parseRetryAfterMillis(text.substring(first + 1, second));
+        String message = text.substring(second + 1);
+        return new ClusterRpcGateway.RpcError(code, message, retryAfterMillis);
+    }
+
+    private static long parseRetryAfterMillis(String value) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 }

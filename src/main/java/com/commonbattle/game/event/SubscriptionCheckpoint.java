@@ -32,6 +32,10 @@ public final class SubscriptionCheckpoint {
         revisions.put(ownerKey, revision);
     }
 
+    public void remove(String ownerKey) {
+        revisions.remove(ownerKey);
+    }
+
     public long revisionOf(String ownerKey) {
         return revisions.getOrDefault(ownerKey, 0L);
     }

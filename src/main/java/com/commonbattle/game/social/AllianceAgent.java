@@ -3,6 +3,7 @@ package com.commonbattle.game.social;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.event.SnapshotEventPublisher;
 
 import java.util.HashSet;
 import java.util.Optional;
@@ -18,8 +19,7 @@ public final class AllianceAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
     private final long allianceId;
-    private final EventPublisher publisher;
-    private final AllianceSnapshotRepository snapshots;
+    private final SnapshotEventPublisher<AllianceSnapshot, AllianceMemberChangedEvent> publisher;
     private final Set<Long> members = new HashSet<>();
     private long revision;
 
@@ -34,11 +34,33 @@ public final class AllianceAgent {
             EventPublisher publisher,
             AllianceSnapshotRepository snapshots
     ) {
+        this(messages, self, allianceId, (snapshot, event) -> {
+            snapshots.save(snapshot);
+            publisher.publish(event);
+        });
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(snapshots, "snapshots");
+    }
+
+    private AllianceAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            long allianceId,
+            SnapshotEventPublisher<AllianceSnapshot, AllianceMemberChangedEvent> publisher
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.allianceId = allianceId;
         this.publisher = Objects.requireNonNull(publisher, "publisher");
-        this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
+    }
+
+    public static AllianceAgent withSnapshotPublisher(
+            AgentMessagePort messages,
+            ActorRef self,
+            long allianceId,
+            SnapshotEventPublisher<AllianceSnapshot, AllianceMemberChangedEvent> publisher
+    ) {
+        return new AllianceAgent(messages, self, allianceId, publisher);
     }
 
     public void join(long playerId) {
@@ -76,8 +98,8 @@ public final class AllianceAgent {
     private void publish(long playerId, AllianceMemberAction action) {
         // 联盟关系变更边界：状态修改成功后递增 revision，先写快照，再发布事件，订阅方以 revision 判断顺序。
         revision++;
-        snapshots.save(snapshotNow());
-        publisher.publish(new AllianceMemberChangedEvent(allianceId, playerId, action, revision));
+        AllianceSnapshot snapshot = snapshotNow();
+        publisher.publish(snapshot, new AllianceMemberChangedEvent(allianceId, playerId, action, revision));
     }
 
     private void validatePlayer(long playerId) {

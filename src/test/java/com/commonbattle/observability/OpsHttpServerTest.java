@@ -8,6 +8,8 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
+import com.commonbattle.game.event.OwnerEventRepairIsolatedOwner;
+import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
@@ -19,6 +21,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -135,6 +139,57 @@ class OpsHttpServerTest {
         }
     }
 
+    @Test
+    void ownerRepairIsolationCanBeListedAndReleased() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        RecordingRepairIsolationAdmin admin = new RecordingRepairIsolationAdmin();
+        admin.owners.add(new OwnerEventRepairIsolatedOwner("friend:10001", 8, 5000));
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors),
+                null,
+                DrainConfig.defaults(),
+                List.of(admin)
+        )) {
+            server.start();
+
+            HttpResult list = get(server, "/owner-repair/isolated");
+            HttpResult release = post(server, "/owner-repair/release?ownerKey=friend%3A10001");
+            HttpResult listAfterRelease = get(server, "/owner-repair/isolated");
+
+            assertEquals(200, list.statusCode());
+            assertTrue(list.body().contains("\"ownerKey\":\"friend:10001\""));
+            assertEquals(200, release.statusCode());
+            assertEquals("{\"released\":1,\"ownerKey\":\"friend:10001\"}", release.body());
+            assertEquals("{\"owners\":[]}", listAfterRelease.body());
+        }
+    }
+
+    @Test
+    void ownerRepairReleaseValidatesMethodAndOwnerKey() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors),
+                null,
+                DrainConfig.defaults(),
+                List.of(new RecordingRepairIsolationAdmin())
+        )) {
+            server.start();
+
+            HttpResult getRelease = get(server, "/owner-repair/release?ownerKey=missing");
+            HttpResult missingOwner = post(server, "/owner-repair/release");
+            HttpResult notFound = post(server, "/owner-repair/release?ownerKey=missing");
+
+            assertEquals(405, getRelease.statusCode());
+            assertEquals("{\"error\":\"method_not_allowed\"}", getRelease.body());
+            assertEquals(400, missingOwner.statusCode());
+            assertEquals("{\"released\":0,\"error\":\"missing_owner_key\"}", missingOwner.body());
+            assertEquals(404, notFound.statusCode());
+            assertEquals("{\"released\":0,\"ownerKey\":\"missing\"}", notFound.body());
+        }
+    }
+
     private static RuntimeHealthProbe probe(ActorSystem actors) {
         ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
         return new RuntimeHealthProbe(
@@ -170,5 +225,27 @@ class OpsHttpServerTest {
     }
 
     private record HttpResult(int statusCode, String contentType, String body) {
+    }
+
+    private static final class RecordingRepairIsolationAdmin implements OwnerEventRepairIsolationAdmin {
+        private final List<OwnerEventRepairIsolatedOwner> owners = new ArrayList<>();
+
+        @Override
+        public List<OwnerEventRepairIsolatedOwner> isolatedOwners() {
+            return List.copyOf(owners);
+        }
+
+        @Override
+        public int releaseIsolatedOwner(String ownerKey) {
+            boolean removed = owners.removeIf(owner -> owner.ownerKey().equals(ownerKey));
+            return removed ? 1 : 0;
+        }
+
+        @Override
+        public int releaseAllIsolatedOwners() {
+            int size = owners.size();
+            owners.clear();
+            return size;
+        }
     }
 }

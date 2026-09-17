@@ -18,6 +18,7 @@ public record PlayerClientCommandResponse(
         PlayerBusinessResponseStatus status,
         String code,
         String message,
+        long retryAfterMillis,
         boolean replayed,
         Object payload
 ) {
@@ -27,6 +28,7 @@ public record PlayerClientCommandResponse(
         status = Objects.requireNonNull(status, "status");
         code = code == null || code.isBlank() ? PlayerBusinessResponse.OK : code.trim();
         message = Objects.requireNonNullElse(message, "").trim();
+        retryAfterMillis = Math.max(0, retryAfterMillis);
         if (playerId <= 0) {
             throw new IllegalArgumentException("playerId must be positive");
         }
@@ -44,6 +46,21 @@ public record PlayerClientCommandResponse(
         }
     }
 
+    public PlayerClientCommandResponse(
+            long playerId,
+            String sessionId,
+            long sessionEpoch,
+            long sequence,
+            String operation,
+            PlayerBusinessResponseStatus status,
+            String code,
+            String message,
+            boolean replayed,
+            Object payload
+    ) {
+        this(playerId, sessionId, sessionEpoch, sequence, operation, status, code, message, 0, replayed, payload);
+    }
+
     public static PlayerClientCommandResponse from(PlayerBusinessResponse response, boolean replayed) {
         return new PlayerClientCommandResponse(
                 response.playerId(),
@@ -54,6 +71,7 @@ public record PlayerClientCommandResponse(
                 response.status(),
                 response.code(),
                 response.message(),
+                response.retryAfterMillis(),
                 replayed,
                 response.payload()
         );

@@ -8,6 +8,11 @@ public enum ChatSendStatus {
     NOT_IN_CHANNEL,
     EMPTY_TEXT,
     STALE_PROFILE,
+    STALE_FRIENDS,
+    STALE_ALLIANCE,
+    NOT_FRIEND,
+    NOT_ALLIANCE_MEMBER,
     MUTED,
-    BLOCKED
+    BLOCKED,
+    BACKPRESSURED
 }

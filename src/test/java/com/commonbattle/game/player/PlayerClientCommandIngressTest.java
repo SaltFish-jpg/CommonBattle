@@ -94,6 +94,48 @@ class PlayerClientCommandIngressTest {
     }
 
     @Test
+    void rateLimitedClientCommandResponseCarriesRetryAfter() {
+        Fixture fixture = Fixture.create((target, operation) ->
+                AdmissionDecision.reject("rate_limited", Duration.ofMillis(100)));
+        PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound);
+        List<PlayerOutboundMessage> written = new ArrayList<>();
+        fixture.outbound.connect(fixture.session, message -> {
+            written.add(message);
+            return true;
+        });
+
+        ingress.accept(fixture.command(1));
+
+        assertEquals(0, fixture.handled.get());
+        assertEquals(0, fixture.executor.queued());
+        PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals("RATE_LIMITED", response.code());
+        assertEquals("rate_limited", response.message());
+        assertEquals(100, response.retryAfterMillis());
+    }
+
+    @Test
+    void mailboxPressureClientCommandResponseCarriesRetryAfter() {
+        Fixture fixture = Fixture.create((target, operation) ->
+                AdmissionDecision.reject("mailbox_pressure:target", Duration.ofMillis(50)));
+        PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound);
+        List<PlayerOutboundMessage> written = new ArrayList<>();
+        fixture.outbound.connect(fixture.session, message -> {
+            written.add(message);
+            return true;
+        });
+
+        ingress.accept(fixture.command(1));
+
+        PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals("BACKPRESSURED", response.code());
+        assertEquals("mailbox_pressure:target", response.message());
+        assertEquals(50, response.retryAfterMillis());
+    }
+
+    @Test
     void duplicateClientCommandReplaysCompletedResponseWithFlag() {
         Fixture fixture = Fixture.create();
         PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound);
@@ -148,6 +190,10 @@ class PlayerClientCommandIngressTest {
             AtomicInteger handled
     ) {
         private static Fixture create() {
+            return create((target, operation) -> AdmissionDecision.accept());
+        }
+
+        private static Fixture create(com.commonbattle.actor.backpressure.InboundAdmissionController admissions) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef player = actors.actor("player-10001");
@@ -166,7 +212,7 @@ class PlayerClientCommandIngressTest {
                     sessions,
                     new PlayerCommandSequencer(),
                     new AdmissionControlledAgentRouter(
-                            (target, operation) -> AdmissionDecision.accept(),
+                            admissions,
                             new LifecycleAwareAgentRouter(lifecycles, new DefaultAgentMessagePort(actors, new NoopRpcGateway()))
                     )
             );

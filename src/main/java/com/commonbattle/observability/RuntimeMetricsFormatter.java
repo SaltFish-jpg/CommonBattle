@@ -23,6 +23,8 @@ public final class RuntimeMetricsFormatter {
         StringBuilder metrics = new StringBuilder(2048);
         status(metrics, snapshot);
         actorSystem(metrics, snapshot);
+        actorMailboxes(metrics, snapshot);
+        actorMailboxPressures(metrics, snapshot);
         actorSchedules(metrics, snapshot);
         rpc(metrics, snapshot);
         rpcResilience(metrics, snapshot);
@@ -55,6 +57,8 @@ public final class RuntimeMetricsFormatter {
         eventSubscriptions(metrics, snapshot);
         actorEventSubscribers(metrics, snapshot);
         ownerActorEventSubscriptions(metrics, snapshot);
+        ownerEventRepairSchedulers(metrics, snapshot);
+        ownerEventRepairDispatchers(metrics, snapshot);
         profileInterests(metrics, snapshot);
         profileRuntimes(metrics, snapshot);
         chatRuntimes(metrics, snapshot);
@@ -92,6 +96,51 @@ public final class RuntimeMetricsFormatter {
                 snapshot.actorSystem().rejectedTasksByCategory(), ActorTaskCategory.values());
         labeledEnum(metrics, "commonbattle_actor_dropped_tasks_by_category_total", "category",
                 snapshot.actorSystem().droppedTasksByCategory(), ActorTaskCategory.values());
+    }
+
+    private static void actorMailboxes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        ActorMailboxDiagnostics diagnostics = snapshot.actorMailboxes();
+        gauge(metrics, "commonbattle_actor_mailbox_diagnostic_active_mailboxes", diagnostics.activeMailboxes());
+        gauge(metrics, "commonbattle_actor_mailbox_diagnostic_queued_tasks", diagnostics.queuedTasks());
+        gauge(metrics, "commonbattle_actor_mailbox_diagnostic_largest_queued_tasks",
+                diagnostics.largestMailboxQueuedTasks());
+        gauge(metrics, "commonbattle_actor_mailbox_diagnostic_groups", diagnostics.groups().size());
+        for (ActorMailboxGroupStats group : diagnostics.groups()) {
+            gauge(metrics, "commonbattle_actor_mailbox_group_active_mailboxes",
+                    "group", group.group(), group.activeMailboxes());
+            gauge(metrics, "commonbattle_actor_mailbox_group_queued_tasks",
+                    "group", group.group(), group.queuedTasks());
+            gauge(metrics, "commonbattle_actor_mailbox_group_largest_queued_tasks",
+                    "group", group.group(), group.largestMailboxQueuedTasks());
+            for (ActorTaskCategory category : ActorTaskCategory.values()) {
+                gauge(metrics, "commonbattle_actor_mailbox_group_queued_tasks_by_category",
+                        "group", group.group(), "category", category.name(),
+                        group.queuedTasksByCategory().getOrDefault(category, 0));
+            }
+        }
+    }
+
+    private static void actorMailboxPressures(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        ActorMailboxPressureHealthStats stats = snapshot.actorMailboxPressures();
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_controllers", stats.controllerCount());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_admissions_total", stats.admissions());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_accepted_total", stats.accepted());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_delegate_rejected_total", stats.delegateRejected());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_rejected_total", stats.pressureRejected());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_target_rejected_total", stats.targetPressureRejected());
+        gauge(metrics, "commonbattle_actor_mailbox_pressure_group_rejected_total", stats.groupPressureRejected());
+        for (Map.Entry<String, Long> entry : stats.rejectedByTargetType().entrySet()) {
+            gauge(metrics, "commonbattle_actor_mailbox_pressure_rejected_by_target_type_total",
+                    "target_type", entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, Long> entry : stats.rejectedByActorGroup().entrySet()) {
+            gauge(metrics, "commonbattle_actor_mailbox_pressure_rejected_by_actor_group_total",
+                    "group", entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, Long> entry : stats.rejectedByReason().entrySet()) {
+            gauge(metrics, "commonbattle_actor_mailbox_pressure_rejected_by_reason_total",
+                    "reason", entry.getKey(), entry.getValue());
+        }
     }
 
     private static void actorSchedules(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -537,6 +586,73 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_owner_actor_event_repair_failures_total", snapshot.ownerActorEventSubscriptions().repairFailures());
     }
 
+    private static void ownerEventRepairSchedulers(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_owner_event_repair_schedulers", snapshot.ownerEventRepairSchedulers().schedulerCount());
+        gauge(metrics, "commonbattle_owner_event_repair_pending_owners", snapshot.ownerEventRepairSchedulers().pendingOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_max_default_priority", snapshot.ownerEventRepairSchedulers().maxDefaultPriority());
+        gauge(metrics, "commonbattle_owner_event_repair_highest_pending_priority", snapshot.ownerEventRepairSchedulers().highestPendingPriority());
+        gauge(metrics, "commonbattle_owner_event_repair_requests_total", snapshot.ownerEventRepairSchedulers().repairRequests());
+        gauge(metrics, "commonbattle_owner_event_repair_requested_owners_total", snapshot.ownerEventRepairSchedulers().requestedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_enqueued_owners_total", snapshot.ownerEventRepairSchedulers().enqueuedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_duplicate_owners_total", snapshot.ownerEventRepairSchedulers().duplicateOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatch_runs_total", snapshot.ownerEventRepairSchedulers().dispatchRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatched_owners_total", snapshot.ownerEventRepairSchedulers().dispatchedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_failed_runs_total", snapshot.ownerEventRepairSchedulers().failedRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_skipped_runs_total", snapshot.ownerEventRepairSchedulers().skippedRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_backoff_skips_total", snapshot.ownerEventRepairSchedulers().backoffSkips());
+        gauge(metrics, "commonbattle_owner_event_repair_max_consecutive_failures",
+                snapshot.ownerEventRepairSchedulers().maxConsecutiveFailures());
+        gauge(metrics, "commonbattle_owner_event_repair_backoff_active",
+                snapshot.ownerEventRepairSchedulers().backoffActive() ? 1 : 0);
+        gauge(metrics, "commonbattle_owner_event_repair_max_backoff_remaining_millis",
+                snapshot.ownerEventRepairSchedulers().maxBackoffRemainingMillis());
+        gauge(metrics, "commonbattle_owner_event_repair_isolated_owners",
+                snapshot.ownerEventRepairSchedulers().isolatedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_isolated_owners_total",
+                snapshot.ownerEventRepairSchedulers().isolatedOwnersTotal());
+        gauge(metrics, "commonbattle_owner_event_repair_isolation_skips_total",
+                snapshot.ownerEventRepairSchedulers().isolationSkips());
+        gauge(metrics, "commonbattle_owner_event_repair_released_isolated_owners_total",
+                snapshot.ownerEventRepairSchedulers().releasedIsolatedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_single_owner_probe_mode",
+                snapshot.ownerEventRepairSchedulers().singleOwnerProbeMode() ? 1 : 0);
+        gauge(metrics, "commonbattle_owner_event_repair_in_flight", snapshot.ownerEventRepairSchedulers().inFlight() ? 1 : 0);
+    }
+
+    private static void ownerEventRepairDispatchers(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_owner_event_repair_dispatchers", snapshot.ownerEventRepairDispatchers().dispatcherCount());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_registered_schedulers",
+                snapshot.ownerEventRepairDispatchers().registeredSchedulers());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_due_schedulers",
+                snapshot.ownerEventRepairDispatchers().dueSchedulers());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_pending_schedulers",
+                snapshot.ownerEventRepairDispatchers().pendingSchedulers());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_eligible_schedulers",
+                snapshot.ownerEventRepairDispatchers().eligibleSchedulers());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_highest_pending_priority",
+                snapshot.ownerEventRepairDispatchers().highestPendingPriority());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_max_drains_per_tick",
+                snapshot.ownerEventRepairDispatchers().maxDrainsPerTick());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_max_tick_interval_millis",
+                snapshot.ownerEventRepairDispatchers().maxTickIntervalMillis());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_drain_attempts_total",
+                snapshot.ownerEventRepairDispatchers().drainAttempts());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_selected_schedulers_total",
+                snapshot.ownerEventRepairDispatchers().selectedSchedulers());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_drained_owners_total",
+                snapshot.ownerEventRepairDispatchers().drainedOwners());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_failed_scheduler_runs_total",
+                snapshot.ownerEventRepairDispatchers().failedSchedulerRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_limited_runs_total",
+                snapshot.ownerEventRepairDispatchers().limitedRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_empty_runs_total",
+                snapshot.ownerEventRepairDispatchers().emptyRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_skipped_runs_total",
+                snapshot.ownerEventRepairDispatchers().skippedRuns());
+        gauge(metrics, "commonbattle_owner_event_repair_dispatcher_in_flight",
+                snapshot.ownerEventRepairDispatchers().inFlight() ? 1 : 0);
+    }
+
     private static void profileInterests(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         gauge(metrics, "commonbattle_profile_interest_subscriptions", snapshot.profileInterests().subscriptionCount());
         gauge(metrics, "commonbattle_profile_interest_watched_owners", snapshot.profileInterests().watchedOwners());
@@ -575,6 +691,9 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_chat_accepted_delivery_recipients_total", snapshot.chatRuntimes().acceptedDeliveryRecipients());
         gauge(metrics, "commonbattle_chat_dropped_delivery_recipients_total", snapshot.chatRuntimes().droppedDeliveryRecipients());
         gauge(metrics, "commonbattle_chat_failed_delivery_recipients_total", snapshot.chatRuntimes().failedDeliveryRecipients());
+        gauge(metrics, "commonbattle_chat_alliance_removed_members_total", snapshot.chatRuntimes().allianceRemovedMembers());
+        gauge(metrics, "commonbattle_chat_alliance_event_removed_members_total", snapshot.chatRuntimes().allianceEventRemovedMembers());
+        gauge(metrics, "commonbattle_chat_alliance_snapshot_removed_members_total", snapshot.chatRuntimes().allianceSnapshotRemovedMembers());
     }
 
     private static void sceneRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -587,6 +706,14 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_scene_alliance_references", snapshot.sceneRuntimes().allianceReferences());
         gauge(metrics, "commonbattle_scene_duplicate_enters_total", snapshot.sceneRuntimes().duplicateEnters());
         gauge(metrics, "commonbattle_scene_missing_leaves_total", snapshot.sceneRuntimes().missingLeaves());
+        gauge(metrics, "commonbattle_scene_projection_received_events_total", snapshot.sceneRuntimes().projectionReceivedEvents());
+        gauge(metrics, "commonbattle_scene_projection_applied_events_total", snapshot.sceneRuntimes().projectionAppliedEvents());
+        gauge(metrics, "commonbattle_scene_projection_duplicate_events_total", snapshot.sceneRuntimes().projectionDuplicateEvents());
+        gauge(metrics, "commonbattle_scene_projection_gap_events_total", snapshot.sceneRuntimes().projectionGapEvents());
+        gauge(metrics, "commonbattle_scene_projection_repair_requests_total", snapshot.sceneRuntimes().projectionRepairRequests());
+        gauge(metrics, "commonbattle_scene_projection_applied_snapshots_total", snapshot.sceneRuntimes().projectionAppliedSnapshots());
+        gauge(metrics, "commonbattle_scene_projection_ignored_snapshots_total", snapshot.sceneRuntimes().projectionIgnoredSnapshots());
+        gauge(metrics, "commonbattle_scene_projection_stale_views", snapshot.sceneRuntimes().projectionStaleViews());
     }
 
     private static void shopRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {

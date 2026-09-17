@@ -21,8 +21,10 @@ import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.battle.BattleSettlementStatus;
 import com.commonbattle.game.battle.BattleStageCatalog;
 import com.commonbattle.game.battle.BattleStageDefinition;
+import com.commonbattle.game.growth.GrowthRecoveryResult;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
+import com.commonbattle.game.growth.GrowthSnapshot;
 import com.commonbattle.game.shop.InMemoryShopOrderRepository;
 import com.commonbattle.game.shop.PlayerShopState;
 import com.commonbattle.game.shop.ShopCatalog;
@@ -47,7 +49,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerGameAgentTest {
@@ -123,6 +125,64 @@ class PlayerGameAgentTest {
             assertEquals(2, activities.progress.get("kill-3").value);
             assertEquals(1, schedules.stats().deliveredTimerMessages());
         }
+    }
+
+    @Test
+    void growthStaminaRecoveryRunsInsidePlayerMailboxAndPushesSnapshot() throws InterruptedException {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(actors, executor, CLOCK, Instant.EPOCH, pushes);
+        agent.profile().growth().restore(new GrowthSnapshot(
+                1,
+                0,
+                0,
+                GrowthSnapshot.DEFAULT_MAX_STAMINA,
+                CLOCK.instant().minus(Duration.ofMinutes(10))
+        ));
+
+        try (ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            agent.scheduleGrowthStaminaRecovery(schedules, Duration.ofMillis(1), Duration.ofMinutes(1));
+
+            assertTrue(awaitQueued(executor, 1));
+            assertEquals(List.of(), pushes.messages);
+            assertEquals(0, agent.profile().growth().stamina());
+
+            executor.runNext();
+
+            assertEquals(2, agent.profile().growth().stamina());
+            assertEquals(1, pushes.messages.size());
+            assertEquals(PlayerOutboundTopicPolicies.GROWTH_SNAPSHOT, pushes.messages.getFirst().topic());
+            PlayerPushPayloads.GrowthSnapshotPayload growth = assertInstanceOf(
+                    PlayerPushPayloads.GrowthSnapshotPayload.class,
+                    pushes.messages.getFirst().payload()
+            );
+            assertEquals(2, growth.stamina);
+            assertEquals(GrowthSnapshot.DEFAULT_MAX_STAMINA, growth.maxStamina);
+        }
+    }
+
+    @Test
+    void directGrowthStaminaRecoveryUsesPlayerMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, CLOCK, Instant.EPOCH, pushes);
+        agent.profile().growth().restore(new GrowthSnapshot(
+                1,
+                0,
+                1,
+                GrowthSnapshot.DEFAULT_MAX_STAMINA,
+                CLOCK.instant().minus(Duration.ofMinutes(5))
+        ));
+        AtomicReference<GrowthRecoveryResult> result = new AtomicReference<>();
+
+        agent.recoverGrowthStamina(result::set);
+
+        assertEquals(1, agent.profile().growth().stamina());
+        executor.runNext();
+        assertEquals(2, result.get().afterStamina());
+        assertEquals(2, agent.profile().growth().stamina());
+        assertEquals(PlayerOutboundTopicPolicies.GROWTH_SNAPSHOT, pushes.messages.getFirst().topic());
     }
 
     @Test
@@ -229,9 +289,33 @@ class PlayerGameAgentTest {
         assertEquals(0, agent.profile().bag().count("gold"));
         executor.runNext();
         assertEquals(BattleSettlementStatus.VICTORY, settlement.get().status());
+        assertEquals(115, agent.profile().growth().stamina());
         assertEquals(30, agent.profile().bag().count("gold"));
         assertEquals(5, agent.profile().bag().count("gem"));
         assertEquals(1, agent.profile().activities().progress("battle-win-1").value());
+    }
+
+    @Test
+    void battleStageClearRejectsBeforeSettlementWhenStaminaIsNotEnough() {
+        RecordingExecutor executor = new RecordingExecutor();
+        PlayerGameAgent agent = createBattleAgent(executor);
+        AtomicReference<BattleSettlementResult> settlement = new AtomicReference<>();
+        agent.profile().growth().restore(new GrowthSnapshot(
+                1,
+                0,
+                3,
+                GrowthSnapshot.DEFAULT_MAX_STAMINA,
+                CLOCK.instant()
+        ));
+
+        agent.clearBattleStage("settle-10001-1", "forest-1", settlement::set);
+
+        executor.runNext();
+
+        assertEquals(3, agent.profile().growth().stamina());
+        assertEquals(0, agent.profile().bag().count("gold"));
+        assertTrue(agent.profile().battle().replay("settle-10001-1", "forest-1").isEmpty());
+        assertNull(settlement.get());
     }
 
     @Test
@@ -247,6 +331,7 @@ class PlayerGameAgentTest {
 
         assertEquals(BattleSettlementStatus.VICTORY, first.get().status());
         assertTrue(replay.get().replayed());
+        assertEquals(115, agent.profile().growth().stamina());
         assertEquals(30, agent.profile().bag().count("gold"));
         assertEquals(5, agent.profile().bag().count("gem"));
         assertEquals(1, agent.profile().activities().progress("battle-win-1").value());
@@ -266,6 +351,7 @@ class PlayerGameAgentTest {
 
         assertEquals(3, clear.get().stars());
         assertTrue(sweep.get().swept());
+        assertEquals(110, agent.profile().growth().stamina());
         assertEquals(2, sweep.get().clearCount());
         assertEquals(60, agent.profile().bag().count("gold"));
         assertEquals(5, agent.profile().bag().count("gem"));
@@ -413,7 +499,8 @@ class PlayerGameAgentTest {
                 "battle-win-1",
                 1,
                 Reward.of(new ItemStack("gem", 5)),
-                3
+                3,
+                5
         ));
         BattleService battleService = new BattleService(battles, bagService, activityService);
         return new PlayerGameAgent(

@@ -22,6 +22,7 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.AttributeKey;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -217,7 +218,8 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         if (!commandRateLimiter.tryAcquire()) {
             metrics.rateLimitedCommand();
             rejectAndClose(context, command.playerId(), command.sequence(),
-                    PlayerClientErrorCode.COMMAND_RATE_LIMITED, "command rate limited");
+                    PlayerClientErrorCode.COMMAND_RATE_LIMITED, "command rate limited",
+                    commandRateLimiter.retryAfter());
             return;
         }
         commands.accept(command);
@@ -252,7 +254,8 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         if (!heartbeatRateLimiter.tryAcquire()) {
             metrics.rateLimitedHeartbeat();
             rejectAndClose(context, heartbeat.playerId(), heartbeat.sequence(),
-                    PlayerClientErrorCode.HEARTBEAT_RATE_LIMITED, "heartbeat rate limited");
+                    PlayerClientErrorCode.HEARTBEAT_RATE_LIMITED, "heartbeat rate limited",
+                    heartbeatRateLimiter.retryAfter());
             return;
         }
         metrics.acceptedHeartbeat();
@@ -338,7 +341,18 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             PlayerClientErrorCode code,
             String message
     ) {
-        rejectAndClose(context.channel(), playerId, sequence, code, message);
+        rejectAndClose(context.channel(), playerId, sequence, code, message, Duration.ZERO);
+    }
+
+    private void rejectAndClose(
+            ChannelHandlerContext context,
+            long playerId,
+            long sequence,
+            PlayerClientErrorCode code,
+            String message,
+            Duration retryAfter
+    ) {
+        rejectAndClose(context.channel(), playerId, sequence, code, message, retryAfter);
     }
 
     private void rejectAndClose(
@@ -348,10 +362,21 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             PlayerClientErrorCode code,
             String message
     ) {
+        rejectAndClose(channel, playerId, sequence, code, message, Duration.ZERO);
+    }
+
+    private void rejectAndClose(
+            Channel channel,
+            long playerId,
+            long sequence,
+            PlayerClientErrorCode code,
+            String message,
+            Duration retryAfter
+    ) {
         channel.writeAndFlush(new PlayerClientEnvelope(
                 playerId,
                 REJECT_TOPIC,
-                new PlayerClientRejectResponse(code, message, true),
+                new PlayerClientRejectResponse(code, message, retryAfter == null ? 0 : retryAfter.toMillis(), true),
                 Math.max(1, sequence),
                 clock.instant()
         )).addListener(ignored -> channel.close());

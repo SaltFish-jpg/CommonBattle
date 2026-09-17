@@ -114,6 +114,10 @@ public final class GameConfigValidator {
                 issues.add(new GameConfigIssue("battles." + battle.stageId() + ".progressActivityId",
                         "unknown progress activity"));
             }
+            if (battle.staminaCost() < 0) {
+                issues.add(new GameConfigIssue("battles." + battle.stageId() + ".staminaCost",
+                        "must not be negative"));
+            }
         }
     }
 
