@@ -2,6 +2,13 @@ package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorScheduleRegistry;
+import com.commonbattle.actor.agent.migration.ActorHotspotMigrationPlanner;
+import com.commonbattle.actor.agent.migration.ActorHotspotMigrationSubmitService;
+import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
+import com.commonbattle.actor.agent.migration.AgentMigrationExecutor;
+import com.commonbattle.actor.agent.migration.AgentMigrationTargetEndpoint;
+import com.commonbattle.actor.agent.migration.RemoteAgentMigrationClient;
+import com.commonbattle.actor.agent.remote.RemoteAgentDirectory;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.ClusterTopology;
@@ -31,7 +38,13 @@ import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
 import com.commonbattle.game.profile.ProfileSnapshotRepository;
 import com.commonbattle.game.profile.ReliableProfileEventPublisher;
 import com.commonbattle.game.player.NettyPlayerGatewayServer;
+import com.commonbattle.game.player.PlayerAgentMigrationRestoreHandler;
+import com.commonbattle.game.player.PlayerAgentMigrationStatePacker;
+import com.commonbattle.game.player.PlayerAgentMigrationSourceHook;
 import com.commonbattle.game.player.PlayerClientAuthenticator;
+import com.commonbattle.game.player.ProtostuffPlayerStateSnapshotSerializer;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotEndpoint;
+import com.commonbattle.game.player.event.PlayerStateDomainProjectionSnapshotReader;
 import com.commonbattle.game.social.AllianceSnapshotEndpoint;
 import com.commonbattle.game.social.AllianceSnapshotRepository;
 import com.commonbattle.game.social.FriendSnapshotEndpoint;
@@ -81,10 +94,15 @@ public final class GameServerMain {
             );
             BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
-            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
-            BootAgentMigrationTasks.configure(runtime, config, Clock.systemUTC());
+            ActorSystem actors = BootActors.configure(runtime, config, Clock.systemUTC());
+            BootAgentMigrationRuntime migrationRuntime = BootAgentMigrationTasks.configureRuntime(
+                    runtime,
+                    config,
+                    Clock.systemUTC()
+            );
             node.start(
-                    List.of(ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),
+                    List.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY,
+                            ServiceKind.REGION),
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
@@ -156,6 +174,18 @@ public final class GameServerMain {
                     actorSchedules,
                     Clock.systemUTC()
             );
+            new PlayerDomainProjectionSnapshotEndpoint(
+                    new PlayerStateDomainProjectionSnapshotReader(playerRuntime.stateRepository())
+            ).bind(gateway);
+            configurePlayerMigration(
+                    runtime,
+                    migrationRuntime,
+                    playerRuntime,
+                    gateway,
+                    directory,
+                    config,
+                    Clock.systemUTC()
+            );
             if (config.clientGatewayEnabled()) {
                 runtime.add("playerGateway", new NettyPlayerGatewayServer(
                         config.clientGatewayEndpoint(),
@@ -178,5 +208,65 @@ public final class GameServerMain {
             runtime.closeSuppressing(e);
             throw e;
         }
+    }
+
+    private static void configurePlayerMigration(
+            BootRuntime runtime,
+            BootAgentMigrationRuntime migrationRuntime,
+            BootGamePlayerRuntime playerRuntime,
+            ClusterRpcGateway gateway,
+            ClusterDirectory directory,
+            ClusterNodeConfig config,
+            Clock clock
+    ) {
+        ProtostuffPlayerStateSnapshotSerializer serializer = new ProtostuffPlayerStateSnapshotSerializer();
+        RemoteAgentDirectory agentDirectory = new RemoteAgentDirectory(gateway);
+        AgentMigrationExecutor executor = runtime.add(
+                "agentMigrationExecutor",
+                new AgentMigrationExecutor(
+                        "agent-migration-" + config.node(),
+                        Math.max(1, Math.min(2, config.actorWorkers())),
+                        Math.max(64, config.actorWorkers() * 64)
+                )
+        );
+        RemoteAgentMigrationClient client = new RemoteAgentMigrationClient(gateway);
+        AgentMigrationCoordinator coordinator = migrationRuntime.coordinator(
+                playerRuntime.lifecycles(),
+                agentDirectory,
+                client,
+                executor,
+                clock,
+                new PlayerAgentMigrationSourceHook(playerRuntime.agents(), serializer)
+        );
+        runtime.observe("agentMigrationCoordinator", coordinator);
+        BootAgentMigrationTasks.configureRecovery(
+                runtime,
+                config,
+                migrationRuntime.recoveryService(
+                        agentDirectory,
+                        playerRuntime.lifecycles(),
+                        client,
+                        executor,
+                        clock,
+                        config.serviceId().wireName()
+                ),
+                ignored -> {
+                }
+        );
+        new AgentMigrationTargetEndpoint(
+                playerRuntime.lifecycles(),
+                new PlayerAgentMigrationRestoreHandler(playerRuntime.agents(), serializer),
+                BootAgentMigrationTargetReceipts.configure(runtime, config, clock)
+        ).bind(gateway);
+        ActorHotspotMigrationPlanner planner = new ActorHotspotMigrationPlanner(
+                agentDirectory,
+                directory,
+                migrationRuntime.taskStore(),
+                coordinator
+        );
+        runtime.observe("playerHotspotMigrations", new ActorHotspotMigrationSubmitService(
+                planner,
+                new PlayerAgentMigrationStatePacker(playerRuntime.agents(), serializer)
+        ));
     }
 }

@@ -6,6 +6,7 @@ import com.commonbattle.actor.agent.migration.AgentMigrationClient;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationPolicy;
 import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryService;
+import com.commonbattle.actor.agent.migration.AgentMigrationSourceHook;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskIdGenerator;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStore;
 
@@ -48,8 +49,33 @@ record BootAgentMigrationRuntime(
             AgentDirectory directory,
             AgentMigrationClient client,
             Executor completionExecutor,
+            Clock clock,
+            AgentMigrationSourceHook sourceHook
+    ) {
+        return coordinator(lifecycles, directory, client, completionExecutor,
+                AgentMigrationTaskIdGenerator.defaultGenerator(), clock, sourceHook);
+    }
+
+    AgentMigrationCoordinator coordinator(
+            AgentLifecycleManager lifecycles,
+            AgentDirectory directory,
+            AgentMigrationClient client,
+            Executor completionExecutor,
             AgentMigrationTaskIdGenerator taskIds,
             Clock clock
+    ) {
+        return coordinator(lifecycles, directory, client, completionExecutor, taskIds, clock,
+                AgentMigrationSourceHook.noop());
+    }
+
+    AgentMigrationCoordinator coordinator(
+            AgentLifecycleManager lifecycles,
+            AgentDirectory directory,
+            AgentMigrationClient client,
+            Executor completionExecutor,
+            AgentMigrationTaskIdGenerator taskIds,
+            Clock clock,
+            AgentMigrationSourceHook sourceHook
     ) {
         return new AgentMigrationCoordinator(
                 lifecycles,
@@ -59,7 +85,8 @@ record BootAgentMigrationRuntime(
                 policy,
                 taskStore,
                 taskIds,
-                clock
+                clock,
+                sourceHook
         );
     }
 

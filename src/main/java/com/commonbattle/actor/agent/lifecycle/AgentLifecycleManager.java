@@ -51,16 +51,42 @@ public final class AgentLifecycleManager {
     }
 
     public AgentLocation acceptMigrated(AgentIdentity identity, String actorId, AgentLifecycleAction onActivate) {
+        return acceptMigrated(identity, actorId, onActivate, AgentLifecycleResultCallback.ignore());
+    }
+
+    public AgentLocation acceptMigrated(
+            AgentIdentity identity,
+            String actorId,
+            AgentLifecycleAction onActivate,
+            AgentLifecycleResultCallback callback
+    ) {
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(actorId, "actorId");
         Objects.requireNonNull(onActivate, "onActivate");
+        Objects.requireNonNull(callback, "callback");
         ActorRef actorRef = actors.actor(actorId);
         AgentLocation location = new AgentLocation(localServiceId, actorRef);
         if (directory.locate(identity).filter(location::equals).isEmpty()) {
             throw new AgentMigrationTargetMismatchException(identity, location);
         }
-        records.put(identity, new AgentLifecycleRecord(identity, location, AgentLifecycleState.ACTIVE, clock.instant()));
-        actors.send(actorRef, onActivate::run);
+        actors.send(actorRef, context -> {
+            try {
+                onActivate.run(context);
+                records.put(identity, new AgentLifecycleRecord(identity, location, AgentLifecycleState.ACTIVE,
+                        clock.instant()));
+                callback.succeeded(location);
+            } catch (Throwable error) {
+                records.remove(identity);
+                callback.failed(error);
+                if (error instanceof RuntimeException runtime) {
+                    throw runtime;
+                }
+                if (error instanceof Error fatal) {
+                    throw fatal;
+                }
+                throw new IllegalStateException(error);
+            }
+        });
         return location;
     }
 

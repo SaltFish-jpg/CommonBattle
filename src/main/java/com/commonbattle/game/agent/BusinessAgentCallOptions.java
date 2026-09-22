@@ -12,7 +12,8 @@ import java.util.Objects;
 public record BusinessAgentCallOptions(
         Duration timeout,
         ActorTaskCategory requestCategory,
-        ActorTaskCategory callbackCategory
+        ActorTaskCategory callbackCategory,
+        String idempotencyKey
 ) {
     public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(3);
 
@@ -20,6 +21,7 @@ public record BusinessAgentCallOptions(
         Objects.requireNonNull(timeout, "timeout");
         Objects.requireNonNull(requestCategory, "requestCategory");
         Objects.requireNonNull(callbackCategory, "callbackCategory");
+        idempotencyKey = idempotencyKey == null ? "" : idempotencyKey;
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("timeout must be positive");
         }
@@ -30,14 +32,18 @@ public record BusinessAgentCallOptions(
     }
 
     public static BusinessAgentCallOptions of(Duration timeout) {
-        return new BusinessAgentCallOptions(timeout, ActorTaskCategory.DEFAULT, ActorTaskCategory.RPC_CALLBACK);
+        return new BusinessAgentCallOptions(timeout, ActorTaskCategory.DEFAULT, ActorTaskCategory.RPC_CALLBACK, "");
     }
 
     public BusinessAgentCallOptions withRequestCategory(ActorTaskCategory category) {
-        return new BusinessAgentCallOptions(timeout, category, callbackCategory);
+        return new BusinessAgentCallOptions(timeout, category, callbackCategory, idempotencyKey);
     }
 
     public BusinessAgentCallOptions withCallbackCategory(ActorTaskCategory category) {
-        return new BusinessAgentCallOptions(timeout, requestCategory, category);
+        return new BusinessAgentCallOptions(timeout, requestCategory, category, idempotencyKey);
+    }
+
+    public BusinessAgentCallOptions withIdempotencyKey(String key) {
+        return new BusinessAgentCallOptions(timeout, requestCategory, callbackCategory, key);
     }
 }

@@ -1,7 +1,9 @@
 package com.aoi.viewlink;
 
-import com.commonbattle.core.EntityId;
 
+
+
+import com.commonbattle.battle.state.EntityId;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Comparator;

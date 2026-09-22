@@ -1,12 +1,15 @@
 package com.commonbattle.example;
 
-import com.commonbattle.core.BattleContext;
-import com.commonbattle.core.BattleState;
-import com.commonbattle.core.Entity;
-import com.commonbattle.core.HealthComponent;
-import com.commonbattle.example.turn.EndTurnCommand;
-import com.commonbattle.example.turn.TurnBasedExampleFactory;
-import com.commonbattle.example.turn.TurnComponent;
+
+
+
+import com.commonbattle.battle.component.HealthComponent;
+import com.commonbattle.battle.context.BattleContext;
+import com.commonbattle.battle.example.turn.EndTurnCommand;
+import com.commonbattle.battle.example.turn.TurnBasedExampleFactory;
+import com.commonbattle.battle.example.turn.TurnComponent;
+import com.commonbattle.battle.state.BattleState;
+import com.commonbattle.battle.state.Entity;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

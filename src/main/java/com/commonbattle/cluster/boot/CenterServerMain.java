@@ -97,7 +97,7 @@ public final class CenterServerMain {
                     )
             );
             subscriptionLeaseReaper.start();
-            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            ActorSystem actors = BootActors.configure(runtime, config, clock);
             ClusterEventCenter eventCenter = new ClusterEventCenter(
                     center,
                     transport,

@@ -52,7 +52,6 @@ class AgentMigrationRecoveryServiceTest {
         AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
 
         int recovered = harness.recovery.recoverPending(result::set);
-        harness.targetExecutor.runNext();
 
         assertEquals(1, recovered);
         assertEquals(AgentMigrationResultStatus.TARGET_ACCEPTED, result.get().status());
@@ -72,7 +71,6 @@ class AgentMigrationRecoveryServiceTest {
         AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
 
         int recovered = harness.recovery.recoverPending(result::set);
-        harness.targetExecutor.runNext();
 
         assertEquals(1, recovered);
         assertEquals(AgentMigrationResultStatus.TARGET_ACCEPTED, result.get().status());
@@ -135,9 +133,8 @@ class AgentMigrationRecoveryServiceTest {
         private final ServiceDescriptor sourceGame = descriptor("game-1", 9001);
         private final ServiceDescriptor targetGame = descriptor("game-2", 9002);
         private final RecordingExecutor sourceExecutor = new RecordingExecutor();
-        private final RecordingExecutor targetExecutor = new RecordingExecutor();
         private final ActorSystem sourceActors = new ActorSystem(sourceExecutor, 64);
-        private final ActorSystem targetActors = new ActorSystem(targetExecutor, 64);
+        private final ActorSystem targetActors = new ActorSystem(Runnable::run, 64);
         private final InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
         private final InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
         private final AgentLifecycleManager sourceLifecycles =

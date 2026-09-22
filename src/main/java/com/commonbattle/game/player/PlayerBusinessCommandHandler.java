@@ -1,7 +1,9 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorContext;
+import com.commonbattle.game.GameBusinessResultStatus;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandAuditContext;
 import com.commonbattle.game.session.PlayerCommandHandler;
 
 import java.util.Objects;
@@ -41,10 +43,24 @@ public final class PlayerBusinessCommandHandler implements PlayerCommandHandler 
                 return;
             }
             Object response = agent.executeBusiness(businessCommand);
-            results.completed(command, PlayerBusinessResponse.success(command, response));
+            PlayerBusinessResponse envelope = PlayerBusinessResponse.success(command, response);
+            recordAuditResult(envelope);
+            results.completed(command, envelope);
         } catch (RuntimeException | Error e) {
-            results.completed(command, PlayerBusinessResponse.failure(command, e));
+            PlayerBusinessResponse envelope = PlayerBusinessResponse.failure(command, e);
+            recordAuditResult(envelope);
+            results.completed(command, envelope);
             throw e;
+        }
+    }
+
+    private static void recordAuditResult(PlayerBusinessResponse response) {
+        if (response.status() == PlayerBusinessResponseStatus.FAILED) {
+            PlayerCommandAuditContext.recordResultCode(response.code());
+            return;
+        }
+        if (response.payload() instanceof GameBusinessResultStatus result && result.businessResultRejected()) {
+            PlayerCommandAuditContext.recordResultCode(result.businessResultCode());
         }
     }
 }

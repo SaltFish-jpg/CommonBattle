@@ -32,6 +32,10 @@ import com.commonbattle.game.shop.ShopStockCallback;
 import com.commonbattle.game.shop.ShopStockReleaseResponse;
 import com.commonbattle.game.shop.ShopStockReserveResponse;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
+import com.commonbattle.game.session.PlayerCommandAuditRecord;
+import com.commonbattle.game.session.PlayerCommandAuditSink;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.task.TaskClaimResult;
 
@@ -58,6 +62,7 @@ public final class PlayerGameAgent {
     private final ShopStockAsyncClient shopStockAsyncClient;
     private final AsyncShopPurchaseMetrics asyncShopPurchases;
     private final PlayerPushPort pushes;
+    private final PlayerCommandAuditSink asyncCommandAuditSink;
     private long stateRevision;
     private long domainEventRevision;
 
@@ -157,7 +162,8 @@ public final class PlayerGameAgent {
                 null,
                 null,
                 new AsyncShopPurchaseMetrics(),
-                PlayerPushPort.NOOP
+                PlayerPushPort.NOOP,
+                PlayerCommandAuditSink.NOOP
         );
     }
 
@@ -233,7 +239,8 @@ public final class PlayerGameAgent {
                 domainEventListener,
                 shopStockAsyncClient,
                 new AsyncShopPurchaseMetrics(),
-                PlayerPushPort.NOOP
+                PlayerPushPort.NOOP,
+                PlayerCommandAuditSink.NOOP
         );
     }
 
@@ -253,7 +260,7 @@ public final class PlayerGameAgent {
     ) {
         this(messages, self, profile, configView, clock, serverOpenTime, domainEventPublisher,
                 initialStateRevision, initialEventRevision, domainEventListener, shopStockAsyncClient,
-                asyncShopPurchases, PlayerPushPort.NOOP);
+                asyncShopPurchases, PlayerPushPort.NOOP, PlayerCommandAuditSink.NOOP);
     }
 
     public PlayerGameAgent(
@@ -284,7 +291,42 @@ public final class PlayerGameAgent {
                 domainEventListener,
                 shopStockAsyncClient,
                 asyncShopPurchases,
-                pushes
+                pushes,
+                PlayerCommandAuditSink.NOOP
+        );
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                runtimeResolver(configView),
+                clock,
+                serverOpenTime,
+                domainEventPublisher,
+                initialStateRevision,
+                initialEventRevision,
+                domainEventListener,
+                shopStockAsyncClient,
+                asyncShopPurchases,
+                pushes,
+                asyncCommandAuditSink
         );
     }
 
@@ -325,7 +367,8 @@ public final class PlayerGameAgent {
                 null,
                 null,
                 new AsyncShopPurchaseMetrics(),
-                PlayerPushPort.NOOP
+                PlayerPushPort.NOOP,
+                PlayerCommandAuditSink.NOOP
         );
     }
 
@@ -352,7 +395,8 @@ public final class PlayerGameAgent {
                 null,
                 null,
                 new AsyncShopPurchaseMetrics(),
-                PlayerPushPort.NOOP
+                PlayerPushPort.NOOP,
+                PlayerCommandAuditSink.NOOP
         );
     }
 
@@ -379,7 +423,8 @@ public final class PlayerGameAgent {
                 null,
                 null,
                 new AsyncShopPurchaseMetrics(),
-                pushes
+                pushes,
+                PlayerCommandAuditSink.NOOP
         );
     }
 
@@ -396,7 +441,8 @@ public final class PlayerGameAgent {
             PlayerDomainEventListener domainEventListener,
             ShopStockAsyncClient shopStockAsyncClient,
             AsyncShopPurchaseMetrics asyncShopPurchases,
-            PlayerPushPort pushes
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink
     ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
@@ -409,6 +455,7 @@ public final class PlayerGameAgent {
         this.shopStockAsyncClient = shopStockAsyncClient;
         this.asyncShopPurchases = Objects.requireNonNull(asyncShopPurchases, "asyncShopPurchases");
         this.pushes = Objects.requireNonNull(pushes, "pushes");
+        this.asyncCommandAuditSink = Objects.requireNonNull(asyncCommandAuditSink, "asyncCommandAuditSink");
         loadRevision(initialStateRevision);
         loadDomainEventRevision(initialEventRevision);
     }
@@ -553,7 +600,16 @@ public final class PlayerGameAgent {
                             return;
                         }
                         asyncShopPurchases.rpcFailure();
-                        results.failed(command, error);
+                        PlayerGameExecution failureExecution = execution();
+                        PlayerBusinessResponse response = PlayerBusinessResponse.failure(command, error);
+                        recordAsyncCommandAudit(
+                                command,
+                                PlayerCommandAuditOutcome.ASYNC_FAILED,
+                                failureExecution.runtime().version(),
+                                response.code(),
+                                response.message()
+                        );
+                        results.completed(command, response);
                     }
                 }
         );
@@ -667,6 +723,10 @@ public final class PlayerGameAgent {
     public void exportForMigration(Consumer<PlayerStateSnapshot> callback) {
         Objects.requireNonNull(callback, "callback");
         messages.tellLocal(self, ignored -> callback.accept(nextSnapshot()));
+    }
+
+    PlayerStateSnapshot exportForMigrationInCurrentMailbox() {
+        return nextSnapshot();
     }
 
     public ActorTimerHandle scheduleAutoSave(
@@ -806,7 +866,37 @@ public final class PlayerGameAgent {
         } else {
             asyncShopPurchases.rejectedPurchase();
         }
+        recordAsyncCommandAudit(
+                command,
+                PlayerCommandAuditOutcome.ASYNC_COMPLETED,
+                execution.runtime().version(),
+                result.success() ? PlayerBusinessResponse.OK : result.businessResultCode(),
+                ""
+        );
         results.completed(command, PlayerBusinessResponse.success(command, result));
+    }
+
+    private void recordAsyncCommandAudit(
+            PlayerCommand command,
+            PlayerCommandAuditOutcome outcome,
+            long configVersion,
+            String resultCode,
+            String reason
+    ) {
+        asyncCommandAuditSink.record(new PlayerCommandAuditRecord(
+                command.playerId(),
+                command.sessionId(),
+                command.sessionEpoch(),
+                command.sequence(),
+                command.operation(),
+                PlayerCommandStatus.ACCEPTED,
+                outcome,
+                configVersion,
+                Duration.ZERO,
+                clock.instant(),
+                resultCode,
+                reason
+        ));
     }
 
     private String reservationId(PlayerCommand command, String orderId) {

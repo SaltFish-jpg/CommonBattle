@@ -150,6 +150,50 @@ class AgentLifecycleManagerTest {
     }
 
     @Test
+    void migratedAgentBecomesActiveOnlyAfterRestoreActionSucceeds() {
+        RecordingExecutor oldExecutor = new RecordingExecutor();
+        RecordingExecutor newExecutor = new RecordingExecutor();
+        ActorSystem oldActors = new ActorSystem(oldExecutor, 64);
+        ActorSystem newActors = new ActorSystem(newExecutor, 64);
+        InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+        ServiceId oldService = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        ServiceId newService = ServiceId.of(ServiceKind.GAME, "r1", "game-2");
+        AgentLifecycleManager oldOwner = new AgentLifecycleManager(oldService, oldActors, directory, CLOCK);
+        AgentLifecycleManager newOwner = new AgentLifecycleManager(newService, newActors, directory, CLOCK);
+        LifecycleAwareAgentRouter newRouter = new LifecycleAwareAgentRouter(
+                newOwner,
+                new DefaultAgentMessagePort(newActors, new NoopRpcGateway())
+        );
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AgentLocation target = new AgentLocation(newService, new ActorRef("player-10001"));
+        AtomicInteger failures = new AtomicInteger();
+        oldOwner.activate(player, "player-10001");
+        oldExecutor.runNext();
+        oldOwner.migrate(player, target, ignored -> {
+        });
+        oldExecutor.runNext();
+
+        newOwner.acceptMigrated(player, "player-10001", ignored -> {
+            throw new IllegalStateException("restore failed");
+        }, new AgentLifecycleResultCallback() {
+            @Override
+            public void succeeded(AgentLocation location) {
+                throw new AssertionError("restore should fail");
+            }
+
+            @Override
+            public void failed(Throwable error) {
+                failures.incrementAndGet();
+            }
+        });
+        newExecutor.runNext();
+
+        assertEquals(1, failures.get());
+        assertTrue(newOwner.record(player).isEmpty());
+        assertEquals(AgentRouteType.MISSING, newRouter.resolve(player).type());
+    }
+
+    @Test
     void migrationFailureRestoresActiveWhenDirectoryStillPointsToOldOwner() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem actors = new ActorSystem(executor, 64);

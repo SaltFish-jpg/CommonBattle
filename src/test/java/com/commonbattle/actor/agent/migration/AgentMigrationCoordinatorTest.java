@@ -55,7 +55,6 @@ class AgentMigrationCoordinatorTest {
                 result::set
         );
         harness.sourceExecutor.runNext();
-        harness.targetExecutor.runNext();
 
         assertEquals(harness.targetGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
         assertEquals(AgentLifecycleState.MIGRATED, harness.sourceLifecycles.record(player).orElseThrow().state());
@@ -81,6 +80,61 @@ class AgentMigrationCoordinatorTest {
         assertEquals(harness.targetGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
         assertEquals(1, harness.store.pendingTasks().size());
         assertEquals(1, completionExecutor.pending());
+    }
+
+    @Test
+    void coordinatorSendsTaskIdToTargetAcceptRequest() {
+        CapturingAcceptClient client = new CapturingAcceptClient();
+        Harness harness = new Harness(false, Runnable::run, client);
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
+        harness.sourceLifecycles.activate(player, "player-10001");
+        harness.sourceExecutor.runNext();
+
+        harness.coordinator.migrate(
+                player,
+                harness.targetLocation(player),
+                (identity, target, context) -> new AgentMigrationSnapshot("player.snapshot.v1", new byte[]{1}),
+                result::set
+        );
+        harness.sourceExecutor.runNext();
+
+        assertEquals(AgentMigrationResultStatus.TARGET_ACCEPTED, result.get().status());
+        assertEquals(1, harness.store.stats(CLOCK.instant()).totalTasks());
+        assertEquals("player:10001|game:r1:game-1|game:r1:game-2|1788220800000", client.request.taskId());
+    }
+
+    @Test
+    void recoverySendsTaskIdToTargetAcceptRequest() {
+        CapturingAcceptClient client = new CapturingAcceptClient();
+        Harness harness = new Harness(false, Runnable::run, client);
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AgentMigrationTask task = new AgentMigrationTask(
+                "migration-recovery-10001",
+                player,
+                new AgentLocation(harness.sourceGame.id(), new ActorRef("player-10001")),
+                harness.targetLocation(player),
+                new AgentMigrationSnapshot("player.snapshot.v1", new byte[]{1}),
+                AgentMigrationTaskStatus.MOVED,
+                "",
+                CLOCK.instant()
+        );
+        harness.store.save(task);
+        harness.agents.claim(player, task.target());
+        AgentMigrationRecoveryService recovery = new AgentMigrationRecoveryService(
+                harness.store,
+                harness.agents,
+                harness.sourceLifecycles,
+                client,
+                Runnable::run,
+                AgentMigrationPolicy.defaults(),
+                CLOCK
+        );
+
+        recovery.recoverPending(ignored -> {
+        });
+
+        assertEquals("migration-recovery-10001", client.request.taskId());
     }
 
     @Test
@@ -140,7 +194,6 @@ class AgentMigrationCoordinatorTest {
         assertEquals(harness.sourceGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
         assertEquals(AgentLifecycleState.ACTIVE, harness.sourceLifecycles.record(player).orElseThrow().state());
         assertEquals(AgentRouteType.LOCAL, sourceRouter.resolve(player).type());
-        assertEquals(0, harness.targetExecutor.pending());
         assertEquals(AgentMigrationResultStatus.TARGET_FAILED_ROLLED_BACK, result.get().status());
         assertEquals(new AgentMigrationCoordinatorStats(1, 1, 0, 0, 0, 1, 0, 0, 1, 0), harness.coordinator.stats());
     }
@@ -211,6 +264,28 @@ class AgentMigrationCoordinatorTest {
         assertEquals(AgentMigrationResultStatus.TARGET_REJECTED_ROLLED_BACK, result.get().status());
     }
 
+    @Test
+    void coordinatorCallsSourceHookAfterMoveAndRollbackRestore() {
+        RecordingSourceHook hook = new RecordingSourceHook();
+        Harness harness = new Harness(false, Runnable::run, null, hook);
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
+        harness.sourceLifecycles.activate(player, "player-10001");
+        harness.sourceExecutor.runNext();
+
+        harness.coordinator.migrate(
+                player,
+                harness.targetLocation(player),
+                (identity, target, context) -> new AgentMigrationSnapshot("player.snapshot.v1", new byte[]{1}),
+                result::set
+        );
+        harness.sourceExecutor.runNext();
+
+        assertEquals(1, hook.sourceMoved);
+        assertEquals(1, hook.rollbackRestored);
+        assertEquals(AgentMigrationResultStatus.TARGET_FAILED_ROLLED_BACK, result.get().status());
+    }
+
     private static final class Harness {
         private final InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
         private final LocalClusterTransport transport = new LocalClusterTransport();
@@ -219,9 +294,8 @@ class AgentMigrationCoordinatorTest {
         private final ServiceDescriptor sourceGame = descriptor("game-1", 9001);
         private final ServiceDescriptor targetGame = descriptor("game-2", 9002);
         private final RecordingExecutor sourceExecutor = new RecordingExecutor();
-        private final RecordingExecutor targetExecutor = new RecordingExecutor();
         private final ActorSystem sourceActors = new ActorSystem(sourceExecutor, 64);
-        private final ActorSystem targetActors = new ActorSystem(targetExecutor, 64);
+        private final ActorSystem targetActors = new ActorSystem(Runnable::run, 64);
         private final InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
         private final InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
         private final AgentLifecycleManager sourceLifecycles =
@@ -240,7 +314,20 @@ class AgentMigrationCoordinatorTest {
             this(bindTargetEndpoint, completionExecutor, null);
         }
 
-        private Harness(boolean bindTargetEndpoint, Executor completionExecutor, AgentMigrationClient overrideClient) {
+        private Harness(
+                boolean bindTargetEndpoint,
+                Executor completionExecutor,
+                AgentMigrationClient overrideClient
+        ) {
+            this(bindTargetEndpoint, completionExecutor, overrideClient, AgentMigrationSourceHook.noop());
+        }
+
+        private Harness(
+                boolean bindTargetEndpoint,
+                Executor completionExecutor,
+                AgentMigrationClient overrideClient,
+                AgentMigrationSourceHook sourceHook
+        ) {
             registry.register(sourceGame);
             registry.register(targetGame);
             ClusterDirectory sourceDirectory = new ClusterDirectory(registry);
@@ -264,7 +351,8 @@ class AgentMigrationCoordinatorTest {
                     AgentMigrationPolicy.defaults(),
                     store,
                     AgentMigrationTaskIdGenerator.defaultGenerator(),
-                    CLOCK
+                    CLOCK,
+                    sourceHook
             );
         }
 
@@ -368,6 +456,31 @@ class AgentMigrationCoordinatorTest {
         public AgentMigrationAcceptResponse accept(ServiceId targetServiceId, AgentMigrationAcceptRequest request) {
             calls++;
             return AgentMigrationAcceptResponse.rejected("assigned target not ready");
+        }
+    }
+
+    private static final class CapturingAcceptClient implements AgentMigrationClient {
+        private AgentMigrationAcceptRequest request;
+
+        @Override
+        public AgentMigrationAcceptResponse accept(ServiceId targetServiceId, AgentMigrationAcceptRequest request) {
+            this.request = request;
+            return AgentMigrationAcceptResponse.success();
+        }
+    }
+
+    private static final class RecordingSourceHook implements AgentMigrationSourceHook {
+        private int sourceMoved;
+        private int rollbackRestored;
+
+        @Override
+        public void sourceMoved(AgentMigrationTask task) {
+            sourceMoved++;
+        }
+
+        @Override
+        public void rollbackRestored(AgentMigrationTask task) {
+            rollbackRestored++;
         }
     }
 }

@@ -1,5 +1,8 @@
 package com.commonbattle.game.bag;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalArgumentException;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -53,7 +56,10 @@ public final class BagService {
 
     private void validateStack(ItemDefinition definition, int count) {
         if (count > definition.stackLimit() && definition.stackLimit() == 1) {
-            throw new IllegalArgumentException("Item " + definition.itemId() + " can not stack");
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.BAG_NOT_STACKABLE,
+                    "Item " + definition.itemId() + " can not stack"
+            );
         }
     }
 }

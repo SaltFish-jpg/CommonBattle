@@ -14,6 +14,7 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.GameBusinessErrorCodes;
 import com.commonbattle.game.activity.ActivityCatalog;
 import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityDefinition;
@@ -156,6 +157,7 @@ class PlayerBusinessCommandHandlerTest {
         assertEquals(PlayerBusinessResponse.BAD_REQUEST, response.code());
         assertEquals("player command operation does not match payload", response.message());
         assertEquals(null, response.payload());
+        assertEquals(PlayerBusinessResponse.BAD_REQUEST, fixture.audit.last().resultCode());
         PlayerBusinessResponseException error = assertInstanceOf(
                 PlayerBusinessResponseException.class,
                 results.failures.getFirst()
@@ -164,7 +166,7 @@ class PlayerBusinessCommandHandlerTest {
     }
 
     @Test
-    void battleCommandReportsBusinessRejectedWhenStaminaIsNotEnough() {
+    void battleCommandReportsStableDomainCodeWhenStaminaIsNotEnough() {
         RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
         Fixture fixture = Fixture.create(results);
         fixture.agent.profile().growth().restore(new GrowthSnapshot(
@@ -180,11 +182,61 @@ class PlayerBusinessCommandHandlerTest {
 
         PlayerBusinessResponse response = results.envelopes.getFirst();
         assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
-        assertEquals(PlayerBusinessResponse.BUSINESS_REJECTED, response.code());
+        assertEquals(GameBusinessErrorCodes.BATTLE_STAMINA_NOT_ENOUGH, response.code());
         assertTrue(response.message().contains("Not enough stamina"));
         assertEquals(0, fixture.agent.profile().bag().count("gold"));
         assertEquals(3, fixture.agent.profile().growth().stamina());
         assertEquals(PlayerCommandAuditOutcome.FAILED, fixture.audit.last().outcome());
+        assertEquals(GameBusinessErrorCodes.BATTLE_STAMINA_NOT_ENOUGH, fixture.audit.last().resultCode());
+    }
+
+    @Test
+    void activityCommandReportsStableDomainCodeWhenRewardIsNotReady() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        Fixture fixture = Fixture.create(results);
+
+        fixture.dispatch(new ClaimActivityCommand("kill-3"));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(GameBusinessErrorCodes.ACTIVITY_REWARD_NOT_READY, response.code());
+        assertTrue(response.message().contains("Activity reward is not ready"));
+        assertEquals(PlayerCommandAuditOutcome.FAILED, fixture.audit.last().outcome());
+        assertEquals(GameBusinessErrorCodes.ACTIVITY_REWARD_NOT_READY, fixture.audit.last().resultCode());
+    }
+
+    @Test
+    void growthCommandReportsStableDomainCodeWhenExpItemIsNotEnough() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        Fixture fixture = Fixture.create(results);
+
+        fixture.dispatch(new UseExpItemsCommand(1));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM, response.code());
+        assertTrue(response.message().contains("Not enough item"));
+        assertEquals(1, fixture.agent.profile().growth().level());
+        assertEquals(PlayerCommandAuditOutcome.FAILED, fixture.audit.last().outcome());
+        assertEquals(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM, fixture.audit.last().resultCode());
+    }
+
+    @Test
+    void shopRejectedBusinessResultIsRecordedIntoCommandAudit() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        Fixture fixture = Fixture.create(results);
+
+        fixture.dispatch(new BuyShopItemCommand("growth_pack", 1));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status());
+        ShopPurchaseResult purchase = assertInstanceOf(ShopPurchaseResult.class, response.payload());
+        assertEquals(ShopPurchaseStatus.NOT_ENOUGH_CURRENCY, purchase.status());
+        assertEquals(PlayerCommandAuditOutcome.EXECUTED, fixture.audit.last().outcome());
+        assertEquals("SHOP_NOT_ENOUGH_CURRENCY", fixture.audit.last().resultCode());
     }
 
     private record Fixture(

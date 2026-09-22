@@ -27,6 +27,7 @@ public final class ActorSystem implements AutoCloseable {
     private final ActorSystemConfig config;
     private final ActorFailureHandler failureHandler;
     private final DeadLetterSink deadLetters;
+    private final ActorSlowTaskSink slowTasks;
     private final ActorSystemMetrics metrics = new ActorSystemMetrics();
     private final AtomicBoolean accepting = new AtomicBoolean(true);
     private final int batchSize;
@@ -44,9 +45,19 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     public ActorSystem(ActorSystemConfig config, ActorFailureHandler failureHandler, DeadLetterSink deadLetters) {
+        this(config, failureHandler, deadLetters, ActorSlowTaskSink.ignore());
+    }
+
+    public ActorSystem(
+            ActorSystemConfig config,
+            ActorFailureHandler failureHandler,
+            DeadLetterSink deadLetters,
+            ActorSlowTaskSink slowTasks
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.failureHandler = Objects.requireNonNull(failureHandler, "failureHandler");
         this.deadLetters = Objects.requireNonNull(deadLetters, "deadLetters");
+        this.slowTasks = Objects.requireNonNull(slowTasks, "slowTasks");
         var service = Executors.newFixedThreadPool(config.workerThreads(), new ActorThreadFactory());
         this.executor = service;
         this.closeHook = () -> shutdown(service);
@@ -72,10 +83,21 @@ public final class ActorSystem implements AutoCloseable {
             ActorFailureHandler failureHandler,
             DeadLetterSink deadLetters
     ) {
+        this(executor, config, failureHandler, deadLetters, ActorSlowTaskSink.ignore());
+    }
+
+    public ActorSystem(
+            Executor executor,
+            ActorSystemConfig config,
+            ActorFailureHandler failureHandler,
+            DeadLetterSink deadLetters,
+            ActorSlowTaskSink slowTasks
+    ) {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.config = Objects.requireNonNull(config, "config");
         this.failureHandler = Objects.requireNonNull(failureHandler, "failureHandler");
         this.deadLetters = Objects.requireNonNull(deadLetters, "deadLetters");
+        this.slowTasks = Objects.requireNonNull(slowTasks, "slowTasks");
         this.closeHook = () -> {
         };
         this.batchSize = config.batchSize();
@@ -199,7 +221,9 @@ public final class ActorSystem implements AutoCloseable {
         } catch (Throwable error) {
             failure = error;
         } finally {
-            metrics.taskExecuted(actor, category, System.nanoTime() - startedAt, config.slowTaskThreshold());
+            long elapsedNanos = System.nanoTime() - startedAt;
+            metrics.taskExecuted(actor, category, elapsedNanos, config.slowTaskThreshold());
+            reportSlowTask(actor, category, elapsedNanos);
         }
         if (failure == null) {
             metrics.taskCompleted();
@@ -209,6 +233,22 @@ public final class ActorSystem implements AutoCloseable {
         metrics.taskFailed();
         try {
             failureHandler.onFailure(new ActorFailure(actor, task, failure));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void reportSlowTask(ActorRef actor, ActorTaskCategory category, long elapsedNanos) {
+        java.time.Duration threshold = config.slowTaskThreshold();
+        if (threshold.isZero() || elapsedNanos < threshold.toNanos()) {
+            return;
+        }
+        try {
+            slowTasks.accept(new ActorSlowTask(
+                    actor,
+                    category,
+                    java.time.Duration.ofNanos(elapsedNanos),
+                    threshold
+            ));
         } catch (Throwable ignored) {
         }
     }

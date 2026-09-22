@@ -1,6 +1,18 @@
 package com.commonbattle.game.battle;
 
-import com.commonbattle.core.BattleLogEntry;
+
+import com.commonbattle.battle.command.*;
+import com.commonbattle.battle.component.*;
+import com.commonbattle.battle.context.*;
+import com.commonbattle.battle.effect.*;
+import com.commonbattle.battle.event.*;
+import com.commonbattle.battle.log.*;
+import com.commonbattle.battle.random.*;
+import com.commonbattle.battle.rule.*;
+import com.commonbattle.battle.state.*;
+import com.commonbattle.battle.buff.*;
+import com.commonbattle.battle.targeting.*;
+import com.commonbattle.battle.trigger.*;
 import com.commonbattle.game.bag.BagResult;
 
 import java.util.List;

@@ -23,8 +23,15 @@ public final class NettyPlayerClientCommandHandler extends SimpleChannelInboundH
     @Override
     protected void channelRead0(ChannelHandlerContext context, PlayerClientCommandEnvelope envelope) {
         try {
-            ingress.accept(envelope);
-            acceptedCommands.incrementAndGet();
+            PlayerClientCommandAcceptResult result = ingress.accept(envelope);
+            if (result.accepted()) {
+                acceptedCommands.incrementAndGet();
+            } else {
+                failedCommands.incrementAndGet();
+                if (result.closeConnection()) {
+                    context.close();
+                }
+            }
         } catch (RuntimeException e) {
             failedCommands.incrementAndGet();
             context.close();

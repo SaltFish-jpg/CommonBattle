@@ -284,6 +284,11 @@ class NettyPlayerGatewayBusinessCommandEndToEndTest {
                 assertEquals(50, response.retryAfterMillis());
                 assertFalse(response.replayed());
                 assertEquals(0, fixture.handled.get());
+                assertEventually(() -> server.stats().acceptedCommands() == 0);
+                assertEventually(() -> server.stats().rejectedCommands() == 1);
+                assertEquals(1, server.stats().rejectedCommandsByCode()
+                        .get(PlayerClientErrorCode.COMMAND_BACKPRESSURED));
+                assertTrue(client.channel.isOpen());
             }
         }
     }

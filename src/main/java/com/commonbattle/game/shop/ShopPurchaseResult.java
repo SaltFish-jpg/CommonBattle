@@ -1,5 +1,6 @@
 package com.commonbattle.game.shop;
 
+import com.commonbattle.game.GameBusinessResultStatus;
 import com.commonbattle.game.bag.BagResult;
 
 import java.util.List;
@@ -18,7 +19,7 @@ public record ShopPurchaseResult(
         int lifetimePurchased,
         int dailyPurchased,
         boolean replayed
-) {
+) implements GameBusinessResultStatus {
     private static final BagResult EMPTY_BAG_RESULT = new BagResult(List.of());
 
     public ShopPurchaseResult(
@@ -45,6 +46,16 @@ public record ShopPurchaseResult(
 
     public boolean success() {
         return status == ShopPurchaseStatus.SUCCESS;
+    }
+
+    @Override
+    public boolean businessResultRejected() {
+        return !success();
+    }
+
+    @Override
+    public String businessResultCode() {
+        return "SHOP_" + status.name();
     }
 
     public static ShopPurchaseResult rejected(ShopPurchaseStatus status, String sku, int quantity,

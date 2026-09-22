@@ -19,8 +19,26 @@ public record PlayerCommandAuditRecord(
         long configVersion,
         Duration elapsed,
         Instant recordedAt,
+        String resultCode,
         String reason
 ) {
+    public PlayerCommandAuditRecord(
+            long playerId,
+            String sessionId,
+            long sessionEpoch,
+            long sequence,
+            String operation,
+            PlayerCommandStatus dispatchStatus,
+            PlayerCommandAuditOutcome outcome,
+            long configVersion,
+            Duration elapsed,
+            Instant recordedAt,
+            String reason
+    ) {
+        this(playerId, sessionId, sessionEpoch, sequence, operation, dispatchStatus, outcome, configVersion,
+                elapsed, recordedAt, "", reason);
+    }
+
     public PlayerCommandAuditRecord {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(operation, "operation");
@@ -28,6 +46,7 @@ public record PlayerCommandAuditRecord(
         Objects.requireNonNull(outcome, "outcome");
         Objects.requireNonNull(elapsed, "elapsed");
         Objects.requireNonNull(recordedAt, "recordedAt");
+        resultCode = Objects.requireNonNullElse(resultCode, "");
         reason = Objects.requireNonNullElse(reason, "");
         if (playerId <= 0) {
             throw new IllegalArgumentException("playerId must be positive");

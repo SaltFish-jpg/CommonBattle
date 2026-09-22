@@ -1,9 +1,12 @@
 package com.commonbattle.game.battle;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessFailure;
+
 /**
  * 战斗入口体力不足。
  */
-public final class BattleStaminaNotEnoughException extends IllegalStateException {
+public final class BattleStaminaNotEnoughException extends IllegalStateException implements GameBusinessFailure {
     private final String stageId;
     private final int required;
     private final int actual;
@@ -25,5 +28,10 @@ public final class BattleStaminaNotEnoughException extends IllegalStateException
 
     public int actual() {
         return actual;
+    }
+
+    @Override
+    public String code() {
+        return GameBusinessErrorCodes.BATTLE_STAMINA_NOT_ENOUGH;
     }
 }

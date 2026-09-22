@@ -214,6 +214,7 @@ class NettyPlayerGatewayServerTest {
             PlayerClientCommandAcceptor commandAcceptor = command -> {
                 commands.add(command);
                 commandReceived.countDown();
+                return PlayerClientCommandAcceptResult.acceptedResult();
             };
             return new Fixture(connections, outbound, codecs, commandAcceptor, commands, commandReceived);
         }

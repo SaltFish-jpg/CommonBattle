@@ -3,6 +3,9 @@ package com.commonbattle.observability;
 import com.commonbattle.actor.rpc.ActorRpcClient;
 import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureView;
+import com.commonbattle.actor.backpressure.ActorHotspotAdmissionView;
+import com.commonbattle.actor.backpressure.ActorHotspotOverrideAdmin;
+import com.commonbattle.actor.agent.migration.ActorHotspotMigrationAdmin;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
 import com.commonbattle.actor.agent.migration.AgentMigrationExecutor;
@@ -23,6 +26,8 @@ import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.cluster.rpc.RpcRoutePolicyView;
+import com.commonbattle.game.agent.BusinessAgentMessageView;
+import com.commonbattle.game.agent.BusinessAgentRpcEndpointView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.event.ActorEventSubscriberView;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
@@ -62,8 +67,18 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ResilientRpcGateway> resilientRpcGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RpcRoutePolicyView> rpcRoutePolicies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorRpcClient> actorRpcClients = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<BusinessAgentMessageView> businessAgentMessages = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<BusinessAgentRpcEndpointView> businessAgentRpcEndpoints =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorScheduleView> actorSchedules = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorMailboxPressureView> actorMailboxPressures = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorHotspotAdmissionView> actorHotspotAdmissions = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorHotspotOverrideAdmin> actorHotspotOverrideAdmins =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorHotspotMigrationAdmin> actorHotspotMigrationAdmins =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorIncidentView> actorIncidents = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActorSlowTaskView> actorSlowTasks = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentLifecycleManager> lifecycleManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandDispatcher> commandDispatchers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<NettyClusterTransport> networkTransports = new CopyOnWriteArrayList<>();
@@ -86,6 +101,8 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<OwnerEventRepairDispatcherView> ownerEventRepairDispatchers =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerRepairOpsAuditView> ownerRepairOpsAudits =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileRuntimeView> profileRuntimes = new CopyOnWriteArrayList<>();
@@ -123,8 +140,15 @@ public final class RuntimeHealthRegistry {
         addIf(component, ResilientRpcGateway.class, resilientRpcGateways);
         addIf(component, RpcRoutePolicyView.class, rpcRoutePolicies);
         addIf(component, ActorRpcClient.class, actorRpcClients);
+        addIf(component, BusinessAgentMessageView.class, businessAgentMessages);
+        addIf(component, BusinessAgentRpcEndpointView.class, businessAgentRpcEndpoints);
         addIf(component, ActorScheduleView.class, actorSchedules);
         addIf(component, ActorMailboxPressureView.class, actorMailboxPressures);
+        addIf(component, ActorHotspotAdmissionView.class, actorHotspotAdmissions);
+        addIf(component, ActorHotspotOverrideAdmin.class, actorHotspotOverrideAdmins);
+        addIf(component, ActorHotspotMigrationAdmin.class, actorHotspotMigrationAdmins);
+        addIf(component, ActorIncidentView.class, actorIncidents);
+        addIf(component, ActorSlowTaskView.class, actorSlowTasks);
         addIf(component, AgentLifecycleManager.class, lifecycleManagers);
         addIf(component, PlayerCommandDispatcher.class, commandDispatchers);
         addIf(component, NettyClusterTransport.class, networkTransports);
@@ -144,6 +168,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, OwnerEventRepairSchedulerView.class, ownerEventRepairSchedulers);
         addIf(component, OwnerEventRepairDispatcherView.class, ownerEventRepairDispatchers);
         addIf(component, OwnerEventRepairIsolationAdmin.class, ownerEventRepairIsolationAdmins);
+        addIf(component, OwnerRepairOpsAuditView.class, ownerRepairOpsAudits);
         addIf(component, ProfileInterestView.class, profileInterests);
         addIf(component, ProfileRuntimeView.class, profileRuntimes);
         addIf(component, ChatRuntimeView.class, chatRuntimes);
@@ -184,12 +209,40 @@ public final class RuntimeHealthRegistry {
         return List.copyOf(actorRpcClients);
     }
 
+    public List<BusinessAgentMessageView> businessAgentMessages() {
+        return List.copyOf(businessAgentMessages);
+    }
+
+    public List<BusinessAgentRpcEndpointView> businessAgentRpcEndpoints() {
+        return List.copyOf(businessAgentRpcEndpoints);
+    }
+
     public List<ActorScheduleView> actorSchedules() {
         return List.copyOf(actorSchedules);
     }
 
     public List<ActorMailboxPressureView> actorMailboxPressures() {
         return List.copyOf(actorMailboxPressures);
+    }
+
+    public List<ActorHotspotAdmissionView> actorHotspotAdmissions() {
+        return List.copyOf(actorHotspotAdmissions);
+    }
+
+    public List<ActorHotspotOverrideAdmin> actorHotspotOverrideAdmins() {
+        return List.copyOf(actorHotspotOverrideAdmins);
+    }
+
+    public List<ActorHotspotMigrationAdmin> actorHotspotMigrationAdmins() {
+        return List.copyOf(actorHotspotMigrationAdmins);
+    }
+
+    public List<ActorIncidentView> actorIncidents() {
+        return List.copyOf(actorIncidents);
+    }
+
+    public List<ActorSlowTaskView> actorSlowTasks() {
+        return List.copyOf(actorSlowTasks);
     }
 
     public List<AgentLifecycleManager> lifecycleManagers() {
@@ -270,6 +323,10 @@ public final class RuntimeHealthRegistry {
 
     public List<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins() {
         return List.copyOf(ownerEventRepairIsolationAdmins);
+    }
+
+    public List<OwnerRepairOpsAuditView> ownerRepairOpsAudits() {
+        return List.copyOf(ownerRepairOpsAudits);
     }
 
     public List<ProfileInterestView> profileInterests() {

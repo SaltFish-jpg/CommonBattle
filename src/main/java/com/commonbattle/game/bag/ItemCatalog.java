@@ -1,5 +1,8 @@
 package com.commonbattle.game.bag;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalArgumentException;
+
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,7 +21,10 @@ public final class ItemCatalog {
     public ItemDefinition require(String itemId) {
         ItemDefinition definition = definitions.get(itemId);
         if (definition == null) {
-            throw new IllegalArgumentException("Unknown item " + itemId);
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.BAG_UNKNOWN_ITEM,
+                    "Unknown item " + itemId
+            );
         }
         return definition;
     }

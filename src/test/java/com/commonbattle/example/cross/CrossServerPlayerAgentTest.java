@@ -1,5 +1,9 @@
 package com.commonbattle.example.cross;
 
+
+
+
+import com.commonbattle.battle.command.Command;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.rpc.RpcCallback;

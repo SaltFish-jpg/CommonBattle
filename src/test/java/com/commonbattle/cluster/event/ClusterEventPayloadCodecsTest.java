@@ -32,6 +32,10 @@ import com.commonbattle.game.profile.ProfileSnapshotRequest;
 import com.commonbattle.game.profile.ProfileSnapshotResponse;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.EventProgressRule;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshot;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotOperations;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotRequest;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotResponse;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.shop.ShopItemDefinition;
 import com.commonbattle.game.social.AllianceSnapshot;
@@ -429,6 +433,41 @@ class ClusterEventPayloadCodecsTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals(3, responsePayload.snapshot().revision());
         assertEquals(Set.of(20002L, 30003L), responsePayload.snapshot().friends());
+    }
+
+    @Test
+    void playerDomainProjectionSnapshotPayloadsCanPassThroughClusterEnvelope() {
+        PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ProtoClusterCodec codec = new ProtoClusterCodec(registry);
+        ClusterEnvelope request = new ClusterEnvelope(
+                9,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                PlayerDomainProjectionSnapshotOperations.GET,
+                new PlayerDomainProjectionSnapshotRequest(10001L)
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                9,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                "$rpc.success",
+                PlayerDomainProjectionSnapshotResponse.found(new PlayerDomainProjectionSnapshot(
+                        10001L,
+                        7,
+                        Map.of("forest-1", 2, "cave-1", 1)
+                ))
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        PlayerDomainProjectionSnapshotRequest requestPayload =
+                assertInstanceOf(PlayerDomainProjectionSnapshotRequest.class, decodedRequest.payload());
+        PlayerDomainProjectionSnapshotResponse responsePayload =
+                assertInstanceOf(PlayerDomainProjectionSnapshotResponse.class, decodedResponse.payload());
+        assertEquals(10001L, requestPayload.playerId());
+        assertEquals(7, responsePayload.snapshot().eventRevision());
+        assertEquals(3, responsePayload.snapshot().totalStageClears());
     }
 
     private static GameConfigPackage config(long version, int expPerItem) {

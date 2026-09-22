@@ -74,7 +74,8 @@ public final class AgentMigrationPayloadCodecs {
             int size = CodedOutputStream.computeByteArraySize(1, identity)
                     + CodedOutputStream.computeStringSize(2, payload.actorId())
                     + CodedOutputStream.computeStringSize(3, payload.stateType())
-                    + CodedOutputStream.computeByteArraySize(4, stateBytes);
+                    + CodedOutputStream.computeByteArraySize(4, stateBytes)
+                    + CodedOutputStream.computeStringSize(5, payload.taskId());
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -82,6 +83,7 @@ public final class AgentMigrationPayloadCodecs {
                 output.writeString(2, payload.actorId());
                 output.writeString(3, payload.stateType());
                 output.writeByteArray(4, stateBytes);
+                output.writeString(5, payload.taskId());
                 output.flush();
                 return bytes;
             } catch (IOException e) {
@@ -96,6 +98,7 @@ public final class AgentMigrationPayloadCodecs {
             String actorId = "";
             String stateType = "";
             byte[] stateBytes = new byte[0];
+            String taskId = "";
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
@@ -104,10 +107,11 @@ public final class AgentMigrationPayloadCodecs {
                         case 2 -> actorId = input.readString();
                         case 3 -> stateType = input.readString();
                         case 4 -> stateBytes = input.readByteArray();
+                        case 5 -> taskId = input.readString();
                         default -> input.skipField(tag);
                     }
                 }
-                return new AgentMigrationAcceptRequest(identity(identity), actorId, stateType, stateBytes);
+                return new AgentMigrationAcceptRequest(taskId, identity(identity), actorId, stateType, stateBytes);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode agent migration accept request", e);
             }

@@ -9,6 +9,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.commonbattle.observability.ActorIncidentKind;
+import com.commonbattle.observability.InMemoryActorIncidentLog;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -119,6 +122,32 @@ class ActorSystemTest {
         assertEquals(1, runs.get());
         assertEquals(1, system.stats().failedTasks());
         assertEquals(1, system.stats().completedTasks());
+    }
+
+    @Test
+    void incidentLogCanCaptureFailuresAndDeadLettersFromActorSystem() {
+        RecordingExecutor executor = new RecordingExecutor();
+        InMemoryActorIncidentLog incidents = new InMemoryActorIncidentLog(8);
+        ActorSystem system = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 1, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                incidents,
+                incidents
+        );
+        ActorRef player = system.actor("player-1");
+
+        system.send(player, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+            throw new IllegalStateException("boom");
+        }));
+        assertFalse(system.trySend(player, ActorTask.categorized(ActorTaskCategory.RPC_CALLBACK, ignored -> {
+        })));
+        executor.runNext();
+
+        assertEquals(2, incidents.actorIncidentStats().recordedEntries());
+        assertEquals(1, incidents.actorIncidentStats().deadLetters());
+        assertEquals(1, incidents.actorIncidentStats().poisonMessages());
+        assertEquals(ActorIncidentKind.DEAD_LETTER, incidents.recentActorIncidents().get(0).kind());
+        assertEquals(ActorIncidentKind.POISON_MESSAGE, incidents.recentActorIncidents().get(1).kind());
     }
 
     @Test
@@ -312,11 +341,13 @@ class ActorSystemTest {
     @Test
     void statsTrackSlowestTaskAndSlowTaskCount() {
         RecordingExecutor executor = new RecordingExecutor();
+        List<ActorSlowTask> slowTasks = new ArrayList<>();
         ActorSystem system = new ActorSystem(
                 executor,
                 ActorSystemConfig.defaults(1).withSlowTaskThreshold(java.time.Duration.ofMillis(1)),
                 ActorFailureHandler.ignore(),
-                DeadLetterSink.ignore()
+                DeadLetterSink.ignore(),
+                slowTasks::add
         );
         ActorRef player = system.actor("player-1");
 
@@ -335,6 +366,11 @@ class ActorSystemTest {
         assertTrue(stats.slowestTaskMillis() >= 1);
         assertEquals("player-1", stats.slowestTaskActorId());
         assertEquals(ActorTaskCategory.PLAYER_COMMAND, stats.slowestTaskCategory());
+        assertEquals(1, slowTasks.size());
+        assertEquals("player-1", slowTasks.getFirst().actor().id());
+        assertEquals(ActorTaskCategory.PLAYER_COMMAND, slowTasks.getFirst().category());
+        assertTrue(slowTasks.getFirst().elapsed().toMillis() >= 1);
+        assertEquals(java.time.Duration.ofMillis(1), slowTasks.getFirst().threshold());
     }
 
     private static final class RecordingExecutor implements Executor {

@@ -1,5 +1,8 @@
 package com.commonbattle.game.bag;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalStateException;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -38,7 +41,10 @@ public final class PlayerBag {
     void remove(String itemId, int count) {
         int current = count(itemId);
         if (current < count) {
-            throw new IllegalStateException("Not enough item " + itemId);
+            throw new GameBusinessIllegalStateException(
+                    GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM,
+                    "Not enough item " + itemId
+            );
         }
         int next = current - count;
         if (next == 0) {

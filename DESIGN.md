@@ -10,7 +10,7 @@ CommonBattle 的目标不是提供一套固定战斗流程去适配所有游戏�
 Battle = State + Command + RuleSet + Effect + Trigger + Event + Log
 ```
 
-当前工程使用 Maven 构建，目标 JDK 为 21。核心代码位于 `com.commonbattle.core`，不同玩法示例位于 `com.commonbattle.example.*`。
+当前工程使用 Maven 构建，目标 JDK 为 21。战斗框架代码位于 `com.commonbattle.battle.*`，并按功能拆分为 context、state、component、command、rule、effect、trigger、event、log、buff、targeting 等子包。不同玩法示例位于 `com.commonbattle.battle.example.*`。
 
 ## 架构原则
 
@@ -189,7 +189,7 @@ Event 不应该承担核心结算顺序控制。需要顺序控制时使用 Trig
 
 ### 回合制示例
 
-包路径：`com.commonbattle.example.turn`
+包路径：`com.commonbattle.battle.example.turn`
 
 演示内容：
 
@@ -202,7 +202,7 @@ Event 不应该承担核心结算顺序控制。需要顺序控制时使用 Trig
 
 ### 卡牌示例
 
-包路径：`com.commonbattle.example.card`
+包路径：`com.commonbattle.battle.example.card`
 
 演示内容：
 
@@ -215,7 +215,7 @@ Event 不应该承担核心结算顺序控制。需要顺序控制时使用 Trig
 
 ### 自动战斗示例
 
-包路径：`com.commonbattle.example.auto`
+包路径：`com.commonbattle.battle.example.auto`
 
 演示内容：
 

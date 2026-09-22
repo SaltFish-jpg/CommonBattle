@@ -26,7 +26,13 @@ class AgentMigrationPayloadCodecsTest {
                 source,
                 target,
                 AgentMigrationOperations.ACCEPT,
-                new AgentMigrationAcceptRequest(AgentIdentity.player(10001L), "player-10001", "player.snapshot.v1", state)
+                new AgentMigrationAcceptRequest(
+                        "migration-10001",
+                        AgentIdentity.player(10001L),
+                        "player-10001",
+                        "player.snapshot.v1",
+                        state
+                )
         );
         ClusterEnvelope response = new ClusterEnvelope(
                 1,
@@ -41,6 +47,7 @@ class AgentMigrationPayloadCodecsTest {
 
         AgentMigrationAcceptRequest migration = (AgentMigrationAcceptRequest) decodedRequest.payload();
         AgentMigrationAcceptResponse accepted = (AgentMigrationAcceptResponse) decodedResponse.payload();
+        assertEquals("migration-10001", migration.taskId());
         assertEquals(AgentIdentity.player(10001L), migration.identity());
         assertEquals("player-10001", migration.actorId());
         assertEquals("player.snapshot.v1", migration.stateType());

@@ -1,5 +1,8 @@
 package com.commonbattle.game.activity;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalArgumentException;
+
 import java.util.Map;
 import java.util.Objects;
 import java.util.Collection;
@@ -19,7 +22,10 @@ public final class ActivityCatalog {
     public ActivityDefinition require(String activityId) {
         ActivityDefinition definition = definitions.get(activityId);
         if (definition == null) {
-            throw new IllegalArgumentException("Unknown activity " + activityId);
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.ACTIVITY_UNKNOWN,
+                    "Unknown activity " + activityId
+            );
         }
         return definition;
     }

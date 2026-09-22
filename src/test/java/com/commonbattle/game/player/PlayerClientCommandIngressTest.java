@@ -3,6 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
@@ -14,9 +15,12 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.rpc.RpcNoRoutableServiceException;
+import com.commonbattle.cluster.rpc.RpcTimeoutException;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerClientCommandEnvelope;
 import com.commonbattle.game.session.PlayerClientCommandResponse;
+import com.commonbattle.game.session.PlayerClientErrorCode;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
 import com.commonbattle.game.session.PlayerDeliveryOverflowStrategy;
@@ -55,8 +59,9 @@ class PlayerClientCommandIngressTest {
             return true;
         });
 
-        ingress.accept(envelope);
+        PlayerClientCommandAcceptResult result = ingress.accept(envelope);
 
+        assertEquals(true, result.accepted());
         assertEquals(0, fixture.handled.get());
         assertEquals(0, written.size());
         assertEquals(1, fixture.executor.queued());
@@ -83,8 +88,12 @@ class PlayerClientCommandIngressTest {
             return true;
         });
 
-        ingress.accept(new PlayerClientCommandEnvelope(10001L, "old-session", 1, 1, "test.echo", "payload"));
+        PlayerClientCommandAcceptResult result = ingress.accept(
+                new PlayerClientCommandEnvelope(10001L, "old-session", 1, 1, "test.echo", "payload"));
 
+        assertEquals(false, result.accepted());
+        assertEquals(false, result.closeConnection());
+        assertEquals(PlayerClientErrorCode.SESSION_EXPIRED, result.code());
         assertEquals(0, fixture.handled.get());
         assertEquals(0, fixture.executor.queued());
         PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
@@ -104,8 +113,12 @@ class PlayerClientCommandIngressTest {
             return true;
         });
 
-        ingress.accept(fixture.command(1));
+        PlayerClientCommandAcceptResult result = ingress.accept(fixture.command(1));
 
+        assertEquals(false, result.accepted());
+        assertEquals(false, result.closeConnection());
+        assertEquals(PlayerClientErrorCode.COMMAND_RATE_LIMITED, result.code());
+        assertEquals(100, result.retryAfter().toMillis());
         assertEquals(0, fixture.handled.get());
         assertEquals(0, fixture.executor.queued());
         PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
@@ -126,13 +139,66 @@ class PlayerClientCommandIngressTest {
             return true;
         });
 
-        ingress.accept(fixture.command(1));
+        PlayerClientCommandAcceptResult result = ingress.accept(fixture.command(1));
 
+        assertEquals(false, result.accepted());
+        assertEquals(false, result.closeConnection());
+        assertEquals(PlayerClientErrorCode.COMMAND_BACKPRESSURED, result.code());
+        assertEquals(50, result.retryAfter().toMillis());
         PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
         assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
         assertEquals("BACKPRESSURED", response.code());
         assertEquals("mailbox_pressure:target", response.message());
         assertEquals(50, response.retryAfterMillis());
+    }
+
+    @Test
+    void remoteTimeoutClientCommandResponseIsCountedAsIngressReject() {
+        Duration timeout = Duration.ofMillis(35);
+        Fixture fixture = Fixture.createRemoteOwner(new FailingRpcGateway(
+                request -> new RpcTimeoutException(request, timeout)
+        ));
+        PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound);
+        List<PlayerOutboundMessage> written = new ArrayList<>();
+        fixture.outbound.connect(fixture.session, message -> {
+            written.add(message);
+            return true;
+        });
+
+        PlayerClientCommandAcceptResult result = ingress.accept(fixture.command(1));
+
+        assertEquals(false, result.accepted());
+        assertEquals(false, result.closeConnection());
+        assertEquals(PlayerClientErrorCode.COMMAND_REMOTE_TIMEOUT, result.code());
+        assertEquals(timeout.toMillis(), result.retryAfter().toMillis());
+        assertEquals(0, fixture.handled.get());
+        assertEquals(0, fixture.executor.queued());
+        PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(PlayerBusinessResponse.REMOTE_TIMEOUT, response.code());
+        assertEquals(timeout.toMillis(), response.retryAfterMillis());
+    }
+
+    @Test
+    void remoteUnavailableClientCommandResponseIsCountedAsIngressReject() {
+        Fixture fixture = Fixture.createRemoteOwner(new FailingRpcGateway(RpcNoRoutableServiceException::new));
+        PlayerClientCommandIngress ingress = new PlayerClientCommandIngress(fixture.commands, fixture.outbound);
+        List<PlayerOutboundMessage> written = new ArrayList<>();
+        fixture.outbound.connect(fixture.session, message -> {
+            written.add(message);
+            return true;
+        });
+
+        PlayerClientCommandAcceptResult result = ingress.accept(fixture.command(1));
+
+        assertEquals(false, result.accepted());
+        assertEquals(false, result.closeConnection());
+        assertEquals(PlayerClientErrorCode.COMMAND_REMOTE_UNAVAILABLE, result.code());
+        assertEquals(0, fixture.handled.get());
+        assertEquals(0, fixture.executor.queued());
+        PlayerClientCommandResponse response = (PlayerClientCommandResponse) written.getFirst().payload();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(PlayerBusinessResponse.REMOTE_UNAVAILABLE, response.code());
     }
 
     @Test
@@ -238,6 +304,52 @@ class PlayerClientCommandIngressTest {
             return new Fixture(executor, session, commands, outbound, handled);
         }
 
+        private static Fixture createRemoteOwner(RpcGateway rpc) {
+            RecordingExecutor executor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorRef remoteRef = actors.actor("remote-player-10001");
+            InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+            ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+            ServiceId remote = ServiceId.of(ServiceKind.GAME, "r1", "game-2");
+            directory.claim(AgentIdentity.player(10001L), new AgentLocation(remote, remoteRef));
+            AgentLifecycleManager lifecycles = new AgentLifecycleManager(
+                    local,
+                    actors,
+                    directory,
+                    CLOCK
+            );
+            InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+            PlayerSession session = sessions.bind(10001L, "session-1");
+            PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
+                    sessions,
+                    new PlayerCommandSequencer(),
+                    new AdmissionControlledAgentRouter(
+                            (target, operation) -> AdmissionDecision.accept(),
+                            new LifecycleAwareAgentRouter(lifecycles, new DefaultAgentMessagePort(actors, rpc))
+                    )
+            );
+            PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
+            AtomicInteger handled = new AtomicInteger();
+            dispatcher.handle("test.echo", (context, command) -> {
+                handled.incrementAndGet();
+                responses.succeeded(command, PlayerBusinessAck.OK);
+            });
+            PlayerBusinessCommandGateway commands = new PlayerBusinessCommandGateway(
+                    dispatcher,
+                    rpc,
+                    responses,
+                    Duration.ofSeconds(1),
+                    new DirectScheduler()
+            );
+            PlayerOutboundDeliveryHub outbound = new PlayerOutboundDeliveryHub(
+                    sessions,
+                    CLOCK,
+                    8,
+                    PlayerDeliveryOverflowStrategy.DROP_OLDEST
+            );
+            return new Fixture(executor, session, commands, outbound, handled);
+        }
+
         private PlayerClientCommandEnvelope command(long sequence) {
             return new PlayerClientCommandEnvelope(10001L, session.sessionId(), session.epoch(), sequence, "test.echo", "payload");
         }
@@ -264,6 +376,24 @@ class PlayerClientCommandIngressTest {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
         }
+    }
+
+    private static final class FailingRpcGateway implements RpcGateway {
+        private final FailureFactory failureFactory;
+
+        private FailingRpcGateway(FailureFactory failureFactory) {
+            this.failureFactory = failureFactory;
+        }
+
+        @Override
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            callback.failure(failureFactory.create(request));
+        }
+    }
+
+    @FunctionalInterface
+    private interface FailureFactory {
+        Throwable create(RpcRequest<?> request);
     }
 
     private static final class DirectScheduler extends java.util.concurrent.ScheduledThreadPoolExecutor {

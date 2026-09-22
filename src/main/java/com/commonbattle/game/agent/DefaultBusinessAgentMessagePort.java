@@ -12,9 +12,12 @@ import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
+import com.commonbattle.actor.message.AskTimeoutScheduler;
+import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
 import com.commonbattle.actor.message.LocalAsk;
 import com.commonbattle.actor.message.LocalAskCallback;
 import com.commonbattle.actor.message.RemoteAgentCallback;
+import com.commonbattle.actor.message.ScheduledAskTimeout;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
@@ -23,17 +26,20 @@ import com.commonbattle.game.session.PlayerCommand;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 默认游戏业务 Agent 通信端口。
  * 本类只做门面聚合：本服 Agent 通信交给 AgentMessagePort，玩家业务命令交给 PlayerBusinessCommandGateway。
  */
-public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessagePort {
+public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessagePort, BusinessAgentMessageView, AutoCloseable {
     private final AgentMessagePort messages;
     private final PlayerBusinessCommandGateway playerCommands;
     private final LifecycleAwareAgentRouter router;
     private final BusinessAgentHandlerRegistry handlers;
     private final InboundAdmissionController admissions;
+    private final AskTimeoutScheduler remoteTimeouts;
+    private final BusinessAgentMessageMetrics metrics = new BusinessAgentMessageMetrics();
 
     public DefaultBusinessAgentMessagePort(AgentMessagePort messages, PlayerBusinessCommandGateway playerCommands) {
         this(messages, playerCommands, null, null);
@@ -55,11 +61,23 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             BusinessAgentHandlerRegistry handlers,
             InboundAdmissionController admissions
     ) {
+        this(messages, playerCommands, router, handlers, admissions, new ExecutorAskTimeoutScheduler());
+    }
+
+    public DefaultBusinessAgentMessagePort(
+            AgentMessagePort messages,
+            PlayerBusinessCommandGateway playerCommands,
+            LifecycleAwareAgentRouter router,
+            BusinessAgentHandlerRegistry handlers,
+            InboundAdmissionController admissions,
+            AskTimeoutScheduler remoteTimeouts
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.playerCommands = Objects.requireNonNull(playerCommands, "playerCommands");
         this.router = router;
         this.handlers = handlers;
         this.admissions = Objects.requireNonNull(admissions, "admissions");
+        this.remoteTimeouts = Objects.requireNonNull(remoteTimeouts, "remoteTimeouts");
     }
 
     @Override
@@ -133,22 +151,27 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
         Objects.requireNonNull(options, "options");
         Objects.requireNonNull(callback, "callback");
         ensureAgentRequestConfigured();
-        BusinessAgentRequest request = new BusinessAgentRequest(target, operation, payload);
+        metrics.submittedRequest();
+        BusinessAgentRequest request = new BusinessAgentRequest(target, operation, payload, options.idempotencyKey());
         AdmissionDecision admission = admissions.admit(target, operation);
         if (!admission.accepted()) {
+            metrics.rejectedRequest();
             failOnRequesterMailbox(requester, options, callback,
                     new BusinessAgentRequestException(target, operation, admission.reason()));
             return;
         }
         AgentRoute route = router.resolve(target);
         if (route.type() == AgentRouteType.LOCAL) {
+            metrics.localRequest();
             askLocalAgent(requester, route.location().orElseThrow(), request, responseType, options, callback);
             return;
         }
         if (route.type() == AgentRouteType.REMOTE) {
+            metrics.remoteRequest();
             callRemoteAgent(requester, route.location().orElseThrow(), request, responseType, options, callback);
             return;
         }
+        metrics.rejectedRequest();
         failOnRequesterMailbox(requester, options, callback,
                 new BusinessAgentRequestException(target, operation, route.reason()));
     }
@@ -161,6 +184,10 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     @Override
     public void sendLocalPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback) {
         playerCommands.submitLocalOnly(command, callback);
+    }
+
+    public BusinessAgentMessageStats stats() {
+        return metrics.snapshot();
     }
 
     private <T> void askLocalAgent(
@@ -190,19 +217,43 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             BusinessAgentCallOptions options,
             LocalAskCallback<T> callback
     ) {
+        AtomicBoolean completed = new AtomicBoolean();
+        ScheduledAskTimeout scheduledTimeout = remoteTimeouts.schedule(options.timeout(), () -> {
+            if (completed.compareAndSet(false, true)) {
+                metrics.remoteTimedOutResponse();
+                failOnRequesterMailbox(
+                        requester,
+                        options,
+                        callback,
+                        new BusinessAgentRequestTimeoutException(request.target(), request.operation(), options.timeout())
+                );
+            }
+        });
         messages.callRemote(
                 RpcRequest.toService(location.serviceId(), BusinessAgentRpcOperations.DISPATCH, request, responseType),
-                new RpcCallback<>() {
+            new RpcCallback<>() {
                     @Override
                     public void success(T response) {
-                        messages.tryTellLocal(requester, options.callbackCategory(),
-                                context -> callback.success(context, response));
+                        if (!completed.compareAndSet(false, true)) {
+                            metrics.lateRemoteResponse();
+                            return;
+                        }
+                        scheduledTimeout.cancel();
+                        metrics.remoteSuccessResponse();
+                        recordCallbackDelivery(messages.tryTellLocal(requester, options.callbackCategory(),
+                                context -> callback.success(context, response)));
                     }
 
                     @Override
                     public void failure(Throwable error) {
-                        messages.tryTellLocal(requester, options.callbackCategory(),
-                                context -> callback.failure(context, error));
+                        if (!completed.compareAndSet(false, true)) {
+                            metrics.lateRemoteResponse();
+                            return;
+                        }
+                        scheduledTimeout.cancel();
+                        metrics.remoteFailureResponse();
+                        recordCallbackDelivery(messages.tryTellLocal(requester, options.callbackCategory(),
+                                context -> callback.failure(context, error)));
                     }
                 }
         );
@@ -214,12 +265,27 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             LocalAskCallback<T> callback,
             Throwable error
     ) {
-        messages.tryTellLocal(requester, options.callbackCategory(), context -> callback.failure(context, error));
+        recordCallbackDelivery(messages.tryTellLocal(
+                requester,
+                options.callbackCategory(),
+                context -> callback.failure(context, error)
+        ));
     }
 
     private void ensureAgentRequestConfigured() {
         if (router == null || handlers == null) {
             throw new IllegalStateException("Business agent request routing is not configured");
+        }
+    }
+
+    @Override
+    public void close() {
+        remoteTimeouts.close();
+    }
+
+    private void recordCallbackDelivery(AgentDeliveryResult delivery) {
+        if (!delivery.accepted()) {
+            metrics.callbackDeliveryFailed(delivery.status());
         }
     }
 }

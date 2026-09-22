@@ -129,14 +129,16 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         AgentDeliveryResult delivery = router.deliverLocal(routed, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, context -> {
             long configVersion = configVersionResolver.applyAsLong(command.playerId());
             Instant startedAt = clock.instant();
-            try {
-                handler.handle(context, command);
-                audit(command, PlayerCommandStatus.ACCEPTED, PlayerCommandAuditOutcome.EXECUTED,
-                        configVersion, elapsed(startedAt), "");
-            } catch (RuntimeException | Error e) {
-                audit(command, PlayerCommandStatus.ACCEPTED, PlayerCommandAuditOutcome.FAILED,
-                        configVersion, elapsed(startedAt), e.getMessage());
-                throw e;
+            try (PlayerCommandAuditContext.Scope auditContext = PlayerCommandAuditContext.open()) {
+                try {
+                    handler.handle(context, command);
+                    audit(command, PlayerCommandStatus.ACCEPTED, PlayerCommandAuditOutcome.EXECUTED,
+                            configVersion, elapsed(startedAt), auditContext.resultCode(), "");
+                } catch (RuntimeException | Error e) {
+                    audit(command, PlayerCommandStatus.ACCEPTED, PlayerCommandAuditOutcome.FAILED,
+                            configVersion, elapsed(startedAt), auditContext.resultCode(), e.getMessage());
+                    throw e;
+                }
             }
         }));
         if (!delivery.accepted()) {
@@ -188,6 +190,18 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
             Duration elapsed,
             String reason
     ) {
+        audit(command, status, outcome, configVersion, elapsed, "", reason);
+    }
+
+    private void audit(
+            PlayerCommand command,
+            PlayerCommandStatus status,
+            PlayerCommandAuditOutcome outcome,
+            long configVersion,
+            Duration elapsed,
+            String resultCode,
+            String reason
+    ) {
         auditSink.record(new PlayerCommandAuditRecord(
                 command.playerId(),
                 command.sessionId(),
@@ -199,6 +213,7 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
                 configVersion,
                 elapsed,
                 clock.instant(),
+                resultCode,
                 reason
         ));
     }

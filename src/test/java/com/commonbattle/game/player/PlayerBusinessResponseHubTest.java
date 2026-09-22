@@ -1,6 +1,10 @@
 package com.commonbattle.game.player;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalStateException;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -106,7 +110,69 @@ class PlayerBusinessResponseHubTest {
         assertEquals(null, received.get().payload());
         assertEquals(0, hub.pendingResponses());
         assertEquals(1, hub.stats().timedOutResponses());
+        assertEquals(1, hub.stats().failedResponses());
+        assertEquals(1, hub.stats().failedResponsesByCode().get(PlayerBusinessResponse.TIMEOUT));
         assertFalse(hub.timeout(command, Duration.ofSeconds(5)));
+    }
+
+    @Test
+    void failedResponsesAreGroupedByCode() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
+        PlayerBusinessResponseHub hub = new PlayerBusinessResponseHub(PlayerBusinessResultSink.NOOP, clock);
+        PlayerCommand timeout = command(8);
+        PlayerCommand remote = command(9);
+        PlayerCommand domain = command(10);
+        hub.expect(timeout, ignored -> {
+        });
+        hub.expect(remote, ignored -> {
+        });
+        hub.expect(domain, ignored -> {
+        });
+
+        hub.timeout(timeout, Duration.ofSeconds(5));
+        hub.completed(remote, new PlayerBusinessResponse(
+                remote.playerId(),
+                remote.sessionId(),
+                remote.sessionEpoch(),
+                remote.sequence(),
+                remote.operation(),
+                PlayerBusinessResponseStatus.FAILED,
+                PlayerBusinessResponse.REMOTE_TIMEOUT,
+                "remote timeout",
+                50,
+                null
+        ));
+        hub.failed(domain, new GameBusinessIllegalStateException(
+                GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM,
+                "Not enough item gold"
+        ));
+
+        assertEquals(3, hub.stats().failedResponses());
+        assertEquals(1, hub.stats().failedResponsesByCode().get(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM));
+        assertEquals(1, hub.stats().failedResponsesByCode().get(PlayerBusinessResponse.TIMEOUT));
+        assertEquals(1, hub.stats().failedResponsesByCode().get(PlayerBusinessResponse.REMOTE_TIMEOUT));
+    }
+
+    @Test
+    void successfulEnvelopeCanRecordRejectedBusinessResultStatus() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
+        PlayerBusinessResponseHub hub = new PlayerBusinessResponseHub(PlayerBusinessResultSink.NOOP, clock);
+        PlayerCommand shop = shopCommand(11);
+        AtomicReference<PlayerBusinessResponse> received = new AtomicReference<>();
+        hub.expect(shop, received::set);
+
+        hub.completed(shop, PlayerBusinessResponse.success(shop, ShopPurchaseResult.rejected(
+                ShopPurchaseStatus.NOT_ENOUGH_CURRENCY,
+                "growth_pack",
+                1,
+                0,
+                0
+        )));
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, received.get().status());
+        assertEquals(0, hub.stats().failedResponses());
+        assertEquals(1, hub.stats().rejectedBusinessResults());
+        assertEquals(1, hub.stats().rejectedBusinessResultsByCode().get("SHOP_NOT_ENOUGH_CURRENCY"));
     }
 
     @Test
@@ -136,6 +202,17 @@ class PlayerBusinessResponseHubTest {
                 sequence,
                 PlayerBusinessOperations.ACTIVITY_PROGRESS,
                 new ActivityProgressCommand("kill-3", 1)
+        );
+    }
+
+    private static PlayerCommand shopCommand(long sequence) {
+        return new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                sequence,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemCommand("growth_pack", 1)
         );
     }
 

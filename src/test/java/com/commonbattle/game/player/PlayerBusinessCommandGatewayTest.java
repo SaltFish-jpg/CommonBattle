@@ -3,6 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
@@ -12,6 +13,9 @@ import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
+import com.commonbattle.cluster.rpc.RpcNoRoutableServiceException;
+import com.commonbattle.cluster.rpc.RpcStructuredException;
+import com.commonbattle.cluster.rpc.RpcTimeoutException;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
@@ -164,6 +168,62 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void remoteForwardTimeoutReturnsClassifiedFailureEnvelope() {
+        Duration timeout = Duration.ofMillis(25);
+        Fixture fixture = Fixture.createRemoteOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                new FailingRpcGateway(request -> new RpcTimeoutException(request, timeout))
+        );
+        RecordingCallback callback = new RecordingCallback();
+
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals(PlayerBusinessResponse.REMOTE_TIMEOUT, callback.response.get().code());
+        assertEquals(timeout.toMillis(), callback.response.get().retryAfterMillis());
+        assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
+    void remoteForwardUnavailableReturnsClassifiedFailureEnvelope() {
+        Fixture fixture = Fixture.createRemoteOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                new FailingRpcGateway(RpcNoRoutableServiceException::new)
+        );
+        RecordingCallback callback = new RecordingCallback();
+
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals(PlayerBusinessResponse.REMOTE_UNAVAILABLE, callback.response.get().code());
+        assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
+    void remoteForwardStructuredFailureKeepsCodeAndRetryAfter() {
+        Fixture fixture = Fixture.createRemoteOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                new FailingRpcGateway(request -> new RpcStructuredException(
+                        "REMOTE_MAINTENANCE",
+                        "maintenance",
+                        Duration.ofMillis(80)
+                ))
+        );
+        RecordingCallback callback = new RecordingCallback();
+
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals("REMOTE_MAINTENANCE", callback.response.get().code());
+        assertEquals("maintenance", callback.response.get().message());
+        assertEquals(80, callback.response.get().retryAfterMillis());
+        assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
     void rejectedLocalCommandReturnsFailureEnvelopeAndClearsWaiter() {
         Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
         RecordingCallback callback = new RecordingCallback();
@@ -276,6 +336,35 @@ class PlayerBusinessCommandGatewayTest {
             return new Fixture(executor, responses, dispatcher,
                     new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
+
+        private static Fixture createRemoteOwner(ServiceId local, ServiceId remote, RpcGateway rpc) {
+            RecordingExecutor executor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorRef remoteRef = actors.actor("remote-player-10001");
+            InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+            directory.claim(AgentIdentity.player(10001L), new AgentLocation(remote, remoteRef));
+            AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, rpc);
+            InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+            sessions.bind(10001L, "session-1");
+            PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
+                    sessions,
+                    new PlayerCommandSequencer(),
+                    new AdmissionControlledAgentRouter(
+                            (target, operation) -> AdmissionDecision.accept(),
+                            new LifecycleAwareAgentRouter(lifecycles, messages)
+                    ),
+                    new InMemoryPlayerCommandAuditLog(),
+                    ignored -> 1,
+                    CLOCK
+            );
+            dispatcher.handle(PlayerBusinessOperations.ACTIVITY_PROGRESS, (context, command) -> {
+            });
+            PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
+            return new Fixture(executor, responses, dispatcher,
+                    new PlayerBusinessCommandGateway(dispatcher, rpc, responses,
+                            PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT));
+        }
     }
 
     private static ActivityService activityService() {
@@ -338,6 +427,24 @@ class PlayerBusinessCommandGatewayTest {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
         }
+    }
+
+    private static final class FailingRpcGateway implements RpcGateway {
+        private final FailureFactory failureFactory;
+
+        private FailingRpcGateway(FailureFactory failureFactory) {
+            this.failureFactory = failureFactory;
+        }
+
+        @Override
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            callback.failure(failureFactory.create(request));
+        }
+    }
+
+    @FunctionalInterface
+    private interface FailureFactory {
+        Throwable create(RpcRequest<?> request);
     }
 
     private static boolean await(BooleanSupplier condition) throws InterruptedException {

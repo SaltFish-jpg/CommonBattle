@@ -19,6 +19,7 @@ import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.observability.OpsHttpServer;
+import com.commonbattle.observability.InMemoryOwnerRepairOpsAuditLog;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
 import com.commonbattle.observability.RuntimeHealthRegistry;
@@ -45,6 +46,9 @@ final class BootOpsHttp {
             RuntimeHealthRegistry registry
     ) {
         Clock clock = Clock.systemUTC();
+        InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit =
+                new InMemoryOwnerRepairOpsAuditLog(config.ownerRepairOpsAuditConfig());
+        registry.register(ownerRepairOpsAudit);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 clock,
                 actors,
@@ -54,7 +58,7 @@ final class BootOpsHttp {
                 registry,
                 config.runtimeHealthPolicy()
         );
-        return startServer(config, probe, clock, registry);
+        return startServer(config, probe, clock, registry, ownerRepairOpsAudit);
     }
 
     static OpsHttpServer start(
@@ -146,34 +150,37 @@ final class BootOpsHttp {
             Collection<ProfileInterestView> profileInterests
     ) {
         Clock clock = Clock.systemUTC();
+        InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit =
+                new InMemoryOwnerRepairOpsAuditLog(config.ownerRepairOpsAuditConfig());
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(gateway);
+        registry.register(transport);
+        registry.register(leaseRenewers);
+        registry.register(leaseReapers);
+        registry.register(configCaches);
+        registry.register(configRecoveries);
+        registry.register(eventCenters);
+        registry.register(eventSubscriptions);
+        registry.register(profileInterests);
+        registry.register(ownerRepairOpsAudit);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 clock,
                 actors,
                 new AgentLifecycleManager(local.id(), actors, new InMemoryAgentDirectory(), clock),
                 new InMemoryVersionedEventOutbox(clock),
                 directory,
-                List.of(gateway),
-                List.of(),
-                List.of(transport),
-                leaseRenewers,
-                leaseReapers,
-                configCaches,
-                configRecoveries,
-                List.of(),
-                eventCenters,
-                eventSubscriptions,
-                profileInterests,
+                registry,
                 config.runtimeHealthPolicy()
         );
-        ServiceEndpoint endpoint = config.opsEndpoint();
-        return startServer(config, probe, clock, new RuntimeHealthRegistry());
+        return startServer(config, probe, clock, registry, ownerRepairOpsAudit);
     }
 
     private static OpsHttpServer startServer(
             ClusterNodeConfig config,
             RuntimeHealthProbe probe,
             Clock clock,
-            RuntimeHealthRegistry registry
+            RuntimeHealthRegistry registry,
+            InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit
     ) {
         ServiceEndpoint endpoint = config.opsEndpoint();
         OpsHttpServer server = new OpsHttpServer(
@@ -182,7 +189,14 @@ final class BootOpsHttp {
                 new ServerDrainController(probe, clock, duration -> Thread.sleep(duration.toMillis()),
                         registry.drainableComponents()),
                 config.drainConfig(),
-                registry.ownerEventRepairIsolationAdmins()
+                registry.ownerEventRepairIsolationAdmins(),
+                ownerRepairOpsAudit,
+                config.opsHttpSecurityConfig(),
+                registry.actorIncidents(),
+                registry.actorSlowTasks(),
+                config.actorHotspotPolicy(),
+                registry.actorHotspotOverrideAdmins(),
+                registry.actorHotspotMigrationAdmins()
         );
         server.start();
         return server;

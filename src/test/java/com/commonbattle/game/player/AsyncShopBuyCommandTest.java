@@ -29,6 +29,7 @@ import com.commonbattle.game.player.event.ShopItemPurchasedEvent;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
 import com.commonbattle.game.session.PlayerCommandStatus;
@@ -91,6 +92,10 @@ class AsyncShopBuyCommandTest {
         assertEquals(1, stats.reservedCallbacks());
         assertEquals(1, stats.completedPurchases());
         assertEquals(0, stats.releasedReservations());
+        assertEquals(2, fixture.audit.records().size());
+        assertEquals(PlayerCommandAuditOutcome.ASYNC_COMPLETED, fixture.audit.last().outcome());
+        assertEquals(PlayerBusinessResponse.OK, fixture.audit.last().resultCode());
+        assertEquals(7, fixture.audit.last().configVersion());
     }
 
     @Test
@@ -119,6 +124,8 @@ class AsyncShopBuyCommandTest {
         assertEquals(1, stats.reservedCallbacks());
         assertEquals(1, stats.rejectedPurchases());
         assertEquals(1, stats.releasedReservations());
+        assertEquals(PlayerCommandAuditOutcome.ASYNC_COMPLETED, fixture.audit.last().outcome());
+        assertEquals("SHOP_NOT_ENOUGH_CURRENCY", fixture.audit.last().resultCode());
     }
 
     @Test
@@ -163,6 +170,28 @@ class AsyncShopBuyCommandTest {
         assertEquals(1, stats.outOfStockCallbacks());
         assertEquals(1, stats.rejectedPurchases());
         assertEquals(0, stats.releasedReservations());
+        assertEquals(PlayerCommandAuditOutcome.ASYNC_COMPLETED, fixture.audit.last().outcome());
+        assertEquals("SHOP_OUT_OF_STOCK", fixture.audit.last().resultCode());
+    }
+
+    @Test
+    void stockRpcFailureIsAuditedAsAsyncFailed() {
+        Fixture fixture = Fixture.create();
+        fixture.agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("gold", 100)));
+
+        fixture.dispatch(new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1));
+        fixture.executor.runNext();
+        fixture.stocks.reserveCallback.failure(new IllegalStateException("rpc down"));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse envelope = fixture.results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, envelope.status());
+        assertEquals(PlayerBusinessResponse.BUSINESS_REJECTED, envelope.code());
+        AsyncShopPurchaseStats stats = fixture.metrics.stats();
+        assertEquals(1, stats.rpcFailures());
+        assertEquals(PlayerCommandAuditOutcome.ASYNC_FAILED, fixture.audit.last().outcome());
+        assertEquals(PlayerBusinessResponse.BUSINESS_REJECTED, fixture.audit.last().resultCode());
+        assertEquals("rpc down", fixture.audit.last().reason());
     }
 
     private record Fixture(
@@ -173,6 +202,7 @@ class AsyncShopBuyCommandTest {
             RecordingShopStockAsyncClient stocks,
             List<VersionedEvent> events,
             AsyncShopPurchaseMetrics metrics,
+            InMemoryPlayerCommandAuditLog audit,
             long sessionEpoch
     ) {
         private static Fixture create() {
@@ -188,6 +218,7 @@ class AsyncShopBuyCommandTest {
             RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
             List<VersionedEvent> events = new ArrayList<>();
             AsyncShopPurchaseMetrics metrics = new AsyncShopPurchaseMetrics();
+            InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
             PlayerGameAgent agent = new PlayerGameAgent(
                     messages,
                     self,
@@ -200,7 +231,9 @@ class AsyncShopBuyCommandTest {
                     0,
                     null,
                     stocks,
-                    metrics
+                    metrics,
+                    PlayerPushPort.NOOP,
+                    audit
             );
             InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
             long epoch = sessions.bind(10001L, "session-1").epoch();
@@ -212,7 +245,7 @@ class AsyncShopBuyCommandTest {
                             (target, operation) -> AdmissionDecision.accept(),
                             new LifecycleAwareAgentRouter(lifecycles, messages)
                     ),
-                    new InMemoryPlayerCommandAuditLog(),
+                    audit,
                     ignored -> 7,
                     CLOCK
             );
@@ -220,7 +253,7 @@ class AsyncShopBuyCommandTest {
                     dispatcher,
                     new PlayerBusinessCommandHandler(playerId -> agent, results)
             );
-            return new Fixture(executor, agent, dispatcher, results, stocks, events, metrics, epoch);
+            return new Fixture(executor, agent, dispatcher, results, stocks, events, metrics, audit, epoch);
         }
 
         private com.commonbattle.game.session.PlayerCommandResult dispatch(PlayerBusinessCommand<?> payload) {

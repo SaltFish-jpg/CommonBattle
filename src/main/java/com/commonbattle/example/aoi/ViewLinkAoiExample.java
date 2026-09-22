@@ -1,10 +1,12 @@
 package com.commonbattle.example.aoi;
 
+
+
+import com.commonbattle.battle.state.EntityId;
 import com.aoi.AoiPoint;
 import com.aoi.CrossLinkedListAoiIndex;
 import com.aoi.viewlink.ViewLinkChangeSet;
 import com.aoi.viewlink.ViewLinkManager;
-import com.commonbattle.core.EntityId;
 
 import java.util.List;
 import java.util.Map;

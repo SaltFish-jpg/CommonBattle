@@ -108,11 +108,38 @@ class BootRuntimeTest {
     }
 
     @Test
+    void bootActorsRegistersIncidentView() {
+        BootRuntime runtime = new BootRuntime();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.fromProperties(baseConfig());
+            BootActors.configure(runtime, config, Clock.systemUTC());
+
+            assertEquals(1, runtime.healthRegistry().actorIncidents().size());
+        } finally {
+            runtime.close();
+        }
+    }
+
+    @Test
     void addRegistersDrainableComponents() {
         BootRuntime runtime = new BootRuntime();
         RecordingDrainable drainable = runtime.add("drainable", new RecordingDrainable());
 
         assertSame(drainable, runtime.healthRegistry().drainableComponents().getFirst());
+    }
+
+    private static java.util.Properties baseConfig() {
+        java.util.Properties properties = new java.util.Properties();
+        properties.setProperty("cluster.kind", "GAME");
+        properties.setProperty("cluster.region", "r1");
+        properties.setProperty("cluster.node", "game-1");
+        properties.setProperty("cluster.host", "127.0.0.1");
+        properties.setProperty("cluster.port", "9001");
+        properties.setProperty("cluster.center.host", "127.0.0.1");
+        properties.setProperty("cluster.center.port", "9000");
+        properties.setProperty("cluster.actor.workers", "1");
+        properties.setProperty("cluster.actor.incident.log.capacity", "8");
+        return properties;
     }
 
     private static final class RecordingDrainable implements AutoCloseable, DrainableComponent {

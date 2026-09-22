@@ -1,8 +1,8 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
-import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
@@ -14,7 +14,6 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseRenewer;
 import com.commonbattle.cluster.event.ClusterVersionedEventBus;
-import com.commonbattle.cluster.event.EventReplayRepairer;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
@@ -39,9 +38,10 @@ import com.commonbattle.game.event.OwnerActorEventSubscription;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionRecoveryScheduler;
 import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.event.OwnerEventRepairDispatcher;
-import com.commonbattle.game.event.OwnerEventRepairScheduler;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.player.event.RemotePlayerDomainProjectionSnapshotReader;
+import com.commonbattle.game.player.event.ScenePlayerDomainSnapshotRepairer;
 import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileEventReplayRepairer;
@@ -108,7 +108,7 @@ public final class ChatServerMain {
             );
             BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
-            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            ActorSystem actors = BootActors.configure(runtime, config, Clock.systemUTC());
             DefaultAgentMessagePort messages = runtime.add("messages", new DefaultAgentMessagePort(
                     actors,
                     gateway,
@@ -164,7 +164,7 @@ public final class ChatServerMain {
                         return thread;
                     }
             ));
-            OwnerEventRepairDispatcher repairDispatcher = repairDispatcher(config);
+            OwnerEventRepairDispatcher repairDispatcher = BootOwnerEventRepairs.repairDispatcher(config);
             ActorMailboxEventSubscriber profileEventSubscriber = new ActorMailboxEventSubscriber(
                     messages,
                     actors.actor("chat-profile-awareness"),
@@ -190,7 +190,17 @@ public final class ChatServerMain {
                                     new SceneProfileSnapshotRepairer(profileSnapshotReader, profileAwareness)),
                             eventRepairExecutor
                     ));
-            profileInterests.attach(profileEventInterests, profileEventInterests);
+            OwnerEventInterestControl profileRepairControl = BootOwnerEventRepairs.repairControl(
+                    runtime,
+                    config,
+                    repairDispatcher,
+                    "profileEventRepairs",
+                    ProfileChangedEvent.TOPIC,
+                    profileEventInterests
+            );
+            profileEventSubscriber.onRejectedEvent(event ->
+                    profileRepairControl.requestRepairOwner(event.ownerKey()));
+            profileInterests.attach(profileRepairControl, profileEventInterests);
             ActorMailboxEventSubscriber domainEventSubscriber = new ActorMailboxEventSubscriber(
                     messages,
                     actors.actor("chat-domain-awareness"),
@@ -208,10 +218,26 @@ public final class ChatServerMain {
                             PlayerDomainVersionedEvent.TOPIC,
                             domainEventSubscriber,
                             domainAwareness.processor()::revisionOf,
-                            EventReplayRepairer.noop(),
+                            new EventReplaySnapshotRepairer().register(
+                                    PlayerDomainVersionedEvent.TOPIC,
+                                    new ScenePlayerDomainSnapshotRepairer(
+                                            new RemotePlayerDomainProjectionSnapshotReader(gateway, Duration.ofSeconds(1)),
+                                            domainAwareness
+                                    )
+                            ),
                             eventRepairExecutor
                     ));
-            domainAwareness.attachInterests(domainEventInterests);
+            OwnerEventInterestControl domainRepairControl = BootOwnerEventRepairs.repairControl(
+                    runtime,
+                    config,
+                    repairDispatcher,
+                    "domainEventRepairs",
+                    PlayerDomainVersionedEvent.TOPIC,
+                    domainEventInterests
+            );
+            domainEventSubscriber.onRejectedEvent(event ->
+                    domainRepairControl.requestRepairOwner(event.ownerKey()));
+            domainAwareness.attachInterests(domainRepairControl);
             ActorMailboxEventSubscriber allianceEventSubscriber = new ActorMailboxEventSubscriber(
                     messages,
                     actors.actor("chat-alliance-awareness"),
@@ -242,14 +268,17 @@ public final class ChatServerMain {
                             ),
                             eventRepairExecutor
                     ));
-            allianceAwareness.attachInterests(repairControl(
+            OwnerEventInterestControl allianceRepairControl = BootOwnerEventRepairs.repairControl(
                     runtime,
                     config,
                     repairDispatcher,
                     "allianceEventRepairs",
                     AllianceMemberChangedEvent.TOPIC,
                     allianceEventInterests
-            ));
+            );
+            allianceEventSubscriber.onRejectedEvent(event ->
+                    allianceRepairControl.requestRepairOwner(event.ownerKey()));
+            allianceAwareness.attachInterests(allianceRepairControl);
             ActorMailboxEventSubscriber friendEventSubscriber = new ActorMailboxEventSubscriber(
                     messages,
                     actors.actor("chat-friend-awareness"),
@@ -280,15 +309,18 @@ public final class ChatServerMain {
                             ),
                             eventRepairExecutor
                     ));
-            friendAwareness.attachInterests(repairControl(
+            OwnerEventInterestControl friendRepairControl = BootOwnerEventRepairs.repairControl(
                     runtime,
                     config,
                     repairDispatcher,
                     "friendEventRepairs",
                     FriendChangedEvent.TOPIC,
                     friendEventInterests
-            ));
-            startRepairDispatcher(runtime, repairDispatcher);
+            );
+            friendEventSubscriber.onRejectedEvent(event ->
+                    friendRepairControl.requestRepairOwner(event.ownerKey()));
+            friendAwareness.attachInterests(friendRepairControl);
+            BootOwnerEventRepairs.startRepairDispatcher(runtime, repairDispatcher);
             OwnerActorEventSubscriptionRecoveryScheduler ownerEventRecovery = runtime.add(
                     "ownerEventRecovery",
                     new OwnerActorEventSubscriptionRecoveryScheduler(
@@ -314,7 +346,7 @@ public final class ChatServerMain {
             PlayerOutboundChatDeliverySink deliverySink = new PlayerOutboundChatDeliverySink(deliveryHub);
             ProfileAwareChatMessagePolicy profilePolicy = new ProfileAwareChatMessagePolicy(profiles);
             AccessControlledChatMessagePolicy messagePolicy = new AccessControlledChatMessagePolicy(accessControl, profilePolicy);
-            InboundAdmissionController chatAdmissions = chatAdmissions(actors, config.chatMailboxPressurePolicy());
+            InboundAdmissionController chatAdmissions = chatAdmissions(runtime, actors, config);
             runtime.observe("chatMailboxPressure", chatAdmissions);
             ChatChannelManager channels = new ChatChannelManager(
                     actors,
@@ -358,58 +390,27 @@ public final class ChatServerMain {
     }
 
     private static InboundAdmissionController chatAdmissions(
+            BootRuntime runtime,
             ActorSystem actors,
-            ActorMailboxPressurePolicy policy
+            ClusterNodeConfig config
     ) {
-        return new ActorMailboxPressureAdmissionController(
+        ActorMailboxPressureAdmissionController pressure = new ActorMailboxPressureAdmissionController(
                 (target, operation) -> AdmissionDecision.accept(),
                 actors,
-                policy,
+                config.chatMailboxPressurePolicy(),
                 ChatActorIds::actorIdOf
         );
-    }
-
-    private static OwnerEventInterestControl repairControl(
-            BootRuntime runtime,
-            ClusterNodeConfig config,
-            OwnerEventRepairDispatcher dispatcher,
-            String name,
-            String topic,
-            OwnerEventInterestControl delegate
-    ) {
-        if (!config.eventRepairSchedulerEnabled(topic)) {
-            return delegate;
-        }
-        OwnerEventRepairScheduler scheduler = runtime.add(name, new OwnerEventRepairScheduler(
-                delegate,
-                config.eventRepairInterval(topic),
-                config.eventRepairMaxBatchSize(topic),
-                config.eventRepairPriority(topic),
-                config.eventRepairBackoffPolicy(topic),
-                config.eventRepairIsolationPolicy(topic)
-        ));
-        if (dispatcher == null) {
-            scheduler.start();
-        } else {
-            dispatcher.register(scheduler, config.eventRepairInterval(topic));
-        }
-        return scheduler;
-    }
-
-    private static OwnerEventRepairDispatcher repairDispatcher(ClusterNodeConfig config) {
-        if (!config.eventRepairDispatcherEnabled()) {
-            return null;
-        }
-        return new OwnerEventRepairDispatcher(
-                config.eventRepairDispatcherInterval(),
-                config.eventRepairDispatcherMaxDrainsPerTick()
+        runtime.observe("chatMailboxPressure", pressure);
+        ActorHotspotAdmissionController hotspot = new ActorHotspotAdmissionController(
+                pressure,
+                actors,
+                runtime.healthRegistry().actorSlowTasks(),
+                config.actorHotspotPolicy(),
+                config.actorHotspotRetryAfter(),
+                ChatActorIds::actorIdOf
         );
+        runtime.observe("chatHotspotAdmission", hotspot);
+        return hotspot;
     }
 
-    private static void startRepairDispatcher(BootRuntime runtime, OwnerEventRepairDispatcher dispatcher) {
-        if (dispatcher == null) {
-            return;
-        }
-        runtime.add("eventRepairDispatcher", dispatcher).start();
-    }
 }

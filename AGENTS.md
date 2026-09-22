@@ -15,5 +15,5 @@
 ## Project Notes
 
 - This repository is a Maven project targeting JDK 21.
-- Keep the core battle framework generic. Put game-type-specific examples under `com.commonbattle.example.*`.
+- Keep the battle framework generic. Put battle code under `com.commonbattle.battle.*` and game-type-specific battle examples under `com.commonbattle.battle.example.*`.
 - Verify changes with `mvn test` before claiming the work is complete.

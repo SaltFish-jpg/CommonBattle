@@ -95,6 +95,16 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.actor.overflow.strategy", "DROP_OLDEST");
         properties.setProperty("cluster.actor.shutdown.timeout.millis", "1500");
         properties.setProperty("cluster.actor.slow.task.threshold.millis", "25");
+        properties.setProperty("cluster.actor.incident.log.capacity", "64");
+        properties.setProperty("cluster.actor.slow.task.log.capacity", "32");
+        properties.setProperty("cluster.actor.hotspot.observe.queued", "2");
+        properties.setProperty("cluster.actor.hotspot.throttle.queued", "20");
+        properties.setProperty("cluster.actor.hotspot.migration.queued", "80");
+        properties.setProperty("cluster.actor.hotspot.throttle.slow.tasks", "3");
+        properties.setProperty("cluster.actor.hotspot.migration.slow.tasks", "8");
+        properties.setProperty("cluster.actor.hotspot.throttle.slow.millis", "150");
+        properties.setProperty("cluster.actor.hotspot.migration.slow.millis", "900");
+        properties.setProperty("cluster.actor.hotspot.retry.after.millis", "250");
         properties.setProperty("cluster.actor.category.PLAYER_COMMAND.capacity", "60");
         properties.setProperty("cluster.actor.category.RPC_CALLBACK.capacity", "30");
 
@@ -107,6 +117,16 @@ class ClusterNodeConfigTest {
                 config.actorSystemConfig().overflowStrategy());
         org.junit.jupiter.api.Assertions.assertEquals(1500, config.actorSystemConfig().shutdownTimeout().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(25, config.actorSystemConfig().slowTaskThreshold().toMillis());
+        assertEquals(64, config.actorIncidentLogCapacity());
+        assertEquals(32, config.actorSlowTaskLogCapacity());
+        assertEquals(2, config.actorHotspotPolicy().observeQueuedTasks());
+        assertEquals(20, config.actorHotspotPolicy().throttleQueuedTasks());
+        assertEquals(80, config.actorHotspotPolicy().migrationQueuedTasks());
+        assertEquals(3, config.actorHotspotPolicy().throttleSlowTasks());
+        assertEquals(8, config.actorHotspotPolicy().migrationSlowTasks());
+        assertEquals(150, config.actorHotspotPolicy().throttleSlowTaskMillis());
+        assertEquals(900, config.actorHotspotPolicy().migrationSlowTaskMillis());
+        assertEquals(250, config.actorHotspotRetryAfter().toMillis());
         org.junit.jupiter.api.Assertions.assertEquals(60,
                 config.actorSystemConfig().categoryCapacities().get(ActorTaskCategory.PLAYER_COMMAND));
         org.junit.jupiter.api.Assertions.assertEquals(30,
@@ -234,6 +254,25 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void ownerRepairOpsAuditConfigCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.owner.repair.ops.audit.capacity", "16");
+        properties.setProperty("cluster.owner.repair.ops.audit.record.not.found.release", "false");
+        properties.setProperty("cluster.ops.admin.token", "ops-secret");
+        properties.setProperty("cluster.ops.admin.token.header", "X-Ops-Token");
+        properties.setProperty("cluster.ops.operator.header", "X-Ops-Operator");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(16, config.ownerRepairOpsAuditConfig().capacity());
+        assertFalse(config.ownerRepairOpsAuditConfig().recordNotFoundRelease());
+        assertTrue(config.opsHttpSecurityConfig().enabled());
+        assertEquals("ops-secret", config.opsHttpSecurityConfig().adminToken());
+        assertEquals("X-Ops-Token", config.opsHttpSecurityConfig().tokenHeader());
+        assertEquals("X-Ops-Operator", config.opsHttpSecurityConfig().operatorHeader());
+    }
+
+    @Test
     void playerCommandRateAndServerOpenTimeCanBeConfigured() {
         Properties properties = base();
         properties.setProperty("cluster.player.command.rate.capacity", "800");
@@ -247,6 +286,8 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.business.agent.mailbox.pressure.target.max.queued", "120");
         properties.setProperty("cluster.business.agent.mailbox.pressure.group.max.queued", "1200");
         properties.setProperty("cluster.business.agent.mailbox.pressure.retry.after.millis", "80");
+        properties.setProperty("cluster.business.agent.rpc.idempotency.cache.capacity", "64");
+        properties.setProperty("cluster.business.agent.rpc.idempotency.cache.ttl.millis", "120000");
         properties.setProperty("cluster.player.state.store", "FILE");
         properties.setProperty("cluster.player.state.store.dir", "data/custom-player-state");
         properties.setProperty("cluster.player.auto.save.enabled", "false");
@@ -271,6 +312,8 @@ class ClusterNodeConfigTest {
         assertEquals(120, config.businessAgentMailboxPressurePolicy().maxTargetQueuedTasks());
         assertEquals(1200, config.businessAgentMailboxPressurePolicy().maxGroupQueuedTasks());
         assertEquals(80, config.businessAgentMailboxPressurePolicy().retryAfter().toMillis());
+        assertEquals(64, config.businessAgentIdempotencyConfig().capacity());
+        assertEquals(120_000, config.businessAgentIdempotencyConfig().ttl().toMillis());
         assertEquals(PlayerStateStoreKind.FILE, config.playerStateStoreKind());
         assertEquals(java.nio.file.Path.of("data/custom-player-state"), config.playerStateStoreDirectory());
         assertFalse(config.playerAutoSaveEnabled());
@@ -290,11 +333,23 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.actor.mailbox.capacity", "-1");
         properties.setProperty("cluster.actor.overflow.strategy", "UNKNOWN");
         properties.setProperty("cluster.actor.slow.task.threshold.millis", "-1");
+        properties.setProperty("cluster.actor.incident.log.capacity", "0");
+        properties.setProperty("cluster.actor.slow.task.log.capacity", "0");
+        properties.setProperty("cluster.actor.hotspot.observe.queued", "-1");
+        properties.setProperty("cluster.actor.hotspot.throttle.queued", "-1");
+        properties.setProperty("cluster.actor.hotspot.migration.queued", "-1");
+        properties.setProperty("cluster.actor.hotspot.throttle.slow.tasks", "-1");
+        properties.setProperty("cluster.actor.hotspot.migration.slow.tasks", "-1");
+        properties.setProperty("cluster.actor.hotspot.throttle.slow.millis", "-1");
+        properties.setProperty("cluster.actor.hotspot.migration.slow.millis", "-1");
+        properties.setProperty("cluster.actor.hotspot.retry.after.millis", "-1");
         properties.setProperty("cluster.actor.category.BAD.capacity", "10");
         properties.setProperty("cluster.actor.category.TIMER.capacity", "bad");
         properties.setProperty("cluster.player.command.rate.capacity", "0");
         properties.setProperty("cluster.player.command.rate.refill.permits", "-1");
         properties.setProperty("cluster.player.command.rate.refill.interval.millis", "bad");
+        properties.setProperty("cluster.business.agent.rpc.idempotency.cache.capacity", "-1");
+        properties.setProperty("cluster.business.agent.rpc.idempotency.cache.ttl.millis", "bad");
         properties.setProperty("cluster.player.state.store", "BAD");
         properties.setProperty("cluster.player.auto.save.enabled", "maybe");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "-1");
@@ -326,11 +381,23 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.actor.mailbox.capacity"));
         assertTrue(keys.contains("cluster.actor.overflow.strategy"));
         assertTrue(keys.contains("cluster.actor.slow.task.threshold.millis"));
+        assertTrue(keys.contains("cluster.actor.incident.log.capacity"));
+        assertTrue(keys.contains("cluster.actor.slow.task.log.capacity"));
+        assertTrue(keys.contains("cluster.actor.hotspot.observe.queued"));
+        assertTrue(keys.contains("cluster.actor.hotspot.throttle.queued"));
+        assertTrue(keys.contains("cluster.actor.hotspot.migration.queued"));
+        assertTrue(keys.contains("cluster.actor.hotspot.throttle.slow.tasks"));
+        assertTrue(keys.contains("cluster.actor.hotspot.migration.slow.tasks"));
+        assertTrue(keys.contains("cluster.actor.hotspot.throttle.slow.millis"));
+        assertTrue(keys.contains("cluster.actor.hotspot.migration.slow.millis"));
+        assertTrue(keys.contains("cluster.actor.hotspot.retry.after.millis"));
         assertTrue(keys.contains("cluster.actor.category.BAD.capacity"));
         assertTrue(keys.contains("cluster.actor.category.TIMER.capacity"));
         assertTrue(keys.contains("cluster.player.command.rate.capacity"));
         assertTrue(keys.contains("cluster.player.command.rate.refill.permits"));
         assertTrue(keys.contains("cluster.player.command.rate.refill.interval.millis"));
+        assertTrue(keys.contains("cluster.business.agent.rpc.idempotency.cache.capacity"));
+        assertTrue(keys.contains("cluster.business.agent.rpc.idempotency.cache.ttl.millis"));
         assertTrue(keys.contains("cluster.player.state.store"));
         assertTrue(keys.contains("cluster.player.auto.save.enabled"));
         assertTrue(keys.contains("cluster.player.auto.save.initial.delay.millis"));
@@ -367,6 +434,11 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.drain.timeout.millis", "0");
         properties.setProperty("cluster.drain.poll.interval.millis", "-1");
         properties.setProperty("cluster.drain.propagation.delay.millis", "bad");
+        properties.setProperty("cluster.ops.admin.token", "");
+        properties.setProperty("cluster.ops.admin.token.header", "");
+        properties.setProperty("cluster.ops.operator.header", "");
+        properties.setProperty("cluster.owner.repair.ops.audit.capacity", "0");
+        properties.setProperty("cluster.owner.repair.ops.audit.record.not.found.release", "maybe");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
 
@@ -381,6 +453,11 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.drain.timeout.millis"));
         assertTrue(keys.contains("cluster.drain.poll.interval.millis"));
         assertTrue(keys.contains("cluster.drain.propagation.delay.millis"));
+        assertTrue(keys.contains("cluster.ops.admin.token"));
+        assertTrue(keys.contains("cluster.ops.admin.token.header"));
+        assertTrue(keys.contains("cluster.ops.operator.header"));
+        assertTrue(keys.contains("cluster.owner.repair.ops.audit.capacity"));
+        assertTrue(keys.contains("cluster.owner.repair.ops.audit.record.not.found.release"));
     }
 
     @Test
@@ -706,6 +783,25 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void migrationTargetReceiptRetentionCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.migration.target.receipt.store", "FILE");
+        properties.setProperty("cluster.migration.target.receipt.store.dir", "data/custom-migration-target-receipts");
+        properties.setProperty("cluster.migration.target.receipt.retention.enabled", "false");
+        properties.setProperty("cluster.migration.target.receipt.retention.millis", "7200000");
+        properties.setProperty("cluster.migration.target.receipt.retention.scan.interval.millis", "45000");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(AgentMigrationTargetReceiptStoreKind.FILE, config.migrationTargetReceiptStoreKind());
+        assertEquals("data\\custom-migration-target-receipts",
+                config.migrationTargetReceiptStoreDirectory().toString());
+        assertFalse(config.migrationTargetReceiptRetentionEnabled());
+        assertEquals(7_200_000, config.migrationTargetReceiptRetention().toMillis());
+        assertEquals(45_000, config.migrationTargetReceiptRetentionScanInterval().toMillis());
+    }
+
+    @Test
     void shopStockReservationRetentionCanBeConfigured() {
         Properties properties = base();
         properties.setProperty("cluster.shop.stock.store", "ATOMIC_MEMORY");
@@ -803,6 +899,24 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.migration.task.retention.enabled"));
         assertTrue(keys.contains("cluster.migration.task.retention.millis"));
         assertTrue(keys.contains("cluster.migration.task.retention.scan.interval.millis"));
+    }
+
+    @Test
+    void validationRejectsInvalidMigrationTargetReceiptRetentionConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.migration.target.receipt.store", "BAD");
+        properties.setProperty("cluster.migration.target.receipt.retention.enabled", "maybe");
+        properties.setProperty("cluster.migration.target.receipt.retention.millis", "0");
+        properties.setProperty("cluster.migration.target.receipt.retention.scan.interval.millis", "-1");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.migration.target.receipt.store"));
+        assertTrue(keys.contains("cluster.migration.target.receipt.retention.enabled"));
+        assertTrue(keys.contains("cluster.migration.target.receipt.retention.millis"));
+        assertTrue(keys.contains("cluster.migration.target.receipt.retention.scan.interval.millis"));
     }
 
     @Test

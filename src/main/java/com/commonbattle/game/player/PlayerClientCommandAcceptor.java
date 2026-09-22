@@ -7,5 +7,5 @@ import com.commonbattle.game.session.PlayerClientCommandEnvelope;
  */
 @FunctionalInterface
 public interface PlayerClientCommandAcceptor {
-    void accept(PlayerClientCommandEnvelope envelope);
+    PlayerClientCommandAcceptResult accept(PlayerClientCommandEnvelope envelope);
 }

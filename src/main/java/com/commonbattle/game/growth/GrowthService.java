@@ -1,5 +1,7 @@
 package com.commonbattle.game.growth;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalArgumentException;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.PlayerBag;
@@ -59,7 +61,10 @@ public final class GrowthService {
 
     public GrowthResult useExpItems(PlayerBag bag, GrowthProfile profile, int count) {
         if (count <= 0) {
-            throw new IllegalArgumentException("count must be positive");
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.GROWTH_INVALID_EXP_ITEM_COUNT,
+                    "count must be positive"
+            );
         }
         int beforeLevel = profile.level();
         int beforeExp = profile.exp();

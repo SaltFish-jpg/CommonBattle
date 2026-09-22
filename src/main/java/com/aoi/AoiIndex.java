@@ -1,7 +1,9 @@
 package com.aoi;
 
-import com.commonbattle.core.EntityId;
 
+
+
+import com.commonbattle.battle.state.EntityId;
 import java.util.List;
 import java.util.Optional;
 

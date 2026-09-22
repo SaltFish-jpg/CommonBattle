@@ -1,16 +1,20 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorFailure;
 import com.commonbattle.actor.ActorScheduleStats;
 import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.DeadLetter;
+import com.commonbattle.actor.DeadLetterReason;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
+import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
@@ -27,6 +31,7 @@ import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionService
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionStats;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStatus;
 import com.commonbattle.actor.agent.migration.InMemoryAgentMigrationTaskStore;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.ActorRpcClient;
@@ -65,6 +70,8 @@ import com.commonbattle.cluster.rpc.RpcCircuitBreakerConfig;
 import com.commonbattle.cluster.rpc.RpcGovernanceConfig;
 import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.cluster.rpc.RpcRetryPolicy;
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalStateException;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
@@ -80,11 +87,18 @@ import com.commonbattle.game.config.GameConfigApplyResult;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.agent.BusinessAgentMessageStats;
+import com.commonbattle.game.agent.BusinessAgentMessageView;
+import com.commonbattle.game.agent.BusinessAgentRpcEndpointStats;
+import com.commonbattle.game.agent.BusinessAgentRpcEndpointView;
 import com.commonbattle.game.player.ActivityProgressCommand;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.BuyShopItemCommand;
 import com.commonbattle.game.player.PlayerBusinessOperations;
+import com.commonbattle.game.player.PlayerBusinessResponse;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
+import com.commonbattle.game.player.PlayerBusinessResponseStatus;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
@@ -107,6 +121,8 @@ import com.commonbattle.game.profile.ProfileReadMode;
 import com.commonbattle.game.profile.ProfileRuntime;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneRuntimeView;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
 import com.commonbattle.game.shop.ShopRuntimeStats;
 import com.commonbattle.game.shop.ShopRuntimeView;
 import org.junit.jupiter.api.Test;
@@ -284,6 +300,101 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_target_type_total{target_type=\"friend\"} 1"));
         assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_actor_group_total{group=\"friend\"} 1"));
         assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_by_reason_total{reason=\"mailbox_pressure:target\"} 1"));
+    }
+
+    @Test
+    void snapshotFormatsActorHotspotAdmissionStats() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        actors.send(actors.actor("player-10001"), ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+        }));
+        actors.send(actors.actor("player-10001"), ActorTask.categorized(ActorTaskCategory.RPC_CALLBACK, ignored -> {
+        }));
+        ActorHotspotAdmissionController admissions = new ActorHotspotAdmissionController(
+                (target, operation) -> AdmissionDecision.accept(),
+                actors,
+                List.of(),
+                new ActorHotspotPolicy(1, 2, 5, 2, 5, 100, 500),
+                Duration.ofMillis(75)
+        );
+        admissions.admit(AgentIdentity.player(10001L), "bag.use");
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(admissions);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), actors,
+                        new InMemoryAgentDirectory(), CLOCK),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.actorHotspotAdmissions().controllerCount());
+        assertEquals(1, snapshot.actorHotspotAdmissions().hotspotRejected());
+        assertEquals(1, snapshot.actorHotspotAdmissions().throttleRejected());
+        assertEquals(1, snapshot.actorHotspotAdmissions().rejectedByTargetType().get(AgentIdentity.PLAYER));
+        assertTrue(json.contains("\"actorHotspotAdmissions\""));
+        assertTrue(json.contains("\"rejectedByReason\":{\"actor_hotspot:throttle\":1}"));
+        assertTrue(metrics.contains("commonbattle_actor_hotspot_admission_rejected_total 1"));
+        assertTrue(metrics.contains("commonbattle_actor_hotspot_admission_rejected_by_actor_group_total{group=\"player\"} 1"));
+    }
+
+    @Test
+    void snapshotFormatsActorIncidentStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        ActorRef player = new ActorRef("player-10001");
+        InMemoryActorIncidentLog incidents = new InMemoryActorIncidentLog(8, CLOCK);
+        incidents.accept(new DeadLetter(
+                player,
+                ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+                }),
+                DeadLetterReason.MAILBOX_FULL
+        ));
+        incidents.onFailure(new ActorFailure(
+                player,
+                ActorTask.categorized(ActorTaskCategory.RPC_CALLBACK, ignored -> {
+                }),
+                new IllegalStateException("boom")
+        ));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(incidents);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.actorIncidents().viewCount());
+        assertEquals(2, snapshot.actorIncidents().recordedEntries());
+        assertEquals(1, snapshot.actorIncidents().deadLetters());
+        assertEquals(1, snapshot.actorIncidents().poisonMessages());
+        assertTrue(json.contains("\"actorIncidents\":{\"viewCount\":1,\"retainedEntries\":2,"
+                + "\"recordedEntries\":2,\"deadLetters\":1,\"poisonMessages\":1"));
+        assertTrue(json.contains("\"byReason\":{\"TASK_FAILED\":1,\"MAILBOX_FULL\":1}")
+                || json.contains("\"byReason\":{\"MAILBOX_FULL\":1,\"TASK_FAILED\":1}"));
+        assertTrue(metrics.contains("commonbattle_actor_incident_recorded_total 2"));
+        assertTrue(metrics.contains("commonbattle_actor_incident_by_kind_total{kind=\"DEAD_LETTER\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_incident_by_category_total{category=\"RPC_CALLBACK\"} 1"));
+        assertTrue(metrics.contains("commonbattle_actor_incident_by_reason_total{reason=\"TASK_FAILED\"} 1"));
     }
 
     @Test
@@ -928,6 +1039,109 @@ class RuntimeHealthProbeTest {
     }
 
     @Test
+    void snapshotAggregatesBusinessAgentMessageStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register((BusinessAgentMessageView) () -> new BusinessAgentMessageStats(
+                3,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                java.util.Map.of(AgentDeliveryStatus.MAILBOX_FULL, 1L)
+        ));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.businessAgentMessages().portCount());
+        assertEquals(3, snapshot.businessAgentMessages().submittedRequests());
+        assertEquals(1, snapshot.businessAgentMessages().remoteTimedOutResponses());
+        assertEquals(1, snapshot.businessAgentMessages().lateRemoteResponses());
+        assertEquals(1, snapshot.businessAgentMessages().callbackDeliveryFailures());
+        assertEquals(1, snapshot.businessAgentMessages().callbackDeliveryFailuresByStatus()
+                .get(AgentDeliveryStatus.MAILBOX_FULL));
+        assertTrue(json.contains("\"businessAgentMessages\":{\"portCount\":1,\"submittedRequests\":3"));
+        assertTrue(metrics.contains("commonbattle_business_agent_message_submitted_requests_total 3"));
+        assertTrue(metrics.contains("commonbattle_business_agent_message_remote_timed_out_responses_total 1"));
+        assertTrue(metrics.contains("commonbattle_business_agent_message_late_remote_responses_total 1"));
+        assertTrue(metrics.contains("commonbattle_business_agent_message_callback_delivery_failures_by_status_total{status=\"MAILBOX_FULL\"} 1"));
+    }
+
+    @Test
+    void snapshotAggregatesBusinessAgentRpcEndpointStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register((BusinessAgentRpcEndpointView) () -> new BusinessAgentRpcEndpointStats(
+                1,
+                64,
+                120_000,
+                2,
+                3,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1
+        ));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().endpointCount());
+        assertEquals(64, snapshot.businessAgentRpcEndpoints().idempotencyCacheCapacity());
+        assertEquals(120_000, snapshot.businessAgentRpcEndpoints().idempotencyCacheTtlMillis());
+        assertEquals(2, snapshot.businessAgentRpcEndpoints().idempotencyCacheSize());
+        assertEquals(3, snapshot.businessAgentRpcEndpoints().idempotencyStartedRequests());
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().idempotencyJoinedInFlightRequests());
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().idempotencyCompletedCacheHits());
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().idempotencyExpiredEntries());
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().idempotencyEvictedEntries());
+        assertEquals(2, snapshot.businessAgentRpcEndpoints().idempotencyCompletedSuccesses());
+        assertEquals(1, snapshot.businessAgentRpcEndpoints().idempotencyCompletedFailures());
+        assertTrue(json.contains("\"businessAgentRpcEndpoints\":{\"endpointCount\":1,\"idempotencyCacheCapacity\":64"));
+        assertTrue(metrics.contains("commonbattle_business_agent_rpc_endpoints 1"));
+        assertTrue(metrics.contains("commonbattle_business_agent_rpc_idempotency_started_requests_total 3"));
+        assertTrue(metrics.contains("commonbattle_business_agent_rpc_idempotency_completed_failures_total 1"));
+    }
+
+    @Test
     void snapshotAggregatesPlayerCommandStats() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
@@ -1114,11 +1328,15 @@ class RuntimeHealthProbeTest {
     void snapshotAggregatesPlayerCommandAuditStatsAndConfigVersions() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
-        audit.record(auditRecord(PlayerCommandAuditOutcome.EXECUTED, PlayerCommandStatus.ACCEPTED, 1, 5));
-        audit.record(auditRecord(PlayerCommandAuditOutcome.FAILED, PlayerCommandStatus.ACCEPTED, 2, 30));
+        audit.record(auditRecord(PlayerCommandAuditOutcome.EXECUTED, PlayerCommandStatus.ACCEPTED, 1, 5,
+                "SHOP_NOT_ENOUGH_CURRENCY"));
+        audit.record(auditRecord(PlayerCommandAuditOutcome.FAILED, PlayerCommandStatus.ACCEPTED, 2, 30,
+                GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM));
         audit.record(auditRecord(PlayerCommandAuditOutcome.REJECTED, PlayerCommandStatus.RATE_LIMITED, 0, 0));
         audit.record(auditRecord(PlayerCommandAuditOutcome.ROUTED_REMOTE, PlayerCommandStatus.ROUTED_REMOTE, 0, 0));
         audit.record(auditRecord(PlayerCommandAuditOutcome.EXECUTED, PlayerCommandStatus.ACCEPTED, 2, 10));
+        audit.record(auditRecord(PlayerCommandAuditOutcome.ASYNC_COMPLETED, PlayerCommandStatus.ACCEPTED, 2, 0,
+                "SHOP_OUT_OF_STOCK"));
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
                 CLOCK,
                 actors,
@@ -1139,18 +1357,30 @@ class RuntimeHealthProbeTest {
         );
 
         RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
 
-        assertEquals(5, snapshot.commandAudits().total());
-        assertEquals(5, snapshot.commandAudits().retained());
+        assertEquals(6, snapshot.commandAudits().total());
+        assertEquals(6, snapshot.commandAudits().retained());
         assertEquals(0, snapshot.commandAudits().dropped());
         assertEquals(2, snapshot.commandAudits().executed());
         assertEquals(1, snapshot.commandAudits().failed());
         assertEquals(1, snapshot.commandAudits().rejected());
         assertEquals(1, snapshot.commandAudits().routedRemote());
+        assertEquals(1, snapshot.commandAudits().asyncCompleted());
+        assertEquals(0, snapshot.commandAudits().asyncFailed());
         assertEquals(30, snapshot.commandAudits().maxElapsedMillis());
         assertEquals(1, snapshot.commandAudits().configVersionCounts().get(1L));
-        assertEquals(2, snapshot.commandAudits().configVersionCounts().get(2L));
+        assertEquals(3, snapshot.commandAudits().configVersionCounts().get(2L));
         assertEquals(2, snapshot.commandAudits().configVersionCounts().get(0L));
+        assertEquals(1, snapshot.commandAudits().resultCodeCounts().get("SHOP_NOT_ENOUGH_CURRENCY"));
+        assertEquals(1, snapshot.commandAudits().resultCodeCounts().get(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM));
+        assertEquals(1, snapshot.commandAudits().resultCodeCounts().get("SHOP_OUT_OF_STOCK"));
+        assertTrue(json.contains("\"resultCodeCounts\""));
+        assertTrue(json.contains("\"SHOP_NOT_ENOUGH_CURRENCY\":1"));
+        assertTrue(metrics.contains(
+                "commonbattle_command_audit_result_code_total{code=\"SHOP_NOT_ENOUGH_CURRENCY\"} 1"));
+        assertTrue(metrics.contains("commonbattle_command_audit_async_completed_total 1"));
     }
 
     @Test
@@ -1791,6 +2021,52 @@ class RuntimeHealthProbeTest {
     }
 
     @Test
+    void snapshotAggregatesOwnerRepairOpsAuditStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryOwnerRepairOpsAuditLog first = new InMemoryOwnerRepairOpsAuditLog(4);
+        first.record(ownerRepairOpsRecord("release", "friend:10001", 1));
+        first.record(ownerRepairOpsRecord("release", "missing", 0));
+        InMemoryOwnerRepairOpsAuditLog second = new InMemoryOwnerRepairOpsAuditLog(1);
+        second.record(ownerRepairOpsRecord("release", "alliance:7", 1));
+        second.record(ownerRepairOpsRecord("release-all", "*", 3));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(first);
+        registry.register(second);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(2, snapshot.ownerRepairOpsAudits().auditCount());
+        assertEquals(3, snapshot.ownerRepairOpsAudits().retainedEntries());
+        assertEquals(4, snapshot.ownerRepairOpsAudits().recordedEntries());
+        assertEquals(3, snapshot.ownerRepairOpsAudits().releaseOps());
+        assertEquals(1, snapshot.ownerRepairOpsAudits().releaseAllOps());
+        assertEquals(5, snapshot.ownerRepairOpsAudits().releasedOwners());
+        assertEquals(1, snapshot.ownerRepairOpsAudits().notFoundReleaseOps());
+        assertEquals(1, snapshot.ownerRepairOpsAudits().droppedEntries());
+        assertTrue(json.contains("\"ownerRepairOps\":{\"auditCount\":2,\"retainedEntries\":3,"
+                + "\"recordedEntries\":4"));
+        assertTrue(metrics.contains("commonbattle_owner_repair_ops_audits 2"));
+        assertTrue(metrics.contains("commonbattle_owner_repair_ops_audit_recorded_total 4"));
+        assertTrue(metrics.contains("commonbattle_owner_repair_ops_audit_dropped_total 1"));
+    }
+
+    @Test
     void shopRuntimeStatsAreReportedAndOrderConflictsDegradeHealth() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         ShopRuntimeView shops = () -> new ShopRuntimeStats(3, 1, 1, 0, 0, 0, 0, 0, 1, 1,
@@ -1914,6 +2190,38 @@ class RuntimeHealthProbeTest {
         responses.expect(command, ignored -> {
         });
         responses.timeout(command, Duration.ofSeconds(5));
+        PlayerCommand remoteFailed = businessCommand(2);
+        responses.expect(remoteFailed, ignored -> {
+        });
+        responses.completed(remoteFailed, new PlayerBusinessResponse(
+                remoteFailed.playerId(),
+                remoteFailed.sessionId(),
+                remoteFailed.sessionEpoch(),
+                remoteFailed.sequence(),
+                remoteFailed.operation(),
+                PlayerBusinessResponseStatus.FAILED,
+                PlayerBusinessResponse.REMOTE_TIMEOUT,
+                "remote timeout",
+                50,
+                null
+        ));
+        PlayerCommand domainFailed = businessCommand(3);
+        responses.expect(domainFailed, ignored -> {
+        });
+        responses.failed(domainFailed, new GameBusinessIllegalStateException(
+                GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM,
+                "Not enough item gold"
+        ));
+        PlayerCommand shopRejected = shopBusinessCommand(4);
+        responses.expect(shopRejected, ignored -> {
+        });
+        responses.completed(shopRejected, PlayerBusinessResponse.success(shopRejected, ShopPurchaseResult.rejected(
+                ShopPurchaseStatus.NOT_ENOUGH_CURRENCY,
+                "growth_pack",
+                1,
+                0,
+                0
+        )));
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
         registry.register(responses);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -1937,13 +2245,35 @@ class RuntimeHealthProbeTest {
 
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(1, snapshot.businessResponses().hubCount());
-        assertEquals(1, snapshot.businessResponses().submittedResponses());
+        assertEquals(4, snapshot.businessResponses().submittedResponses());
         assertEquals(1, snapshot.businessResponses().timedOutResponses());
         assertEquals(0, snapshot.businessResponses().pendingResponses());
-        assertEquals(1, snapshot.businessResponses().cachedResponses());
+        assertEquals(4, snapshot.businessResponses().cachedResponses());
+        assertEquals(3, snapshot.businessResponses().failedResponses());
+        assertEquals(1, snapshot.businessResponses().rejectedBusinessResults());
+        assertEquals(1, snapshot.businessResponses().rejectedBusinessResultsByCode()
+                .get("SHOP_NOT_ENOUGH_CURRENCY"));
+        assertEquals(1, snapshot.businessResponses().failedResponsesByCode()
+                .get(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM));
+        assertEquals(1, snapshot.businessResponses().failedResponsesByCode()
+                .get(PlayerBusinessResponse.TIMEOUT));
+        assertEquals(1, snapshot.businessResponses().failedResponsesByCode()
+                .get(PlayerBusinessResponse.REMOTE_TIMEOUT));
         assertTrue(json.contains("\"businessResponses\":{\"hubCount\":1,\"pendingResponses\":0"));
+        assertTrue(json.contains("\"failedResponsesByCode\""));
+        assertTrue(json.contains("\"BAG_NOT_ENOUGH_ITEM\":1"));
+        assertTrue(json.contains("\"rejectedBusinessResults\":1"));
+        assertTrue(json.contains("\"SHOP_NOT_ENOUGH_CURRENCY\":1"));
         assertTrue(metrics.contains("commonbattle_player_business_response_timed_out_total 1"));
-        assertTrue(metrics.contains("commonbattle_player_business_response_cached 1"));
+        assertTrue(metrics.contains("commonbattle_player_business_response_failed_total 3"));
+        assertTrue(metrics.contains("commonbattle_player_business_response_business_rejected_total 1"));
+        assertTrue(metrics.contains(
+                "commonbattle_player_business_response_business_rejected_by_code_total{code=\"SHOP_NOT_ENOUGH_CURRENCY\"} 1"));
+        assertTrue(metrics.contains(
+                "commonbattle_player_business_response_failed_by_code_total{code=\"BAG_NOT_ENOUGH_ITEM\"} 1"));
+        assertTrue(metrics.contains(
+                "commonbattle_player_business_response_failed_by_code_total{code=\"REMOTE_TIMEOUT\"} 1"));
+        assertTrue(metrics.contains("commonbattle_player_business_response_cached 4"));
     }
 
     @Test
@@ -2353,6 +2683,33 @@ class RuntimeHealthProbeTest {
         );
     }
 
+    private static PlayerCommandAuditRecord auditRecord(
+            PlayerCommandAuditOutcome outcome,
+            PlayerCommandStatus status,
+            long configVersion,
+            long elapsedMillis,
+            String resultCode
+    ) {
+        return new PlayerCommandAuditRecord(
+                10001L,
+                "session-1",
+                1,
+                1,
+                "bag.use",
+                status,
+                outcome,
+                configVersion,
+                Duration.ofMillis(elapsedMillis),
+                CLOCK.instant(),
+                resultCode,
+                ""
+        );
+    }
+
+    private static OwnerRepairOpsAuditRecord ownerRepairOpsRecord(String action, String ownerKey, int released) {
+        return new OwnerRepairOpsAuditRecord(action, ownerKey, released, CLOCK.instant(), "/127.0.0.1:10000");
+    }
+
     private static PlayerCommand businessCommand(long sequence) {
         return new PlayerCommand(
                 10001L,
@@ -2361,6 +2718,17 @@ class RuntimeHealthProbeTest {
                 sequence,
                 PlayerBusinessOperations.ACTIVITY_PROGRESS,
                 new ActivityProgressCommand("kill-3", 1)
+        );
+    }
+
+    private static PlayerCommand shopBusinessCommand(long sequence) {
+        return new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                sequence,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemCommand("growth_pack", 1)
         );
     }
 

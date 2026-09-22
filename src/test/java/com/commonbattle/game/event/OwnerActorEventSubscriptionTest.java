@@ -160,6 +160,114 @@ class OwnerActorEventSubscriptionTest {
     }
 
     @Test
+    void mailboxRejectedDeliveredEventTriggersWatchedOwnerRepair() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            RecordingExecutor executor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(
+                    executor,
+                    new com.commonbattle.actor.ActorSystemConfig(
+                            1,
+                            64,
+                            1,
+                            com.commonbattle.actor.ActorOverflowStrategy.REJECT,
+                            java.time.Duration.ZERO
+                    ),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    }
+            );
+            ActorRef target = actors.actor("scene-alliance-events");
+            actors.send(target, ignored -> {
+            });
+            List<Set<String>> repairs = new ArrayList<>();
+            ActorMailboxEventSubscriber mailboxSubscriber = new ActorMailboxEventSubscriber(
+                    new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                    target,
+                    (context, event) -> {
+                    }
+            );
+            try (OwnerActorEventSubscription subscription = new OwnerActorEventSubscription(
+                    fixture.sceneEvents(),
+                    AllianceMemberChangedEvent.TOPIC,
+                    mailboxSubscriber,
+                    ownerKey -> 0,
+                    (topic, ownerKeys) -> repairs.add(Set.copyOf(ownerKeys))
+            )) {
+                mailboxSubscriber.onRejectedEvent(event -> subscription.requestRepairOwner(event.ownerKey()));
+                subscription.watchOwner("alliance:100");
+
+                fixture.gameEvents().publish(new AllianceMemberChangedEvent(
+                        100,
+                        10001L,
+                        AllianceMemberAction.JOIN,
+                        1
+                ));
+
+                assertEquals(1, mailboxSubscriber.stats().receivedEvents());
+                assertEquals(0, mailboxSubscriber.stats().enqueuedEvents());
+                assertEquals(1, mailboxSubscriber.stats().rejectedEvents());
+                assertEquals(List.of(Set.of("alliance:100")), repairs);
+                assertEquals(1, subscription.stats().repairRequests());
+                executor.runAll();
+                assertEquals(0, mailboxSubscriber.stats().handledEvents());
+            }
+        }
+    }
+
+    @Test
+    void mailboxRejectedPlayerDomainEventTriggersWatchedOwnerRepair() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            RecordingExecutor executor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(
+                    executor,
+                    new com.commonbattle.actor.ActorSystemConfig(
+                            1,
+                            64,
+                            1,
+                            com.commonbattle.actor.ActorOverflowStrategy.REJECT,
+                            java.time.Duration.ZERO
+                    ),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    }
+            );
+            ActorRef target = actors.actor("scene-domain-events");
+            actors.send(target, ignored -> {
+            });
+            List<Set<String>> repairs = new ArrayList<>();
+            ActorMailboxEventSubscriber mailboxSubscriber = new ActorMailboxEventSubscriber(
+                    new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                    target,
+                    (context, event) -> {
+                    }
+            );
+            try (OwnerActorEventSubscription subscription = new OwnerActorEventSubscription(
+                    fixture.sceneEvents(),
+                    PlayerDomainVersionedEvent.TOPIC,
+                    mailboxSubscriber,
+                    ownerKey -> 0,
+                    (topic, ownerKeys) -> repairs.add(Set.copyOf(ownerKeys))
+            )) {
+                String ownerKey = PlayerDomainVersionedEvent.ownerKey(10001L);
+                mailboxSubscriber.onRejectedEvent(event -> subscription.requestRepairOwner(event.ownerKey()));
+                subscription.watchOwner(ownerKey);
+
+                fixture.gameEvents().publish(playerEvent(10001L, 1));
+
+                assertEquals(1, mailboxSubscriber.stats().receivedEvents());
+                assertEquals(0, mailboxSubscriber.stats().enqueuedEvents());
+                assertEquals(1, mailboxSubscriber.stats().rejectedEvents());
+                assertEquals(List.of(Set.of(ownerKey)), repairs);
+                assertEquals(1, subscription.stats().repairRequests());
+                executor.runAll();
+                assertEquals(0, mailboxSubscriber.stats().handledEvents());
+            }
+        }
+    }
+
+    @Test
     void explicitRepairRequestOnlyRepairsWatchedOwners() throws Exception {
         try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
             ActorSystem actors = new ActorSystem(Runnable::run, 64);

@@ -12,6 +12,7 @@ import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.actor.ActorSystem;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
@@ -46,7 +47,7 @@ public final class RegionServerMain {
             );
             BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
-            ActorSystem actors = runtime.add("actors", new ActorSystem(config.actorSystemConfig()));
+            ActorSystem actors = BootActors.configure(runtime, config, Clock.systemUTC());
             node.start(
                     List.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.SCENE, ServiceKind.PROXY),
                     config.registryLeaseTtl(),

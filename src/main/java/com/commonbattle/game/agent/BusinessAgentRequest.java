@@ -11,11 +11,17 @@ import java.util.Objects;
 public record BusinessAgentRequest(
         AgentIdentity target,
         String operation,
-        Object payload
+        Object payload,
+        String idempotencyKey
 ) {
+    public BusinessAgentRequest(AgentIdentity target, String operation, Object payload) {
+        this(target, operation, payload, "");
+    }
+
     public BusinessAgentRequest {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(operation, "operation");
+        idempotencyKey = idempotencyKey == null ? "" : idempotencyKey;
         if (operation.isBlank()) {
             throw new IllegalArgumentException("operation must not be blank");
         }

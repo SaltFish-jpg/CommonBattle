@@ -11,6 +11,7 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
 import com.commonbattle.cluster.rpc.PlayerGrayRouteConfig;
+import com.commonbattle.game.agent.BusinessAgentIdempotencyConfig;
 import com.commonbattle.game.chat.ChatRouteConfig;
 import com.commonbattle.game.event.OwnerEventRepairBackoffPolicy;
 import com.commonbattle.game.event.OwnerEventRepairIsolationPolicy;
@@ -18,6 +19,8 @@ import com.commonbattle.game.player.PlayerGatewayConfig;
 import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import com.commonbattle.observability.DrainConfig;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
+import com.commonbattle.observability.OpsHttpSecurityConfig;
+import com.commonbattle.observability.OwnerRepairOpsAuditConfig;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 
 import java.io.IOException;
@@ -109,6 +112,16 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.actor.mailbox.capacity");
         validatePositiveInteger(issues, "cluster.actor.shutdown.timeout.millis");
         validateNonNegativeInteger(issues, "cluster.actor.slow.task.threshold.millis");
+        validatePositiveInteger(issues, "cluster.actor.incident.log.capacity");
+        validatePositiveInteger(issues, "cluster.actor.slow.task.log.capacity");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.observe.queued");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.throttle.queued");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.migration.queued");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.throttle.slow.tasks");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.migration.slow.tasks");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.throttle.slow.millis");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.migration.slow.millis");
+        validateNonNegativeInteger(issues, "cluster.actor.hotspot.retry.after.millis");
         validatePositiveInteger(issues, "cluster.player.command.rate.capacity");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.permits");
         validatePositiveInteger(issues, "cluster.player.command.rate.refill.interval.millis");
@@ -120,6 +133,8 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.target.max.queued");
         validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.group.max.queued");
         validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.retry.after.millis");
+        validateNonNegativeInteger(issues, "cluster.business.agent.rpc.idempotency.cache.capacity");
+        validateNonNegativeInteger(issues, "cluster.business.agent.rpc.idempotency.cache.ttl.millis");
         validateBoolean(issues, "cluster.chat.mailbox.pressure.enabled");
         validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.target.max.queued");
         validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.group.max.queued");
@@ -149,6 +164,11 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.drain.timeout.millis");
         validatePositiveInteger(issues, "cluster.drain.poll.interval.millis");
         validateNonNegativeInteger(issues, "cluster.drain.propagation.delay.millis");
+        validateOptionalMetadataValue(issues, "cluster.ops.admin.token");
+        validateOptionalMetadataValue(issues, "cluster.ops.admin.token.header");
+        validateOptionalMetadataValue(issues, "cluster.ops.operator.header");
+        validatePositiveInteger(issues, "cluster.owner.repair.ops.audit.capacity");
+        validateBoolean(issues, "cluster.owner.repair.ops.audit.record.not.found.release");
         validateEventOutboxStoreKind(issues);
         validatePlayerStateStoreKind(issues);
         validateBoolean(issues, "cluster.event.outbox.jdbc.initialize.schema");
@@ -202,6 +222,10 @@ public final class ClusterNodeConfig {
         validateBoolean(issues, "cluster.migration.task.retention.enabled");
         validatePositiveInteger(issues, "cluster.migration.task.retention.millis");
         validatePositiveInteger(issues, "cluster.migration.task.retention.scan.interval.millis");
+        validateMigrationTargetReceiptStoreKind(issues);
+        validateBoolean(issues, "cluster.migration.target.receipt.retention.enabled");
+        validatePositiveInteger(issues, "cluster.migration.target.receipt.retention.millis");
+        validatePositiveInteger(issues, "cluster.migration.target.receipt.retention.scan.interval.millis");
         validateShopStockStoreKind(issues);
         validateBoolean(issues, "cluster.shop.stock.reservation.retention.enabled");
         validatePositiveInteger(issues, "cluster.shop.stock.reservation.ttl.millis");
@@ -348,6 +372,32 @@ public final class ClusterNodeConfig {
         return config;
     }
 
+    public int actorIncidentLogCapacity() {
+        return integer("cluster.actor.incident.log.capacity", com.commonbattle.observability.InMemoryActorIncidentLog.DEFAULT_CAPACITY);
+    }
+
+    public int actorSlowTaskLogCapacity() {
+        return integer("cluster.actor.slow.task.log.capacity", com.commonbattle.observability.InMemoryActorSlowTaskLog.DEFAULT_CAPACITY);
+    }
+
+    public com.commonbattle.observability.ActorHotspotPolicy actorHotspotPolicy() {
+        com.commonbattle.observability.ActorHotspotPolicy defaults =
+                com.commonbattle.observability.ActorHotspotPolicy.defaults();
+        return new com.commonbattle.observability.ActorHotspotPolicy(
+                integer("cluster.actor.hotspot.observe.queued", defaults.observeQueuedTasks()),
+                integer("cluster.actor.hotspot.throttle.queued", defaults.throttleQueuedTasks()),
+                integer("cluster.actor.hotspot.migration.queued", defaults.migrationQueuedTasks()),
+                integer("cluster.actor.hotspot.throttle.slow.tasks", defaults.throttleSlowTasks()),
+                integer("cluster.actor.hotspot.migration.slow.tasks", defaults.migrationSlowTasks()),
+                integer("cluster.actor.hotspot.throttle.slow.millis", (int) defaults.throttleSlowTaskMillis()),
+                integer("cluster.actor.hotspot.migration.slow.millis", (int) defaults.migrationSlowTaskMillis())
+        );
+    }
+
+    public Duration actorHotspotRetryAfter() {
+        return Duration.ofMillis(integer("cluster.actor.hotspot.retry.after.millis", 100));
+    }
+
     public RuntimeHealthPolicy runtimeHealthPolicy() {
         return new RuntimeHealthPolicy(
                 integer("cluster.health.max.queued.tasks", 10_000),
@@ -369,6 +419,21 @@ public final class ClusterNodeConfig {
         );
     }
 
+    public OwnerRepairOpsAuditConfig ownerRepairOpsAuditConfig() {
+        return new OwnerRepairOpsAuditConfig(
+                integer("cluster.owner.repair.ops.audit.capacity", OwnerRepairOpsAuditConfig.DEFAULT_CAPACITY),
+                Boolean.parseBoolean(property("cluster.owner.repair.ops.audit.record.not.found.release", "true"))
+        );
+    }
+
+    public OpsHttpSecurityConfig opsHttpSecurityConfig() {
+        return new OpsHttpSecurityConfig(
+                property("cluster.ops.admin.token", ""),
+                property("cluster.ops.admin.token.header", OpsHttpSecurityConfig.DEFAULT_TOKEN_HEADER),
+                property("cluster.ops.operator.header", OpsHttpSecurityConfig.DEFAULT_OPERATOR_HEADER)
+        );
+    }
+
     public AgentRateLimitPolicy playerCommandRateLimitPolicy() {
         return new AgentRateLimitPolicy(
                 integer("cluster.player.command.rate.capacity", 500),
@@ -383,6 +448,15 @@ public final class ClusterNodeConfig {
 
     public ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy() {
         return mailboxPressurePolicy("cluster.business.agent.mailbox.pressure");
+    }
+
+    public BusinessAgentIdempotencyConfig businessAgentIdempotencyConfig() {
+        return new BusinessAgentIdempotencyConfig(
+                integer("cluster.business.agent.rpc.idempotency.cache.capacity",
+                        BusinessAgentIdempotencyConfig.DEFAULT_CAPACITY),
+                Duration.ofMillis(integer("cluster.business.agent.rpc.idempotency.cache.ttl.millis",
+                        (int) BusinessAgentIdempotencyConfig.DEFAULT_TTL.toMillis()))
+        );
     }
 
     public ActorMailboxPressurePolicy chatMailboxPressurePolicy() {
@@ -683,6 +757,30 @@ public final class ClusterNodeConfig {
 
     public Duration migrationTaskRetentionScanInterval() {
         return Duration.ofMillis(integer("cluster.migration.task.retention.scan.interval.millis", 60_000));
+    }
+
+    public AgentMigrationTargetReceiptStoreKind migrationTargetReceiptStoreKind() {
+        return AgentMigrationTargetReceiptStoreKind.valueOf(property(
+                "cluster.migration.target.receipt.store",
+                AgentMigrationTargetReceiptStoreKind.MEMORY.name()
+        ));
+    }
+
+    public Path migrationTargetReceiptStoreDirectory() {
+        return Path.of(property("cluster.migration.target.receipt.store.dir",
+                "data/migration-target-receipts/" + region() + "-" + node()));
+    }
+
+    public boolean migrationTargetReceiptRetentionEnabled() {
+        return Boolean.parseBoolean(property("cluster.migration.target.receipt.retention.enabled", "true"));
+    }
+
+    public Duration migrationTargetReceiptRetention() {
+        return Duration.ofMillis(integer("cluster.migration.target.receipt.retention.millis", 86_400_000));
+    }
+
+    public Duration migrationTargetReceiptRetentionScanInterval() {
+        return Duration.ofMillis(integer("cluster.migration.target.receipt.retention.scan.interval.millis", 60_000));
     }
 
     public boolean shopStockReservationRetentionEnabled() {
@@ -1040,6 +1138,19 @@ public final class ClusterNodeConfig {
             AgentMigrationTaskStoreKind.valueOf(value);
         } catch (IllegalArgumentException e) {
             issues.add(new ClusterConfigIssue("cluster.migration.task.store", "unknown migration task store " + value));
+        }
+    }
+
+    private void validateMigrationTargetReceiptStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.migration.target.receipt.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            AgentMigrationTargetReceiptStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.migration.target.receipt.store",
+                    "unknown migration target receipt store " + value));
         }
     }
 

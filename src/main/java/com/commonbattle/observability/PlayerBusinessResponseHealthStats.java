@@ -2,6 +2,11 @@ package com.commonbattle.observability;
 
 import com.commonbattle.game.player.PlayerBusinessResponseStats;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.Objects;
+import java.util.TreeMap;
+
 /**
  * 玩家业务响应等待链路的健康统计。
  */
@@ -16,10 +21,24 @@ public record PlayerBusinessResponseHealthStats(
         long sharedWaiters,
         long replayedResponses,
         int cachedResponses,
-        long oldestPendingAgeMillis
+        long oldestPendingAgeMillis,
+        long failedResponses,
+        Map<String, Long> failedResponsesByCode,
+        long rejectedBusinessResults,
+        Map<String, Long> rejectedBusinessResultsByCode
 ) {
+    public PlayerBusinessResponseHealthStats {
+        failedResponsesByCode = Collections.unmodifiableMap(
+                new TreeMap<>(Objects.requireNonNullElse(failedResponsesByCode, Map.of()))
+        );
+        rejectedBusinessResultsByCode = Collections.unmodifiableMap(
+                new TreeMap<>(Objects.requireNonNullElse(rejectedBusinessResultsByCode, Map.of()))
+        );
+    }
+
     public static PlayerBusinessResponseHealthStats empty() {
-        return new PlayerBusinessResponseHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new PlayerBusinessResponseHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                Map.of(), 0, Map.of());
     }
 
     public static PlayerBusinessResponseHealthStats from(int hubCount, PlayerBusinessResponseStats stats) {
@@ -34,7 +53,11 @@ public record PlayerBusinessResponseHealthStats(
                 stats.sharedWaiters(),
                 stats.replayedResponses(),
                 stats.cachedResponses(),
-                stats.oldestPendingAgeMillis()
+                stats.oldestPendingAgeMillis(),
+                stats.failedResponses(),
+                stats.failedResponsesByCode(),
+                stats.rejectedBusinessResults(),
+                stats.rejectedBusinessResultsByCode()
         );
     }
 }

@@ -1,5 +1,6 @@
 package com.commonbattle.game.player;
 
+import com.commonbattle.game.GameBusinessResultStatus;
 import com.commonbattle.game.session.PlayerCommand;
 
 import java.util.ArrayDeque;
@@ -8,6 +9,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -35,6 +37,10 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     private final AtomicLong fallbackResponses = new AtomicLong();
     private final AtomicLong sharedWaiters = new AtomicLong();
     private final AtomicLong replayedResponses = new AtomicLong();
+    private final AtomicLong failedResponses = new AtomicLong();
+    private final Map<String, AtomicLong> failedResponsesByCode = new ConcurrentHashMap<>();
+    private final AtomicLong rejectedBusinessResults = new AtomicLong();
+    private final Map<String, AtomicLong> rejectedBusinessResultsByCode = new ConcurrentHashMap<>();
 
     public PlayerBusinessResponseHub() {
         this(PlayerBusinessResultSink.NOOP, Clock.systemUTC());
@@ -127,6 +133,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
                 command,
                 new PlayerBusinessResponseTimeoutException(command, timeout)
         );
+        recordFailure(response);
         remember(Key.from(command), command, response);
         waiter.complete(response);
         return true;
@@ -144,7 +151,11 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
                 sharedWaiters.get(),
                 replayedResponses.get(),
                 completed.size(),
-                oldestPendingAgeMillis()
+                oldestPendingAgeMillis(),
+                failedResponses.get(),
+                failedResponsesByCode(),
+                rejectedBusinessResults.get(),
+                rejectedBusinessResultsByCode()
         );
     }
 
@@ -153,6 +164,8 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         Objects.requireNonNull(command, "command");
         Objects.requireNonNull(response, "response");
         Key key = Key.from(command);
+        recordFailure(response);
+        recordBusinessResult(response);
         remember(key, command, response);
         PendingResponse waiter = callbacks.remove(key);
         if (waiter != null) {
@@ -184,6 +197,41 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         }
         long age = Duration.between(oldest, clock.instant()).toMillis();
         return Math.max(age, 0);
+    }
+
+    private void recordFailure(PlayerBusinessResponse response) {
+        if (response.status() != PlayerBusinessResponseStatus.FAILED) {
+            return;
+        }
+        failedResponses.incrementAndGet();
+        failedResponsesByCode
+                .computeIfAbsent(response.code(), ignored -> new AtomicLong())
+                .incrementAndGet();
+    }
+
+    private void recordBusinessResult(PlayerBusinessResponse response) {
+        if (response.status() != PlayerBusinessResponseStatus.SUCCESS) {
+            return;
+        }
+        if (!(response.payload() instanceof GameBusinessResultStatus result) || !result.businessResultRejected()) {
+            return;
+        }
+        rejectedBusinessResults.incrementAndGet();
+        rejectedBusinessResultsByCode
+                .computeIfAbsent(result.businessResultCode(), ignored -> new AtomicLong())
+                .incrementAndGet();
+    }
+
+    private Map<String, Long> failedResponsesByCode() {
+        Map<String, Long> result = new HashMap<>();
+        failedResponsesByCode.forEach((code, count) -> result.put(code, count.get()));
+        return result;
+    }
+
+    private Map<String, Long> rejectedBusinessResultsByCode() {
+        Map<String, Long> result = new HashMap<>();
+        rejectedBusinessResultsByCode.forEach((code, count) -> result.put(code, count.get()));
+        return result;
     }
 
     private record Key(long playerId, String sessionId, long sessionEpoch, long sequence) {

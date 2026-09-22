@@ -115,6 +115,7 @@ public final class AgentMigrationRecoveryService {
             return;
         }
         AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                moved.taskId(),
                 moved.identity(),
                 moved.target().actorRef().id(),
                 moved.snapshot().stateType(),

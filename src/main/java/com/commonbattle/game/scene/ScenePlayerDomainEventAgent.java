@@ -3,9 +3,11 @@ package com.commonbattle.game.scene;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.OwnerEventInterestControl;
+import com.commonbattle.game.event.SubscriptionDecision;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEventDelivery;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshot;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 
 import java.util.HashMap;
@@ -80,8 +82,32 @@ public final class ScenePlayerDomainEventAgent {
     public void handlePlayerDomainEvent(PlayerDomainVersionedEvent event) {
         Objects.requireNonNull(event, "event");
         if (onlinePlayers.contains(event.playerId())) {
-            processor.apply(event);
+            SubscriptionDecision decision = processor.apply(event);
+            if (decision == SubscriptionDecision.GAP) {
+                interests.requestRepairOwner(event.ownerKey());
+            }
         }
+    }
+
+    public void refresh(PlayerDomainProjectionSnapshot snapshot) {
+        messages.tellLocal(self, ignored -> handleSnapshot(snapshot));
+    }
+
+    public void handleSnapshot(PlayerDomainProjectionSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (!onlinePlayers.contains(snapshot.playerId())) {
+            return;
+        }
+        if (snapshot.eventRevision() < processor.revisionOf(snapshot.playerId())) {
+            return;
+        }
+        int clears = snapshot.totalStageClears();
+        if (clears > 0) {
+            stageClears.put(snapshot.playerId(), clears);
+        } else {
+            stageClears.remove(snapshot.playerId());
+        }
+        processor.repairOwner(snapshot.ownerKey(), snapshot.eventRevision());
     }
 
     public OptionalInt stageClears(long playerId) {

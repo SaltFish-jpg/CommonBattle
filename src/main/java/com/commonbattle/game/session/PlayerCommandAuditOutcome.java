@@ -7,5 +7,7 @@ public enum PlayerCommandAuditOutcome {
     EXECUTED,
     FAILED,
     REJECTED,
-    ROUTED_REMOTE
+    ROUTED_REMOTE,
+    ASYNC_COMPLETED,
+    ASYNC_FAILED
 }

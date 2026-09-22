@@ -7,6 +7,7 @@ import com.commonbattle.actor.message.AgentMessagePort;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * 把版本事件订阅回调转换为 Actor 邮箱任务。
@@ -17,6 +18,8 @@ public final class ActorMailboxEventSubscriber implements VersionedEventSubscrib
     private final ActorRef target;
     private final ActorTaskCategory category;
     private final ActorEventHandler handler;
+    private volatile Consumer<VersionedEvent> rejectedEventHandler = ignored -> {
+    };
     private final AtomicLong receivedEvents = new AtomicLong();
     private final AtomicLong enqueuedEvents = new AtomicLong();
     private final AtomicLong rejectedEvents = new AtomicLong();
@@ -39,6 +42,14 @@ public final class ActorMailboxEventSubscriber implements VersionedEventSubscrib
         this.handler = Objects.requireNonNull(handler, "handler");
     }
 
+    /**
+     * 绑定邮箱拒绝后的修复入口。
+     * 常见用途是把 ownerKey 交给快照修复调度器，避免事件被 mailbox 背压丢弃后投影长期停在旧版本。
+     */
+    public void onRejectedEvent(Consumer<VersionedEvent> handler) {
+        this.rejectedEventHandler = Objects.requireNonNull(handler, "handler");
+    }
+
     @Override
     public void onEvent(VersionedEvent event) {
         Objects.requireNonNull(event, "event");
@@ -56,6 +67,12 @@ public final class ActorMailboxEventSubscriber implements VersionedEventSubscrib
             enqueuedEvents.incrementAndGet();
         } else {
             rejectedEvents.incrementAndGet();
+            try {
+                rejectedEventHandler.accept(event);
+            } catch (RuntimeException | Error e) {
+                failedEvents.incrementAndGet();
+                throw e;
+            }
         }
     }
 

@@ -86,6 +86,39 @@ class ActorMailboxEventSubscriberTest {
     }
 
     @Test
+    void mailboxFullCanTriggerOwnerRepairWithoutRunningHandler() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 1, ActorOverflowStrategy.REJECT, Duration.ZERO),
+                ignored -> {
+                },
+                ignored -> {
+                }
+        );
+        ActorRef scene = actors.actor("scene-1");
+        actors.send(scene, ignored -> {
+        });
+        AtomicInteger handled = new AtomicInteger();
+        List<String> repairs = new ArrayList<>();
+        ActorMailboxEventSubscriber subscriber = new ActorMailboxEventSubscriber(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                scene,
+                (context, event) -> handled.incrementAndGet()
+        );
+        subscriber.onRejectedEvent(event -> repairs.add(event.ownerKey()));
+
+        subscriber.onEvent(profileEvent(1));
+
+        assertEquals(1, subscriber.stats().receivedEvents());
+        assertEquals(0, subscriber.stats().enqueuedEvents());
+        assertEquals(1, subscriber.stats().rejectedEvents());
+        assertEquals(List.of("profile:10001"), repairs);
+        executor.runAll();
+        assertEquals(0, handled.get());
+    }
+
+    @Test
     void handlerFailureIsRecordedAfterMailboxExecutesTask() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem actors = new ActorSystem(executor, 64);

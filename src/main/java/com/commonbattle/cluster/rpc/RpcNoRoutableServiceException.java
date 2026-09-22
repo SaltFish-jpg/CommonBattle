@@ -1,6 +1,7 @@
 package com.commonbattle.cluster.rpc;
 
 import com.commonbattle.actor.rpc.RpcRequest;
+import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 
 /**
@@ -12,6 +13,13 @@ public final class RpcNoRoutableServiceException extends RuntimeException {
     }
 
     public RpcNoRoutableServiceException(RpcRequest<?> request) {
-        this(ServiceKind.valueOf(request.target()), request.operation());
+        this(targetKind(request), request.operation());
+    }
+
+    private static ServiceKind targetKind(RpcRequest<?> request) {
+        if (ServiceId.isWireName(request.target())) {
+            return ServiceId.parse(request.target()).kind();
+        }
+        return ServiceKind.valueOf(request.target());
     }
 }

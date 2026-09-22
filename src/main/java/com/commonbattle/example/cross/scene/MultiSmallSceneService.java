@@ -11,6 +11,7 @@ import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -78,12 +79,57 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
                     if (scenes.size() >= capacity) {
                         throw new SceneCapacityExceededException(baseDescriptor.id().node(), capacity);
                     }
-                    actor = actors.actor("scene:" + baseDescriptor.id().node() + ":" + sceneId);
+                    actor = actors.actor(actorId(sceneId));
                     scenes.put(sceneId, actor);
                 }
             }
         }
         return new ScenePlacement(sceneId, actor, 0, 1);
+    }
+
+    public String actorId(String sceneId) {
+        Objects.requireNonNull(sceneId, "sceneId");
+        if (sceneId.isBlank()) {
+            throw new IllegalArgumentException("sceneId must not be blank");
+        }
+        return "scene:" + baseDescriptor.id().node() + ":" + sceneId;
+    }
+
+    public Set<Long> scenePlayers(String sceneId) {
+        return Set.copyOf(playersByScene.getOrDefault(sceneId, Set.of()));
+    }
+
+    public SmallSceneAgentSnapshot exportForMigrationInCurrentMailbox(String sceneId) {
+        if (!scenes.containsKey(sceneId)) {
+            throw new IllegalStateException("scene agent not loaded: " + sceneId);
+        }
+        return new SmallSceneAgentSnapshot(sceneId, scenePlayers(sceneId));
+    }
+
+    public ScenePlacement restoreMigrated(SmallSceneAgentSnapshot snapshot, ActorRef actorRef) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(actorRef, "actorRef");
+        ActorRef previous = scenes.putIfAbsent(snapshot.sceneId(), actorRef);
+        if (previous != null) {
+            throw new IllegalStateException("scene agent already loaded: " + snapshot.sceneId());
+        }
+        Set<Long> players = ConcurrentHashMap.newKeySet();
+        players.addAll(snapshot.players());
+        if (players.isEmpty()) {
+            playersByScene.remove(snapshot.sceneId());
+        } else {
+            playersByScene.put(snapshot.sceneId(), players);
+        }
+        return new ScenePlacement(snapshot.sceneId(), actorRef, 0, 1);
+    }
+
+    public SmallSceneAgentSnapshot removeMigrated(String sceneId) {
+        ActorRef removed = scenes.remove(sceneId);
+        Set<Long> players = playersByScene.remove(sceneId);
+        if (removed == null) {
+            throw new IllegalStateException("scene agent not loaded: " + sceneId);
+        }
+        return new SmallSceneAgentSnapshot(sceneId, players == null ? Set.of() : Set.copyOf(players));
     }
 
     @Override

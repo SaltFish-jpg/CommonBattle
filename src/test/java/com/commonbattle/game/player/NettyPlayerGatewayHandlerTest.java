@@ -108,6 +108,70 @@ class NettyPlayerGatewayHandlerTest {
     }
 
     @Test
+    void ingressFailureRejectsCommandWithExplicitCode() {
+        Fixture fixture = Fixture.create(PlayerClientAuthenticator.allowAll(), PlayerGatewayConfig.defaults(),
+                command -> {
+                    throw new IllegalStateException("ingress unavailable");
+                });
+        EmbeddedChannel channel = fixture.channel();
+        channel.writeInbound(frame(fixture.inboundCodec, PlayerClientInboundEnvelope.login(
+                new PlayerClientLoginRequest(10001L, "session-1")
+        )));
+        fixture.readOutbound(channel);
+
+        channel.writeInbound(frame(fixture.inboundCodec, PlayerClientInboundEnvelope.command(new PlayerClientCommandEnvelope(
+                10001L,
+                "session-1",
+                1,
+                1,
+                "test.echo",
+                "payload"
+        ))));
+
+        PlayerClientRejectResponse reject = assertInstanceOf(PlayerClientRejectResponse.class,
+                fixture.readOutbound(channel).payload());
+        assertEquals(PlayerClientErrorCode.COMMAND_INGRESS_FAILED, reject.code());
+        assertEquals("ingress unavailable", reject.message());
+        assertEquals(0, fixture.stats().acceptedCommands());
+        assertEquals(1, fixture.stats().rejectedCommands());
+        assertEquals(1, fixture.stats().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.COMMAND_INGRESS_FAILED));
+        assertEquals(0, fixture.stats().invalidFrames());
+        assertFalse(channel.isOpen());
+    }
+
+    @Test
+    void remoteIngressRejectIsCountedWithoutClosingConnection() {
+        Fixture fixture = Fixture.create(PlayerClientAuthenticator.allowAll(), PlayerGatewayConfig.defaults(),
+                command -> PlayerClientCommandAcceptResult.rejectedWithoutClosing(
+                        PlayerClientErrorCode.COMMAND_REMOTE_TIMEOUT,
+                        "remote timeout",
+                        Duration.ofMillis(30)
+                ));
+        EmbeddedChannel channel = fixture.channel();
+        channel.writeInbound(frame(fixture.inboundCodec, PlayerClientInboundEnvelope.login(
+                new PlayerClientLoginRequest(10001L, "session-1")
+        )));
+        fixture.readOutbound(channel);
+
+        channel.writeInbound(frame(fixture.inboundCodec, PlayerClientInboundEnvelope.command(new PlayerClientCommandEnvelope(
+                10001L,
+                "session-1",
+                1,
+                1,
+                "test.echo",
+                "payload"
+        ))));
+
+        assertEquals(0, fixture.stats().acceptedCommands());
+        assertEquals(1, fixture.stats().rejectedCommands());
+        assertEquals(1, fixture.stats().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.COMMAND_REMOTE_TIMEOUT));
+        assertTrue(channel.isOpen());
+    }
+
+
+    @Test
     void heartbeatAfterLoginWritesAckWithoutBusinessCommand() {
         Fixture fixture = Fixture.create();
         EmbeddedChannel channel = fixture.channel();
@@ -259,6 +323,8 @@ class NettyPlayerGatewayHandlerTest {
         assertEquals(PlayerClientErrorCode.NOT_LOGGED_IN, reject.code());
         assertEquals(List.of(), fixture.commands);
         assertEquals(1, fixture.stats().rejectedCommands());
+        assertEquals(1, fixture.stats().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.NOT_LOGGED_IN));
         assertFalse(channel.isOpen());
     }
 
@@ -294,6 +360,8 @@ class NettyPlayerGatewayHandlerTest {
         assertEquals(List.of(first), fixture.commands);
         assertEquals(1, fixture.stats().acceptedCommands());
         assertEquals(1, fixture.stats().rateLimitedCommands());
+        assertEquals(1, fixture.stats().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.COMMAND_RATE_LIMITED));
         assertFalse(channel.isOpen());
     }
 
@@ -353,6 +421,8 @@ class NettyPlayerGatewayHandlerTest {
                 fixture.readOutbound(channel).payload());
         assertEquals(PlayerClientErrorCode.SESSION_EXPIRED, reject.code());
         assertEquals(1, fixture.stats().rejectedCommands());
+        assertEquals(1, fixture.stats().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.SESSION_EXPIRED));
         assertFalse(channel.isOpen());
     }
 
@@ -488,6 +558,7 @@ class NettyPlayerGatewayHandlerTest {
             NettyPlayerGatewayConnectionIndex connectionIndex,
             PlayerClientAuthenticator authenticator,
             PlayerGatewayConfig config,
+            PlayerClientCommandAcceptor commandAcceptor,
             List<PlayerClientCommandEnvelope> commands
     ) {
         private static Fixture create() {
@@ -495,6 +566,27 @@ class NettyPlayerGatewayHandlerTest {
         }
 
         private static Fixture create(PlayerClientAuthenticator authenticator, PlayerGatewayConfig config) {
+            List<PlayerClientCommandEnvelope> commands = new ArrayList<>();
+            return create(authenticator, config, command -> {
+                commands.add(command);
+                return PlayerClientCommandAcceptResult.acceptedResult();
+            }, commands);
+        }
+
+        private static Fixture create(
+                PlayerClientAuthenticator authenticator,
+                PlayerGatewayConfig config,
+                PlayerClientCommandAcceptor commandAcceptor
+        ) {
+            return create(authenticator, config, commandAcceptor, new ArrayList<>());
+        }
+
+        private static Fixture create(
+                PlayerClientAuthenticator authenticator,
+                PlayerGatewayConfig config,
+                PlayerClientCommandAcceptor commandAcceptor,
+                List<PlayerClientCommandEnvelope> commands
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
@@ -528,7 +620,6 @@ class NettyPlayerGatewayHandlerTest {
                     new PlayerLoginService(agents, sessions),
                     outbound
             );
-            List<PlayerClientCommandEnvelope> commands = new ArrayList<>();
             PayloadCodecRegistry registry = PlayerClientPayloadCodecs.registerTo(
                     PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults())
             );
@@ -543,6 +634,7 @@ class NettyPlayerGatewayHandlerTest {
                     new NettyPlayerGatewayConnectionIndex(),
                     authenticator,
                     config,
+                    commandAcceptor,
                     commands
             );
         }
@@ -550,7 +642,7 @@ class NettyPlayerGatewayHandlerTest {
         private EmbeddedChannel channel() {
             NettyPlayerGatewayHandler handler = new NettyPlayerGatewayHandler(
                     connections,
-                    commands::add,
+                    commandAcceptor,
                     CLOCK,
                     metrics,
                     authenticator,

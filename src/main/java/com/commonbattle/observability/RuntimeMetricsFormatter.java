@@ -4,6 +4,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.session.PlayerClientErrorCode;
 import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerCommandStatus;
 
@@ -25,11 +26,16 @@ public final class RuntimeMetricsFormatter {
         actorSystem(metrics, snapshot);
         actorMailboxes(metrics, snapshot);
         actorMailboxPressures(metrics, snapshot);
+        actorHotspotAdmissions(metrics, snapshot);
+        actorIncidents(metrics, snapshot);
+        actorSlowTasks(metrics, snapshot);
         actorSchedules(metrics, snapshot);
         rpc(metrics, snapshot);
         rpcResilience(metrics, snapshot);
         rpcRoutes(metrics, snapshot);
         actorRpc(metrics, snapshot);
+        businessAgentMessages(metrics, snapshot);
+        businessAgentRpcEndpoints(metrics, snapshot);
         commands(metrics, snapshot);
         businessResponses(metrics, snapshot);
         playerOutboundDeliveries(metrics, snapshot);
@@ -59,6 +65,7 @@ public final class RuntimeMetricsFormatter {
         ownerActorEventSubscriptions(metrics, snapshot);
         ownerEventRepairSchedulers(metrics, snapshot);
         ownerEventRepairDispatchers(metrics, snapshot);
+        ownerRepairOps(metrics, snapshot);
         profileInterests(metrics, snapshot);
         profileRuntimes(metrics, snapshot);
         chatRuntimes(metrics, snapshot);
@@ -143,6 +150,58 @@ public final class RuntimeMetricsFormatter {
         }
     }
 
+    private static void actorHotspotAdmissions(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        ActorHotspotAdmissionHealthStats stats = snapshot.actorHotspotAdmissions();
+        gauge(metrics, "commonbattle_actor_hotspot_admission_controllers", stats.controllerCount());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_admissions_total", stats.admissions());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_accepted_total", stats.accepted());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_delegate_rejected_total", stats.delegateRejected());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_rejected_total", stats.hotspotRejected());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_throttle_rejected_total", stats.throttleRejected());
+        gauge(metrics, "commonbattle_actor_hotspot_admission_migration_candidate_rejected_total",
+                stats.migrationCandidateRejected());
+        for (Map.Entry<String, Long> entry : stats.rejectedByTargetType().entrySet()) {
+            gauge(metrics, "commonbattle_actor_hotspot_admission_rejected_by_target_type_total",
+                    "target_type", entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, Long> entry : stats.rejectedByActorGroup().entrySet()) {
+            gauge(metrics, "commonbattle_actor_hotspot_admission_rejected_by_actor_group_total",
+                    "group", entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, Long> entry : stats.rejectedByReason().entrySet()) {
+            gauge(metrics, "commonbattle_actor_hotspot_admission_rejected_by_reason_total",
+                    "reason", entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static void actorIncidents(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        ActorIncidentHealthStats stats = snapshot.actorIncidents();
+        gauge(metrics, "commonbattle_actor_incident_views", stats.viewCount());
+        gauge(metrics, "commonbattle_actor_incident_retained", stats.retainedEntries());
+        gauge(metrics, "commonbattle_actor_incident_recorded_total", stats.recordedEntries());
+        gauge(metrics, "commonbattle_actor_incident_dead_letters_total", stats.deadLetters());
+        gauge(metrics, "commonbattle_actor_incident_poison_messages_total", stats.poisonMessages());
+        gauge(metrics, "commonbattle_actor_incident_dropped_total", stats.droppedEntries());
+        labeledEnum(metrics, "commonbattle_actor_incident_by_kind_total", "kind",
+                stats.byKind(), ActorIncidentKind.values());
+        labeledEnum(metrics, "commonbattle_actor_incident_by_category_total", "category",
+                stats.byCategory(), ActorTaskCategory.values());
+        for (Map.Entry<String, Long> entry : stats.byReason().entrySet()) {
+            gauge(metrics, "commonbattle_actor_incident_by_reason_total", "reason", entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static void actorSlowTasks(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        ActorSlowTaskHealthStats stats = snapshot.actorSlowTasks();
+        gauge(metrics, "commonbattle_actor_slow_task_views", stats.viewCount());
+        gauge(metrics, "commonbattle_actor_slow_task_retained", stats.retainedEntries());
+        gauge(metrics, "commonbattle_actor_slow_task_recorded_total", stats.recordedEntries());
+        gauge(metrics, "commonbattle_actor_slow_task_dropped_total", stats.droppedEntries());
+        gauge(metrics, "commonbattle_actor_slow_task_max_elapsed_millis", stats.maxElapsedMillis());
+        labeledEnum(metrics, "commonbattle_actor_slow_task_by_category_total", "category",
+                stats.byCategory(), ActorTaskCategory.values());
+    }
+
     private static void actorSchedules(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         gauge(metrics, "commonbattle_actor_schedule_registries", snapshot.actorSchedules().registryCount());
         gauge(metrics, "commonbattle_actor_schedule_active_jobs", snapshot.actorSchedules().activeJobs());
@@ -196,6 +255,55 @@ public final class RuntimeMetricsFormatter {
                 snapshot.actorRpc().failedResponsesByStatus(), AgentDeliveryStatus.values());
     }
 
+    private static void businessAgentMessages(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_business_agent_message_ports", snapshot.businessAgentMessages().portCount());
+        gauge(metrics, "commonbattle_business_agent_message_submitted_requests_total",
+                snapshot.businessAgentMessages().submittedRequests());
+        gauge(metrics, "commonbattle_business_agent_message_local_requests_total",
+                snapshot.businessAgentMessages().localRequests());
+        gauge(metrics, "commonbattle_business_agent_message_remote_requests_total",
+                snapshot.businessAgentMessages().remoteRequests());
+        gauge(metrics, "commonbattle_business_agent_message_rejected_requests_total",
+                snapshot.businessAgentMessages().rejectedRequests());
+        gauge(metrics, "commonbattle_business_agent_message_remote_success_responses_total",
+                snapshot.businessAgentMessages().remoteSuccessResponses());
+        gauge(metrics, "commonbattle_business_agent_message_remote_failure_responses_total",
+                snapshot.businessAgentMessages().remoteFailureResponses());
+        gauge(metrics, "commonbattle_business_agent_message_remote_timed_out_responses_total",
+                snapshot.businessAgentMessages().remoteTimedOutResponses());
+        gauge(metrics, "commonbattle_business_agent_message_late_remote_responses_total",
+                snapshot.businessAgentMessages().lateRemoteResponses());
+        gauge(metrics, "commonbattle_business_agent_message_callback_delivery_failures_total",
+                snapshot.businessAgentMessages().callbackDeliveryFailures());
+        labeledEnum(metrics, "commonbattle_business_agent_message_callback_delivery_failures_by_status_total",
+                "status", snapshot.businessAgentMessages().callbackDeliveryFailuresByStatus(),
+                AgentDeliveryStatus.values());
+    }
+
+    private static void businessAgentRpcEndpoints(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_business_agent_rpc_endpoints", snapshot.businessAgentRpcEndpoints().endpointCount());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_cache_capacity",
+                snapshot.businessAgentRpcEndpoints().idempotencyCacheCapacity());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_cache_ttl_millis",
+                snapshot.businessAgentRpcEndpoints().idempotencyCacheTtlMillis());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_cache_size",
+                snapshot.businessAgentRpcEndpoints().idempotencyCacheSize());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_started_requests_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyStartedRequests());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_joined_in_flight_requests_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyJoinedInFlightRequests());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_completed_cache_hits_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyCompletedCacheHits());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_expired_entries_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyExpiredEntries());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_evicted_entries_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyEvictedEntries());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_completed_successes_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyCompletedSuccesses());
+        gauge(metrics, "commonbattle_business_agent_rpc_idempotency_completed_failures_total",
+                snapshot.businessAgentRpcEndpoints().idempotencyCompletedFailures());
+    }
+
     private static void commands(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         labeledEnum(metrics, "commonbattle_player_commands_total", "status", snapshot.commands().counts(),
                 PlayerCommandStatus.values());
@@ -224,6 +332,18 @@ public final class RuntimeMetricsFormatter {
                 snapshot.businessResponses().cachedResponses());
         gauge(metrics, "commonbattle_player_business_response_oldest_pending_age_millis",
                 snapshot.businessResponses().oldestPendingAgeMillis());
+        gauge(metrics, "commonbattle_player_business_response_failed_total",
+                snapshot.businessResponses().failedResponses());
+        for (Map.Entry<String, Long> entry : snapshot.businessResponses().failedResponsesByCode().entrySet()) {
+            gauge(metrics, "commonbattle_player_business_response_failed_by_code_total",
+                    "code", entry.getKey(), entry.getValue());
+        }
+        gauge(metrics, "commonbattle_player_business_response_business_rejected_total",
+                snapshot.businessResponses().rejectedBusinessResults());
+        for (Map.Entry<String, Long> entry : snapshot.businessResponses().rejectedBusinessResultsByCode().entrySet()) {
+            gauge(metrics, "commonbattle_player_business_response_business_rejected_by_code_total",
+                    "code", entry.getKey(), entry.getValue());
+        }
     }
 
     private static void playerOutboundDeliveries(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -272,6 +392,8 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_player_gateway_accepted_commands_total", snapshot.playerGateways().acceptedCommands());
         gauge(metrics, "commonbattle_player_gateway_rejected_commands_total", snapshot.playerGateways().rejectedCommands());
         gauge(metrics, "commonbattle_player_gateway_rate_limited_commands_total", snapshot.playerGateways().rateLimitedCommands());
+        labeledEnum(metrics, "commonbattle_player_gateway_rejected_commands_by_code_total", "code",
+                snapshot.playerGateways().rejectedCommandsByCode(), PlayerClientErrorCode.values());
         gauge(metrics, "commonbattle_player_gateway_accepted_heartbeats_total", snapshot.playerGateways().acceptedHeartbeats());
         gauge(metrics, "commonbattle_player_gateway_rejected_heartbeats_total", snapshot.playerGateways().rejectedHeartbeats());
         gauge(metrics, "commonbattle_player_gateway_rate_limited_heartbeats_total", snapshot.playerGateways().rateLimitedHeartbeats());
@@ -653,6 +775,18 @@ public final class RuntimeMetricsFormatter {
                 snapshot.ownerEventRepairDispatchers().inFlight() ? 1 : 0);
     }
 
+    private static void ownerRepairOps(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        OwnerRepairOpsAuditHealthStats stats = snapshot.ownerRepairOpsAudits();
+        gauge(metrics, "commonbattle_owner_repair_ops_audits", stats.auditCount());
+        gauge(metrics, "commonbattle_owner_repair_ops_audit_retained", stats.retainedEntries());
+        gauge(metrics, "commonbattle_owner_repair_ops_audit_recorded_total", stats.recordedEntries());
+        gauge(metrics, "commonbattle_owner_repair_ops_release_total", stats.releaseOps());
+        gauge(metrics, "commonbattle_owner_repair_ops_release_all_total", stats.releaseAllOps());
+        gauge(metrics, "commonbattle_owner_repair_ops_released_owners_total", stats.releasedOwners());
+        gauge(metrics, "commonbattle_owner_repair_ops_not_found_release_total", stats.notFoundReleaseOps());
+        gauge(metrics, "commonbattle_owner_repair_ops_audit_dropped_total", stats.droppedEntries());
+    }
+
     private static void profileInterests(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         gauge(metrics, "commonbattle_profile_interest_subscriptions", snapshot.profileInterests().subscriptionCount());
         gauge(metrics, "commonbattle_profile_interest_watched_owners", snapshot.profileInterests().watchedOwners());
@@ -742,10 +876,15 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_command_audit_failed_total", snapshot.commandAudits().failed());
         gauge(metrics, "commonbattle_command_audit_rejected_total", snapshot.commandAudits().rejected());
         gauge(metrics, "commonbattle_command_audit_routed_remote_total", snapshot.commandAudits().routedRemote());
+        gauge(metrics, "commonbattle_command_audit_async_completed_total", snapshot.commandAudits().asyncCompleted());
+        gauge(metrics, "commonbattle_command_audit_async_failed_total", snapshot.commandAudits().asyncFailed());
         gauge(metrics, "commonbattle_command_audit_max_elapsed_millis", snapshot.commandAudits().maxElapsedMillis());
         for (Map.Entry<Long, Long> entry : snapshot.commandAudits().configVersionCounts().entrySet()) {
             gauge(metrics, "commonbattle_command_audit_config_version_total", "version",
                     String.valueOf(entry.getKey()), entry.getValue());
+        }
+        for (Map.Entry<String, Long> entry : snapshot.commandAudits().resultCodeCounts().entrySet()) {
+            gauge(metrics, "commonbattle_command_audit_result_code_total", "code", entry.getKey(), entry.getValue());
         }
     }
 

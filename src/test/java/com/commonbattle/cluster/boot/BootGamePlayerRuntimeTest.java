@@ -222,10 +222,15 @@ class BootGamePlayerRuntimeTest {
         assertEquals(0, snapshot.playerAgents().autoSaveSchedulers());
         assertEquals(1, snapshot.playerAgents().drainServices());
         assertEquals(1, snapshot.asyncShopPurchases().viewCount());
+        assertEquals(1, snapshot.businessAgentMessages().portCount());
+        assertEquals(2, snapshot.businessAgentMessages().submittedRequests());
+        assertEquals(2, snapshot.businessAgentMessages().localRequests());
         assertTrue(json.contains("\"playerAgents\":{\"managerCount\":1,\"loadedAgents\":1"));
+        assertTrue(json.contains("\"businessAgentMessages\":{\"portCount\":1,\"submittedRequests\":2"));
         assertTrue(metrics.contains("commonbattle_player_agents_loaded 1"));
         assertTrue(metrics.contains("commonbattle_player_agent_drain_services 1"));
         assertTrue(metrics.contains("commonbattle_async_shop_purchase_views 1"));
+        assertTrue(metrics.contains("commonbattle_business_agent_message_submitted_requests_total 2"));
         assertTrue(players.logins().logoutAndPassivate(login.session(), ignored -> {
         }));
         executor.runAll();
@@ -234,7 +239,9 @@ class BootGamePlayerRuntimeTest {
         assertEquals(1, runtime.healthRegistry().playerOutboundDeliveries().size());
         assertEquals(1, runtime.healthRegistry().commandAudits().size());
         assertEquals(1, runtime.healthRegistry().lifecycleManagers().size());
+        assertEquals(1, runtime.healthRegistry().businessAgentMessages().size());
         assertEquals(2, runtime.healthRegistry().actorMailboxPressures().size());
+        assertEquals(2, runtime.healthRegistry().actorHotspotAdmissions().size());
         assertNull(players.autoSaves());
         assertTrue(runtime.healthRegistry().drainableComponents().contains(players.logins()));
         assertTrue(runtime.healthRegistry().drainableComponents().contains(players.dispatcher()));
@@ -277,6 +284,11 @@ class BootGamePlayerRuntimeTest {
         );
 
         assertEquals(1, runtime.healthRegistry().rpcRoutePolicies().size());
+        assertEquals(1, runtime.healthRegistry().businessAgentRpcEndpoints().size());
+        assertEquals(4096, runtime.healthRegistry().businessAgentRpcEndpoints().getFirst()
+                .stats().idempotencyCacheCapacity());
+        assertEquals(300_000, runtime.healthRegistry().businessAgentRpcEndpoints().getFirst()
+                .stats().idempotencyCacheTtlMillis());
     }
 
     @Test

@@ -34,6 +34,9 @@ import com.commonbattle.game.profile.ProfileField;
 import com.commonbattle.game.profile.ProfileSnapshotRequest;
 import com.commonbattle.game.profile.ProfileSnapshotResponse;
 import com.commonbattle.game.player.event.EventProgressRule;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshot;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotRequest;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotResponse;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
@@ -91,6 +94,8 @@ public final class ClusterEventPayloadCodecs {
         registry.register(new AllianceSnapshotResponseCodec());
         registry.register(new FriendSnapshotRequestCodec());
         registry.register(new FriendSnapshotResponseCodec());
+        registry.register(new PlayerDomainProjectionSnapshotRequestCodec());
+        registry.register(new PlayerDomainProjectionSnapshotResponseCodec());
         registry.register(new GameConfigSnapshotRequestCodec());
         registry.register(new GameConfigSnapshotCodec());
         return registry;
@@ -682,6 +687,105 @@ public final class ClusterEventPayloadCodecs {
                 return new FriendSnapshotResponse(found, snapshot);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode friend snapshot response", e);
+            }
+        }
+    }
+
+    private static final class PlayerDomainProjectionSnapshotRequestCodec
+            implements PayloadCodec<PlayerDomainProjectionSnapshotRequest> {
+        @Override
+        public String typeName() {
+            return PlayerDomainProjectionSnapshotRequest.class.getName();
+        }
+
+        @Override
+        public Class<PlayerDomainProjectionSnapshotRequest> javaType() {
+            return PlayerDomainProjectionSnapshotRequest.class;
+        }
+
+        @Override
+        public byte[] encode(PlayerDomainProjectionSnapshotRequest payload) {
+            int size = CodedOutputStream.computeInt64Size(1, payload.playerId());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt64(1, payload.playerId());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player domain projection snapshot request", e);
+            }
+        }
+
+        @Override
+        public PlayerDomainProjectionSnapshotRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            long playerId = 1;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> playerId = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new PlayerDomainProjectionSnapshotRequest(playerId);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player domain projection snapshot request", e);
+            }
+        }
+    }
+
+    private static final class PlayerDomainProjectionSnapshotResponseCodec
+            implements PayloadCodec<PlayerDomainProjectionSnapshotResponse> {
+        @Override
+        public String typeName() {
+            return PlayerDomainProjectionSnapshotResponse.class.getName();
+        }
+
+        @Override
+        public Class<PlayerDomainProjectionSnapshotResponse> javaType() {
+            return PlayerDomainProjectionSnapshotResponse.class;
+        }
+
+        @Override
+        public byte[] encode(PlayerDomainProjectionSnapshotResponse payload) {
+            byte[] snapshot = payload.snapshot() == null ? null : encodePlayerDomainProjectionSnapshot(payload.snapshot());
+            int size = CodedOutputStream.computeBoolSize(1, payload.found());
+            if (snapshot != null) {
+                size += CodedOutputStream.computeByteArraySize(2, snapshot);
+            }
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeBool(1, payload.found());
+                if (snapshot != null) {
+                    output.writeByteArray(2, snapshot);
+                }
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player domain projection snapshot response", e);
+            }
+        }
+
+        @Override
+        public PlayerDomainProjectionSnapshotResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            boolean found = false;
+            PlayerDomainProjectionSnapshot snapshot = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> found = input.readBool();
+                        case 2 -> snapshot = decodePlayerDomainProjectionSnapshot(input.readByteArray());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new PlayerDomainProjectionSnapshotResponse(found, snapshot);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player domain projection snapshot response", e);
             }
         }
     }
@@ -1980,6 +2084,87 @@ public final class ClusterEventPayloadCodecs {
             return new FriendSnapshot(playerId, revision, friends);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode friend snapshot", e);
+        }
+    }
+
+    private static byte[] encodePlayerDomainProjectionSnapshot(PlayerDomainProjectionSnapshot snapshot) {
+        List<byte[]> stageEntries = new ArrayList<>();
+        int size = CodedOutputStream.computeInt64Size(1, snapshot.playerId())
+                + CodedOutputStream.computeInt64Size(2, snapshot.eventRevision());
+        for (Map.Entry<String, Integer> entry : snapshot.stageClearCounts().entrySet()) {
+            byte[] encoded = encodeStageClearEntry(entry.getKey(), entry.getValue());
+            stageEntries.add(encoded);
+            size += CodedOutputStream.computeByteArraySize(3, encoded);
+        }
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, snapshot.playerId());
+            output.writeInt64(2, snapshot.eventRevision());
+            for (byte[] entry : stageEntries) {
+                output.writeByteArray(3, entry);
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode player domain projection snapshot", e);
+        }
+    }
+
+    private static PlayerDomainProjectionSnapshot decodePlayerDomainProjectionSnapshot(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long playerId = 1;
+        long eventRevision = 0;
+        Map<String, Integer> stageClears = new HashMap<>();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> playerId = input.readInt64();
+                    case 2 -> eventRevision = input.readInt64();
+                    case 3 -> decodeStageClearEntry(input.readByteArray(), stageClears);
+                    default -> input.skipField(tag);
+                }
+            }
+            return new PlayerDomainProjectionSnapshot(playerId, eventRevision, stageClears);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode player domain projection snapshot", e);
+        }
+    }
+
+    private static byte[] encodeStageClearEntry(String stageId, int clearCount) {
+        int size = stringSize(1, stageId)
+                + CodedOutputStream.computeInt32Size(2, clearCount);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, stageId);
+            output.writeInt32(2, clearCount);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode player domain stage clear entry", e);
+        }
+    }
+
+    private static void decodeStageClearEntry(byte[] bytes, Map<String, Integer> stageClears) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String stageId = "";
+        int clearCount = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> stageId = input.readString();
+                    case 2 -> clearCount = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            if (!stageId.isBlank()) {
+                stageClears.put(stageId, clearCount);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode player domain stage clear entry", e);
         }
     }
 

@@ -10,11 +10,13 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.player.NettyPlayerGatewayStats;
 import com.commonbattle.game.player.PlayerGatewayView;
+import com.commonbattle.game.session.PlayerClientErrorCode;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -25,8 +27,16 @@ class PlayerGatewayHealthStatsTest {
     @Test
     void snapshotFormatsPlayerGatewayStats() {
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
-        PlayerGatewayView first = () -> new NettyPlayerGatewayStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17);
-        PlayerGatewayView second = () -> new NettyPlayerGatewayStats(14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1, 1, 1);
+        PlayerGatewayView first = () -> new NettyPlayerGatewayStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                13, 14, 15, 16, 17, Map.of(
+                PlayerClientErrorCode.NOT_LOGGED_IN, 2L,
+                PlayerClientErrorCode.SESSION_EXPIRED, 5L
+        ));
+        PlayerGatewayView second = () -> new NettyPlayerGatewayStats(14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
+                2, 1, 1, 1, 1, Map.of(
+                PlayerClientErrorCode.NOT_LOGGED_IN, 3L,
+                PlayerClientErrorCode.COMMAND_RATE_LIMITED, 7L
+        ));
         registry.register(java.util.List.of(first, second));
 
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -66,8 +76,17 @@ class PlayerGatewayHealthStatsTest {
         assertEquals(16, snapshot.playerGateways().invalidFrames());
         assertEquals(17, snapshot.playerGateways().disconnectedSessions());
         assertEquals(18, snapshot.playerGateways().idleTimeouts());
+        assertEquals(5, snapshot.playerGateways().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.NOT_LOGGED_IN));
+        assertEquals(5, snapshot.playerGateways().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.SESSION_EXPIRED));
+        assertEquals(7, snapshot.playerGateways().rejectedCommandsByCode()
+                .get(PlayerClientErrorCode.COMMAND_RATE_LIMITED));
         assertTrue(json.contains("\"playerGateways\":{\"gatewayCount\":2,\"acceptedLogins\":15"));
+        assertTrue(json.contains("\"rejectedCommandsByCode\""));
         assertTrue(metrics.contains("commonbattle_player_gateway_accepted_logins_total 15"));
+        assertTrue(metrics.contains(
+                "commonbattle_player_gateway_rejected_commands_by_code_total{code=\"NOT_LOGGED_IN\"} 5"));
         assertTrue(metrics.contains("commonbattle_player_gateway_slow_client_closures_total 15"));
         assertTrue(metrics.contains("commonbattle_player_gateway_idle_timeouts_total 18"));
     }

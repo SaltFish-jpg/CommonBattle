@@ -1,7 +1,9 @@
 package com.commonbattle.game.agent;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorSystemConfig;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
@@ -12,7 +14,10 @@ import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.InboundAdmissionController;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
+import com.commonbattle.actor.message.AskTimeoutScheduler;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
+import com.commonbattle.actor.message.ScheduledAskTimeout;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
@@ -50,6 +55,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -240,6 +246,218 @@ class DefaultBusinessAgentMessagePortTest {
     }
 
     @Test
+    void remoteBusinessAgentRequestWithSameIdempotencyKeyExecutesOnceAndRepliesBothCallers() {
+        try (RemoteFixture fixture = RemoteFixture.create()) {
+            AgentLocation allianceOwner = fixture.owner().lifecycles()
+                    .activate(AgentIdentity.alliance(100), "alliance-100");
+            fixture.owner().executor().runAll();
+            fixture.caller().directory().claim(AgentIdentity.alliance(100), allianceOwner);
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            AtomicInteger successes = new AtomicInteger();
+            AtomicReference<String> response = new AtomicReference<>();
+            fixture.owner().handlers().handle("alliance.owner", (context, request) -> {
+                handled.incrementAndGet();
+                return context.self().id();
+            });
+            BusinessAgentCallOptions options = BusinessAgentCallOptions.defaults()
+                    .withIdempotencyKey("alliance-owner-query-1");
+
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.owner",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.owner",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+
+            fixture.owner().executor().runAll();
+            fixture.caller().executor().runAll();
+
+            assertEquals(1, handled.get());
+            assertEquals(2, successes.get());
+            assertEquals("alliance-100", response.get());
+            assertEquals(2, fixture.caller().business().stats().remoteRequests());
+            assertEquals(2, fixture.caller().business().stats().remoteSuccessResponses());
+
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.owner",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+            fixture.caller().executor().runAll();
+
+            assertEquals(1, handled.get());
+            assertEquals(3, successes.get());
+            assertEquals("alliance-100", response.get());
+            assertEquals(3, fixture.caller().business().stats().remoteRequests());
+            assertEquals(3, fixture.caller().business().stats().remoteSuccessResponses());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyStartedRequests());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyJoinedInFlightRequests());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyCompletedCacheHits());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyCompletedSuccesses());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyCacheSize());
+        }
+    }
+
+    @Test
+    void remoteBusinessAgentIdempotencyCacheExpiresCompletedResponses() {
+        AdjustableClock clock = new AdjustableClock(CLOCK.instant());
+        try (RemoteFixture fixture = RemoteFixture.create(
+                owner -> (target, operation) -> AdmissionDecision.accept(),
+                new BusinessAgentIdempotencyConfig(8, Duration.ofMillis(5)),
+                clock
+        )) {
+            AgentLocation allianceOwner = fixture.owner().lifecycles()
+                    .activate(AgentIdentity.alliance(100), "alliance-100");
+            fixture.owner().executor().runAll();
+            fixture.caller().directory().claim(AgentIdentity.alliance(100), allianceOwner);
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            AtomicReference<String> response = new AtomicReference<>();
+            fixture.owner().handlers().handle("alliance.version", (context, request) ->
+                    context.self().id() + ":" + handled.incrementAndGet());
+            BusinessAgentCallOptions options = BusinessAgentCallOptions.defaults()
+                    .withIdempotencyKey("alliance-version-query-1");
+
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.version",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(response)
+            );
+            fixture.owner().executor().runAll();
+            fixture.caller().executor().runAll();
+            assertEquals("alliance-100:1", response.get());
+
+            clock.advance(Duration.ofMillis(6));
+            fixture.caller().business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.version",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(response)
+            );
+            fixture.owner().executor().runAll();
+            fixture.caller().executor().runAll();
+
+            assertEquals("alliance-100:2", response.get());
+            assertEquals(2, handled.get());
+            assertEquals(2, fixture.businessEndpoint().stats().idempotencyStartedRequests());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyExpiredEntries());
+            assertEquals(2, fixture.businessEndpoint().stats().idempotencyCompletedSuccesses());
+        }
+    }
+
+    @Test
+    void remoteBusinessAgentIdempotencyCacheEvictsCompletedResponsesByCapacity() {
+        try (RemoteFixture fixture = RemoteFixture.create(
+                owner -> (target, operation) -> AdmissionDecision.accept(),
+                new BusinessAgentIdempotencyConfig(1, Duration.ZERO),
+                CLOCK
+        )) {
+            AgentLocation allianceOwner = fixture.owner().lifecycles()
+                    .activate(AgentIdentity.alliance(100), "alliance-100");
+            fixture.owner().executor().runAll();
+            fixture.caller().directory().claim(AgentIdentity.alliance(100), allianceOwner);
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            AtomicReference<String> response = new AtomicReference<>();
+            fixture.owner().handlers().handle("alliance.version", (context, request) ->
+                    context.self().id() + ":" + handled.incrementAndGet());
+
+            requestAllianceVersion(fixture, requester, "alliance-version-query-1", response);
+            requestAllianceVersion(fixture, requester, "alliance-version-query-2", response);
+
+            assertEquals("alliance-100:2", response.get());
+            assertEquals(2, handled.get());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyCacheCapacity());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyCacheSize());
+            assertEquals(1, fixture.businessEndpoint().stats().idempotencyEvictedEntries());
+        }
+    }
+
+    @Test
+    void remoteBusinessAgentRequestTimesOutAndIgnoresLateResponse() {
+        try (RemoteFixture fixture = RemoteFixture.create()) {
+            AgentLocation allianceOwner = fixture.owner().lifecycles()
+                    .activate(AgentIdentity.alliance(100), "alliance-100");
+            fixture.owner().executor().runAll();
+            fixture.caller().directory().claim(AgentIdentity.alliance(100), allianceOwner);
+            fixture.owner().handlers().handle("alliance.owner", (context, request) -> context.self().id());
+            ManualAskTimeoutScheduler timeouts = new ManualAskTimeoutScheduler();
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicReference<String> response = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            try (DefaultBusinessAgentMessagePort timed = fixture.caller().businessWithTimeouts(timeouts)) {
+                timed.requestAgent(
+                        requester,
+                        AgentIdentity.alliance(100),
+                        "alliance.owner",
+                        null,
+                        String.class,
+                        BusinessAgentCallOptions.of(Duration.ofMillis(5)),
+                        new com.commonbattle.actor.message.LocalAskCallback<>() {
+                            @Override
+                            public void success(com.commonbattle.actor.ActorContext context, String result) {
+                                response.set(result);
+                            }
+
+                            @Override
+                            public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                                failure.set(error);
+                            }
+                        }
+                );
+
+                timeouts.fire();
+                fixture.caller().executor().runAll();
+                assertInstanceOf(BusinessAgentRequestTimeoutException.class, failure.get());
+                assertNull(response.get());
+
+                fixture.owner().executor().runAll();
+                fixture.caller().executor().runAll();
+
+                assertNull(response.get());
+                assertEquals(1, timed.stats().remoteRequests());
+                assertEquals(1, timed.stats().remoteTimedOutResponses());
+                assertEquals(1, timed.stats().lateRemoteResponses());
+                assertEquals(0, timed.stats().remoteSuccessResponses());
+            }
+        }
+    }
+
+    @Test
     void remoteBusinessAgentRpcIsRejectedBeforeHotOwnerMailbox() {
         try (RemoteFixture fixture = RemoteFixture.create(owner -> new ActorMailboxPressureAdmissionController(
                 (target, operation) -> AdmissionDecision.accept(),
@@ -312,6 +530,39 @@ class DefaultBusinessAgentMessagePortTest {
 
             assertEquals("requester", callbackActor.get());
             assertEquals("agent_missing", ((BusinessAgentRequestException) failure.get()).reason());
+            assertEquals(0, rpc.calls.get());
+        }
+    }
+
+    @Test
+    void callbackDeliveryFailureIsCountedWhenRequesterMailboxIsFull() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                rpc,
+                ActorMailboxPressurePolicy.disabled(),
+                1
+        )) {
+            ActorRef requester = node.actors().actor("requester");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            node.actors().send(requester, ignored -> {
+            });
+
+            node.business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(404),
+                    "alliance.memberCount",
+                    null,
+                    String.class,
+                    failureOnly(failure)
+            );
+
+            BusinessAgentMessageStats stats = node.business().stats();
+            assertNull(failure.get());
+            assertEquals(1, stats.submittedRequests());
+            assertEquals(1, stats.rejectedRequests());
+            assertEquals(1, stats.callbackDeliveryFailures());
+            assertEquals(1, stats.callbackDeliveryFailuresByStatus().get(AgentDeliveryStatus.MAILBOX_FULL));
             assertEquals(0, rpc.calls.get());
         }
     }
@@ -433,10 +684,14 @@ class DefaultBusinessAgentMessagePortTest {
     }
 
     private static <T> com.commonbattle.actor.message.LocalAskCallback<T> successOnly(AtomicReference<T> response) {
+        return successOnly(response::set);
+    }
+
+    private static <T> com.commonbattle.actor.message.LocalAskCallback<T> successOnly(java.util.function.Consumer<T> success) {
         return new com.commonbattle.actor.message.LocalAskCallback<>() {
             @Override
             public void success(com.commonbattle.actor.ActorContext context, T result) {
-                response.set(result);
+                success.accept(result);
             }
 
             @Override
@@ -458,6 +713,25 @@ class DefaultBusinessAgentMessagePortTest {
                 failure.set(error);
             }
         };
+    }
+
+    private static void requestAllianceVersion(
+            RemoteFixture fixture,
+            ActorRef requester,
+            String idempotencyKey,
+            AtomicReference<String> response
+    ) {
+        fixture.caller().business().requestAgent(
+                requester,
+                AgentIdentity.alliance(100),
+                "alliance.version",
+                null,
+                String.class,
+                BusinessAgentCallOptions.defaults().withIdempotencyKey(idempotencyKey),
+                successOnly(response)
+        );
+        fixture.owner().executor().runAll();
+        fixture.caller().executor().runAll();
     }
 
     private static ServiceDescriptor descriptor(String node, int port) {
@@ -494,8 +768,24 @@ class DefaultBusinessAgentMessagePortTest {
         }
 
         static PlayerNode localOwner(ServiceId local, RpcGateway rpc, ActorMailboxPressurePolicy businessPolicy) {
+            return localOwner(local, rpc, businessPolicy, 64);
+        }
+
+        static PlayerNode localOwner(
+                ServiceId local,
+                RpcGateway rpc,
+                ActorMailboxPressurePolicy businessPolicy,
+                int mailboxCapacity
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
-            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorSystem actors = new ActorSystem(
+                    executor,
+                    new ActorSystemConfig(1, 64, mailboxCapacity, ActorOverflowStrategy.REJECT, Duration.ZERO),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    }
+            );
             InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
             AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
             lifecycles.activate(AgentIdentity.player(10001L), "player-10001");
@@ -560,6 +850,17 @@ class DefaultBusinessAgentMessagePortTest {
             );
         }
 
+        private DefaultBusinessAgentMessagePort businessWithTimeouts(AskTimeoutScheduler timeouts) {
+            return new DefaultBusinessAgentMessagePort(
+                    new DefaultAgentMessagePort(actors, rpc),
+                    gateway,
+                    router,
+                    handlers,
+                    businessAdmissions(actors, ActorMailboxPressurePolicy.disabled()),
+                    timeouts
+            );
+        }
+
         private static InboundAdmissionController businessAdmissions(
                 ActorSystem actors,
                 ActorMailboxPressurePolicy policy
@@ -573,6 +874,7 @@ class DefaultBusinessAgentMessagePortTest {
 
         @Override
         public void close() {
+            business.close();
             gateway.close();
             actors.close();
         }
@@ -582,6 +884,7 @@ class DefaultBusinessAgentMessagePortTest {
             LocalClusterTransport transport,
             ClusterRpcGateway callerGateway,
             ClusterRpcGateway ownerGateway,
+            BusinessAgentRpcEndpoint businessEndpoint,
             PlayerNode caller,
             PlayerNode owner
     ) implements AutoCloseable {
@@ -590,6 +893,14 @@ class DefaultBusinessAgentMessagePortTest {
         }
 
         static RemoteFixture create(java.util.function.Function<PlayerNode, InboundAdmissionController> ownerAdmissions) {
+            return create(ownerAdmissions, BusinessAgentIdempotencyConfig.defaults(), CLOCK);
+        }
+
+        static RemoteFixture create(
+                java.util.function.Function<PlayerNode, InboundAdmissionController> ownerAdmissions,
+                BusinessAgentIdempotencyConfig idempotencyConfig,
+                Clock clock
+        ) {
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
             LocalClusterTransport transport = new LocalClusterTransport();
             ClusterTopology topology = new ClusterTopology().allow(ServiceKind.GAME, ServiceKind.GAME);
@@ -601,13 +912,20 @@ class DefaultBusinessAgentMessagePortTest {
             ClusterRpcGateway ownerGateway = new ClusterRpcGateway(ownerDescriptor, directory(registry), topology, transport);
             PlayerNode owner = PlayerNode.localOwner(ownerDescriptor.id(), ownerGateway);
             new PlayerBusinessCommandEndpoint(owner.gateway()).bind(ownerGateway);
-            new BusinessAgentRpcEndpoint(owner.router(), owner.handlers(), ownerAdmissions.apply(owner)).bind(ownerGateway);
+            BusinessAgentRpcEndpoint businessEndpoint = new BusinessAgentRpcEndpoint(
+                    owner.router(),
+                    owner.handlers(),
+                    ownerAdmissions.apply(owner),
+                    idempotencyConfig,
+                    clock
+            );
+            businessEndpoint.bind(ownerGateway);
             PlayerNode caller = PlayerNode.remoteCaller(
                     callerDescriptor.id(),
                     callerGateway,
                     new AgentLocation(ownerDescriptor.id(), new ActorRef("player-10001"))
             );
-            return new RemoteFixture(transport, callerGateway, ownerGateway, caller, owner);
+            return new RemoteFixture(transport, callerGateway, ownerGateway, businessEndpoint, caller, owner);
         }
 
         @Override
@@ -655,6 +973,68 @@ class DefaultBusinessAgentMessagePortTest {
         void runAll() {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
+            }
+        }
+    }
+
+    private static final class AdjustableClock extends Clock {
+        private Instant instant;
+
+        private AdjustableClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        private void advance(Duration duration) {
+            instant = instant.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
+    }
+
+    private static final class ManualAskTimeoutScheduler implements AskTimeoutScheduler {
+        private final List<ManualTimeout> timeouts = new ArrayList<>();
+
+        @Override
+        public ScheduledAskTimeout schedule(Duration timeout, Runnable action) {
+            ManualTimeout scheduled = new ManualTimeout(action);
+            timeouts.add(scheduled);
+            return scheduled;
+        }
+
+        void fire() {
+            timeouts.forEach(ManualTimeout::fire);
+        }
+    }
+
+    private static final class ManualTimeout implements ScheduledAskTimeout {
+        private final Runnable action;
+        private boolean cancelled;
+
+        private ManualTimeout(Runnable action) {
+            this.action = action;
+        }
+
+        @Override
+        public void cancel() {
+            cancelled = true;
+        }
+
+        void fire() {
+            if (!cancelled) {
+                action.run();
             }
         }
     }

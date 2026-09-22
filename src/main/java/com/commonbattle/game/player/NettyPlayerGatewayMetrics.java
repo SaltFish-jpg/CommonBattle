@@ -1,11 +1,17 @@
 package com.commonbattle.game.player;
 
+import com.commonbattle.game.session.PlayerClientErrorCode;
+
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 玩家客户端网关服务级指标。
  */
 final class NettyPlayerGatewayMetrics {
+    private final Map<PlayerClientErrorCode, AtomicLong> rejectedCommandsByCode =
+            new EnumMap<>(PlayerClientErrorCode.class);
     private final AtomicLong acceptedLogins = new AtomicLong();
     private final AtomicLong failedLogins = new AtomicLong();
     private final AtomicLong authRejectedLogins = new AtomicLong();
@@ -23,6 +29,12 @@ final class NettyPlayerGatewayMetrics {
     private final AtomicLong invalidFrames = new AtomicLong();
     private final AtomicLong disconnectedSessions = new AtomicLong();
     private final AtomicLong idleTimeouts = new AtomicLong();
+
+    NettyPlayerGatewayMetrics() {
+        for (PlayerClientErrorCode code : PlayerClientErrorCode.values()) {
+            rejectedCommandsByCode.put(code, new AtomicLong());
+        }
+    }
 
     void acceptedLogin() {
         acceptedLogins.incrementAndGet();
@@ -49,11 +61,17 @@ final class NettyPlayerGatewayMetrics {
     }
 
     void rejectedCommand() {
+        rejectedCommand(PlayerClientErrorCode.INVALID_PAYLOAD);
+    }
+
+    void rejectedCommand(PlayerClientErrorCode code) {
         rejectedCommands.incrementAndGet();
+        rejectedCommandsByCode.get(normalize(code)).incrementAndGet();
     }
 
     void rateLimitedCommand() {
         rateLimitedCommands.incrementAndGet();
+        rejectedCommandsByCode.get(PlayerClientErrorCode.COMMAND_RATE_LIMITED).incrementAndGet();
     }
 
     void acceptedHeartbeat() {
@@ -110,7 +128,18 @@ final class NettyPlayerGatewayMetrics {
                 slowClientClosures.get(),
                 invalidFrames.get(),
                 disconnectedSessions.get(),
-                idleTimeouts.get()
+                idleTimeouts.get(),
+                rejectedCommandsByCode()
         );
+    }
+
+    private Map<PlayerClientErrorCode, Long> rejectedCommandsByCode() {
+        EnumMap<PlayerClientErrorCode, Long> result = new EnumMap<>(PlayerClientErrorCode.class);
+        rejectedCommandsByCode.forEach((code, counter) -> result.put(code, counter.get()));
+        return result;
+    }
+
+    private static PlayerClientErrorCode normalize(PlayerClientErrorCode code) {
+        return code == null ? PlayerClientErrorCode.INVALID_PAYLOAD : code;
     }
 }

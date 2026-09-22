@@ -8,6 +8,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.agent.remote.RemoteAgentDirectory;
 import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
+import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
@@ -21,10 +22,12 @@ import com.commonbattle.cluster.rpc.PlayerGrayRoutePolicy;
 import com.commonbattle.cluster.rpc.RoutedRpcGateway;
 import com.commonbattle.cluster.rpc.RpcRoutePolicyView;
 import com.commonbattle.game.agent.BusinessAgentHandlerRegistry;
+import com.commonbattle.game.agent.BusinessAgentIdempotencyConfig;
 import com.commonbattle.game.agent.BusinessAgentRpcEndpoint;
 import com.commonbattle.game.agent.DefaultBusinessAgentMessagePort;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.observability.ActorHotspotPolicy;
 import com.commonbattle.game.player.PlayerBusinessCommandBinder;
 import com.commonbattle.game.player.PlayerBusinessCommandEndpoint;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
@@ -261,6 +264,9 @@ record BootGamePlayerRuntime(
                 config.playerCommandRateLimitPolicy(),
                 config.playerCommandMailboxPressurePolicy(),
                 config.businessAgentMailboxPressurePolicy(),
+                config.businessAgentIdempotencyConfig(),
+                config.actorHotspotPolicy(),
+                config.actorHotspotRetryAfter(),
                 actorSchedules,
                 config.playerAutoSaveEnabled(),
                 config.playerAutoSaveInitialDelay(),
@@ -387,6 +393,9 @@ record BootGamePlayerRuntime(
                 commandRateLimitPolicy,
                 ActorMailboxPressurePolicy.disabled(),
                 ActorMailboxPressurePolicy.disabled(),
+                BusinessAgentIdempotencyConfig.defaults(),
+                ActorHotspotPolicy.defaults(),
+                Duration.ofMillis(100),
                 null,
                 false,
                 Duration.ZERO,
@@ -447,6 +456,9 @@ record BootGamePlayerRuntime(
                 commandRateLimitPolicy,
                 ActorMailboxPressurePolicy.disabled(),
                 ActorMailboxPressurePolicy.disabled(),
+                BusinessAgentIdempotencyConfig.defaults(),
+                ActorHotspotPolicy.defaults(),
+                Duration.ofMillis(100),
                 actorSchedules,
                 autoSaveEnabled,
                 autoSaveInitialDelay,
@@ -479,6 +491,9 @@ record BootGamePlayerRuntime(
             AgentRateLimitPolicy commandRateLimitPolicy,
             ActorMailboxPressurePolicy commandMailboxPressurePolicy,
             ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy,
+            BusinessAgentIdempotencyConfig businessAgentIdempotencyConfig,
+            ActorHotspotPolicy actorHotspotPolicy,
+            Duration actorHotspotRetryAfter,
             ActorScheduleRegistry actorSchedules,
             boolean autoSaveEnabled,
             Duration autoSaveInitialDelay,
@@ -507,6 +522,9 @@ record BootGamePlayerRuntime(
         Objects.requireNonNull(commandRateLimitPolicy, "commandRateLimitPolicy");
         Objects.requireNonNull(commandMailboxPressurePolicy, "commandMailboxPressurePolicy");
         Objects.requireNonNull(businessAgentMailboxPressurePolicy, "businessAgentMailboxPressurePolicy");
+        Objects.requireNonNull(businessAgentIdempotencyConfig, "businessAgentIdempotencyConfig");
+        Objects.requireNonNull(actorHotspotPolicy, "actorHotspotPolicy");
+        Objects.requireNonNull(actorHotspotRetryAfter, "actorHotspotRetryAfter");
         Objects.requireNonNull(autoSaveInitialDelay, "autoSaveInitialDelay");
         Objects.requireNonNull(autoSaveInterval, "autoSaveInterval");
         Objects.requireNonNull(businessResponseTimeout, "businessResponseTimeout");
@@ -565,18 +583,34 @@ record BootGamePlayerRuntime(
         PlayerLoginService logins = new PlayerLoginService(agents, sessions);
         InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
         LifecycleAwareAgentRouter lifecycleRouter = new LifecycleAwareAgentRouter(lifecycles, messages);
-        InboundAdmissionController commandAdmissions = new ActorMailboxPressureAdmissionController(
+        InboundAdmissionController commandMailboxAdmissions = new ActorMailboxPressureAdmissionController(
                 new TokenBucketAgentAdmissionController(commandRateLimitPolicy, clock),
                 actors,
                 commandMailboxPressurePolicy
         );
-        InboundAdmissionController businessAgentAdmissions = new ActorMailboxPressureAdmissionController(
+        InboundAdmissionController businessAgentMailboxAdmissions = new ActorMailboxPressureAdmissionController(
                 (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept(),
                 actors,
                 businessAgentMailboxPressurePolicy
         );
-        runtime.observe("playerCommandMailboxPressure", commandAdmissions);
-        runtime.observe("businessAgentMailboxPressure", businessAgentAdmissions);
+        InboundAdmissionController commandAdmissions = hotspotAdmissions(
+                runtime,
+                "playerCommandHotspotAdmission",
+                commandMailboxAdmissions,
+                actors,
+                actorHotspotPolicy,
+                actorHotspotRetryAfter
+        );
+        InboundAdmissionController businessAgentAdmissions = hotspotAdmissions(
+                runtime,
+                "businessAgentHotspotAdmission",
+                businessAgentMailboxAdmissions,
+                actors,
+                actorHotspotPolicy,
+                actorHotspotRetryAfter
+        );
+        runtime.observe("playerCommandMailboxPressure", commandMailboxAdmissions);
+        runtime.observe("businessAgentMailboxPressure", businessAgentMailboxAdmissions);
         PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                 sessions,
                 new PlayerCommandSequencer(),
@@ -603,23 +637,25 @@ record BootGamePlayerRuntime(
                 friendAgents::getOrCreate,
                 allianceAgents::getOrCreate
         );
-        DefaultBusinessAgentMessagePort businessMessages = new DefaultBusinessAgentMessagePort(
+        DefaultBusinessAgentMessagePort businessMessages = runtime.add("businessAgentMessages", new DefaultBusinessAgentMessagePort(
                 messages,
                 businessCommands,
                 lifecycleRouter,
                 businessAgentHandlers,
                 businessAgentAdmissions
-        );
+        ));
         PlayerBusinessCommandBinder.registerExamples(
                 dispatcher,
                 new PlayerBusinessCommandHandler(agents::getOrCreate, businessResponses)
         );
         if (rpc instanceof ClusterRpcGateway clusterRpc) {
             new PlayerBusinessCommandEndpoint(businessCommands).bind(clusterRpc);
-            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers, businessAgentAdmissions).bind(clusterRpc);
+            bindBusinessAgentRpcEndpoint(runtime, lifecycleRouter, businessAgentHandlers,
+                    businessAgentAdmissions, businessAgentIdempotencyConfig, clock, clusterRpc);
         } else if (rpc instanceof RoutedRpcGateway routed && routed.delegate() instanceof ClusterRpcGateway clusterRpc) {
             new PlayerBusinessCommandEndpoint(businessCommands).bind(clusterRpc);
-            new BusinessAgentRpcEndpoint(lifecycleRouter, businessAgentHandlers, businessAgentAdmissions).bind(clusterRpc);
+            bindBusinessAgentRpcEndpoint(runtime, lifecycleRouter, businessAgentHandlers,
+                    businessAgentAdmissions, businessAgentIdempotencyConfig, clock, clusterRpc);
         }
         PlayerAutoSaveScheduler autoSaves = null;
         if (autoSaveEnabled) {
@@ -670,6 +706,45 @@ record BootGamePlayerRuntime(
         runtime.observe("playerBusinessResponses", businessResponses);
         runtime.observe("playerAgentDrain", drain);
         return playerRuntime;
+    }
+
+    private static InboundAdmissionController hotspotAdmissions(
+            BootRuntime runtime,
+            String name,
+            InboundAdmissionController delegate,
+            ActorSystem actors,
+            ActorHotspotPolicy policy,
+            Duration retryAfter
+    ) {
+        ActorHotspotAdmissionController controller = new ActorHotspotAdmissionController(
+                delegate,
+                actors,
+                runtime.healthRegistry().actorSlowTasks(),
+                policy,
+                retryAfter
+        );
+        runtime.observe(name, controller);
+        return controller;
+    }
+
+    private static void bindBusinessAgentRpcEndpoint(
+            BootRuntime runtime,
+            LifecycleAwareAgentRouter lifecycleRouter,
+            BusinessAgentHandlerRegistry businessAgentHandlers,
+            InboundAdmissionController businessAgentAdmissions,
+            BusinessAgentIdempotencyConfig idempotencyConfig,
+            Clock clock,
+            ClusterRpcGateway clusterRpc
+    ) {
+        BusinessAgentRpcEndpoint endpoint = new BusinessAgentRpcEndpoint(
+                lifecycleRouter,
+                businessAgentHandlers,
+                businessAgentAdmissions,
+                idempotencyConfig,
+                clock
+        );
+        endpoint.bind(clusterRpc);
+        runtime.observe("businessAgentRpcEndpoint", endpoint);
     }
 
     private static RpcGateway routedPlayerRpc(ClusterNodeConfig config, ClusterRpcGateway gateway) {

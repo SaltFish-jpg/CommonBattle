@@ -196,6 +196,37 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         return Optional.ofNullable(agents.get(playerId));
     }
 
+    public PlayerGameAgentHandle restoreMigrated(PlayerStateSnapshot snapshot, ActorRef actorRef) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(actorRef, "actorRef");
+        PlayerProfile profile = PlayerProfile.restore(snapshot);
+        PlayerGameAgent agent = createAgent(actorRef, profile, snapshot);
+        PlayerGameAgentHandle handle = new PlayerGameAgentHandle(
+                agent,
+                snapshot,
+                false,
+                scheduleGrowthStaminaRecovery(agent)
+        );
+        PlayerGameAgentHandle previous = agents.putIfAbsent(snapshot.playerId(), handle);
+        if (previous != null) {
+            handle.cancelTimers();
+            throw new IllegalStateException("player agent already loaded: " + snapshot.playerId());
+        }
+        repository.save(snapshot.playerId(), snapshot);
+        return handle;
+    }
+
+    public Optional<PlayerGameAgentHandle> removeMigrated(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        PlayerGameAgentHandle removed = agents.remove(playerId);
+        if (removed != null) {
+            removed.cancelTimers();
+        }
+        return Optional.ofNullable(removed);
+    }
+
     public int loadedAgents() {
         return agents.size();
     }
@@ -311,10 +342,15 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         ActorRef self = actors.actor(actorId(playerId));
         lifecycles.activate(AgentIdentity.player(playerId), self.id());
         PlayerStateSnapshot snapshot = recovery.snapshot();
-        PlayerGameAgent agent = new PlayerGameAgent(
+        PlayerGameAgent agent = createAgent(self, recovery.profile(), snapshot);
+        return new PlayerGameAgentHandle(agent, snapshot, recovery.created(), scheduleGrowthStaminaRecovery(agent));
+    }
+
+    private PlayerGameAgent createAgent(ActorRef self, PlayerProfile profile, PlayerStateSnapshot snapshot) {
+        return new PlayerGameAgent(
                 messages,
                 self,
-                recovery.profile(),
+                profile,
                 configView,
                 clock,
                 serverOpenTime,
@@ -326,7 +362,6 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 asyncShopPurchases,
                 pushes
         );
-        return new PlayerGameAgentHandle(agent, snapshot, recovery.created(), scheduleGrowthStaminaRecovery(agent));
     }
 
     private String actorId(long playerId) {

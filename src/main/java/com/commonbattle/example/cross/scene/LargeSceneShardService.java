@@ -61,7 +61,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.shards = new ActorRef[shardCount];
         for (int i = 0; i < shardCount; i++) {
-            shards[i] = actors.actor("scene:" + serviceId.node() + ":" + sceneId + ":shard-" + i);
+            shards[i] = actors.actor(actorId(serviceId.node(), sceneId, i));
         }
         this.descriptor = ServiceMetadata.withProtocolVersion(ServiceMetadata.withLoad(new ServiceDescriptor(
                 serviceId,
@@ -138,6 +138,64 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     public Set<Long> shardPlayers(int shardIndex) {
         validateShardIndex(shardIndex);
         return Set.copyOf(playersByShard.getOrDefault(shardIndex, Set.of()));
+    }
+
+    public String sceneId() {
+        return sceneId;
+    }
+
+    public int shardCount() {
+        return shards.length;
+    }
+
+    public String actorId(int shardIndex) {
+        validateShardIndex(shardIndex);
+        return shards[shardIndex].id();
+    }
+
+    public LargeSceneShardAgentSnapshot exportShardForMigrationInCurrentMailbox(int shardIndex) {
+        validateShardIndex(shardIndex);
+        return new LargeSceneShardAgentSnapshot(sceneId, shardIndex, shards.length, shardPlayers(shardIndex));
+    }
+
+    public ScenePlacement restoreMigratedShard(LargeSceneShardAgentSnapshot snapshot, ActorRef actorRef) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(actorRef, "actorRef");
+        validateSnapshot(snapshot);
+        Set<Long> players = ConcurrentHashMap.newKeySet();
+        players.addAll(snapshot.players());
+        Set<Long> previousPlayers = players.isEmpty()
+                ? playersByShard.remove(snapshot.shardIndex())
+                : playersByShard.put(snapshot.shardIndex(), players);
+        if (previousPlayers != null) {
+            for (Long playerId : previousPlayers) {
+                ScenePlacement placement = placementsByPlayer.get(playerId);
+                if (placement != null && placement.shardIndex() == snapshot.shardIndex()) {
+                    placementsByPlayer.remove(playerId, placement);
+                }
+            }
+        }
+        ScenePlacement placement = new ScenePlacement(sceneId, actorRef, snapshot.shardIndex(), shards.length);
+        for (Long playerId : players) {
+            ScenePlacement previous = placementsByPlayer.put(playerId, placement);
+            if (previous != null && previous.shardIndex() != snapshot.shardIndex()) {
+                removeFromShard(playerId, previous.shardIndex());
+            }
+        }
+        return placement;
+    }
+
+    public LargeSceneShardAgentSnapshot removeMigratedShard(int shardIndex) {
+        validateShardIndex(shardIndex);
+        Set<Long> removed = playersByShard.remove(shardIndex);
+        Set<Long> snapshotPlayers = removed == null ? Set.of() : Set.copyOf(removed);
+        for (Long playerId : snapshotPlayers) {
+            ScenePlacement placement = placementsByPlayer.get(playerId);
+            if (placement != null && placement.shardIndex() == shardIndex) {
+                placementsByPlayer.remove(playerId, placement);
+            }
+        }
+        return new LargeSceneShardAgentSnapshot(sceneId, shardIndex, shards.length, snapshotPlayers);
     }
 
     public SceneShardTickStats tickStats() {
@@ -237,5 +295,19 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         if (shardIndex < 0 || shardIndex >= shards.length) {
             throw new IllegalArgumentException("invalid shard index: " + shardIndex);
         }
+    }
+
+    private void validateSnapshot(LargeSceneShardAgentSnapshot snapshot) {
+        if (!sceneId.equals(snapshot.sceneId())) {
+            throw new IllegalArgumentException("snapshot scene mismatch: " + snapshot.sceneId());
+        }
+        if (snapshot.shardCount() != shards.length) {
+            throw new IllegalArgumentException("snapshot shard count mismatch: " + snapshot.shardCount());
+        }
+        validateShardIndex(snapshot.shardIndex());
+    }
+
+    private static String actorId(String node, String sceneId, int shardIndex) {
+        return "scene:" + node + ":" + sceneId + ":shard-" + shardIndex;
     }
 }

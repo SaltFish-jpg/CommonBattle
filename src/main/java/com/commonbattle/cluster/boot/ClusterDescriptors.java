@@ -12,6 +12,7 @@ import com.commonbattle.game.config.GameConfigOperations;
 import com.commonbattle.game.agent.BusinessAgentRpcOperations;
 import com.commonbattle.game.chat.ChatOperations;
 import com.commonbattle.game.player.PlayerBusinessRpcOperations;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotOperations;
 import com.commonbattle.game.profile.ProfileSnapshotOperations;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.shop.ShopStockOperations;
@@ -76,6 +77,7 @@ final class ClusterDescriptors {
                     FriendSnapshotOperations.GET,
                     BusinessAgentRpcOperations.DISPATCH,
                     PlayerBusinessRpcOperations.DISPATCH,
+                    PlayerDomainProjectionSnapshotOperations.GET,
                     ProfileSnapshotOperations.GET,
                     AgentMigrationOperations.ACCEPT
             );

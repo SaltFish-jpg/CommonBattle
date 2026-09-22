@@ -1,8 +1,11 @@
 package com.commonbattle.game.bag;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessFailure;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BagServiceTest {
@@ -27,6 +30,11 @@ class BagServiceTest {
         catalog.register(new ItemDefinition("gold", "currency", 999999));
         BagService service = new BagService(catalog);
 
-        assertThrows(IllegalStateException.class, () -> service.consume(new PlayerBag(), new ItemStack("gold", 1)));
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> service.consume(new PlayerBag(), new ItemStack("gold", 1))
+        );
+        GameBusinessFailure failure = assertInstanceOf(GameBusinessFailure.class, error);
+        assertEquals(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM, failure.code());
     }
 }

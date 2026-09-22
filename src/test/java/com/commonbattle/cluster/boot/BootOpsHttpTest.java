@@ -16,9 +16,13 @@ import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.event.OwnerEventInterestControl;
+import com.commonbattle.game.event.OwnerEventRepairDispatcher;
+import com.commonbattle.game.event.OwnerEventRepairScheduler;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.observability.OpsHttpServer;
 import com.commonbattle.runtime.DrainableComponent;
 import org.junit.jupiter.api.Test;
@@ -31,12 +35,15 @@ import java.net.http.HttpResponse;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BootOpsHttpTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-02T00:00:00Z"), ZoneOffset.UTC);
@@ -116,6 +123,89 @@ class BootOpsHttpTest {
         }
     }
 
+    @Test
+    void bootOpsHttpUsesConfiguredAdminTokenForMutatingOps() throws Exception {
+        Properties properties = properties(freePort());
+        properties.setProperty("cluster.ops.admin.token", "secret");
+        properties.setProperty("cluster.ops.admin.token.header", "X-Ops-Token");
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+        ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+        ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
+        BootRuntime runtime = new BootRuntime();
+        ActorSystem actors = runtime.add("actors", new ActorSystem(Runnable::run, 64));
+        RecordingDrainable drainable = new RecordingDrainable();
+        runtime.observe("commandIngress", drainable);
+        try (OpsHttpServer server = runtime.add("opsHttp", BootOpsHttp.start(
+                config,
+                local,
+                actors,
+                directory,
+                runtime.healthRegistry()
+        ))) {
+            HttpResult unauthDrain = post(server, "/drain", null);
+            HttpResult authDrain = post(server, "/drain", "secret");
+
+            assertEquals(401, unauthDrain.statusCode());
+            assertEquals("{\"error\":\"unauthorized\"}", unauthDrain.body());
+            assertEquals(200, authDrain.statusCode());
+            assertTrue(drainable.isDraining());
+        } finally {
+            runtime.close();
+        }
+    }
+
+    @Test
+    void bootOpsHttpExposesAndAuditsConfiguredOwnerRepairIsolationAdmins() throws Exception {
+        Properties properties = properties(freePort());
+        properties.setProperty("cluster.event.repair.topic.profile.changed.owner.isolation.max.failures", "1");
+        properties.setProperty("cluster.event.repair.topic.profile.changed.owner.isolation.duration.millis", "60000");
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+        ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+        ClusterDirectory directory = new ClusterDirectory(new InMemoryServiceRegistry());
+        BootRuntime runtime = new BootRuntime();
+        OwnerEventRepairDispatcher dispatcher = null;
+        try {
+            ActorSystem actors = runtime.add("actors", new ActorSystem(Runnable::run, 64));
+            dispatcher = BootOwnerEventRepairs.repairDispatcher(config);
+            OwnerEventInterestControl repairs = BootOwnerEventRepairs.repairControl(
+                    runtime,
+                    config,
+                    dispatcher,
+                    "profileEventRepairs",
+                    ProfileChangedEvent.TOPIC,
+                    new FailingRepairInterests()
+            );
+            OwnerEventRepairScheduler scheduler = (OwnerEventRepairScheduler) repairs;
+            String ownerKey = ProfileChangedEvent.ownerKey(10001L);
+            repairs.requestRepairOwner(ownerKey);
+            assertThrows(IllegalStateException.class, scheduler::drainOnce);
+
+            try (OpsHttpServer server = runtime.add("opsHttp", BootOpsHttp.start(
+                    config,
+                    local,
+                    actors,
+                    directory,
+                    runtime.healthRegistry()
+            ))) {
+                HttpResult isolated = get(server, "/owner-repair/isolated");
+                HttpResult release = post(server, "/owner-repair/release?ownerKey=profile%3A10001", null);
+                HttpResult health = get(server, "/health");
+
+                assertEquals(200, isolated.statusCode());
+                assertTrue(isolated.body().contains("\"ownerKey\":\"" + ownerKey + "\""));
+                assertEquals(200, release.statusCode());
+                assertEquals("{\"released\":1,\"ownerKey\":\"" + ownerKey + "\"}", release.body());
+                assertTrue(health.body().contains("\"ownerRepairOps\":{\"auditCount\":1,\"retainedEntries\":1,"
+                        + "\"recordedEntries\":1,\"releaseOps\":1,\"releaseAllOps\":0,\"releasedOwners\":1"));
+            }
+        } finally {
+            runtime.close();
+            if (dispatcher != null) {
+                dispatcher.close();
+            }
+        }
+    }
+
     private static Properties properties(int opsPort) {
         Properties properties = new Properties();
         properties.setProperty("cluster.kind", "GAME");
@@ -138,6 +228,32 @@ class BootOpsHttpTest {
         }
     }
 
+    private static HttpResult post(OpsHttpServer server, String path, String token) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + path))
+                .POST(HttpRequest.BodyPublishers.noBody());
+        if (token != null) {
+            builder.header("X-Ops-Token", token);
+        }
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                builder.build(),
+                HttpResponse.BodyHandlers.ofString()
+        );
+        return new HttpResult(response.statusCode(), response.body());
+    }
+
+    private static HttpResult get(OpsHttpServer server, String path) throws Exception {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + path))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString()
+        );
+        return new HttpResult(response.statusCode(), response.body());
+    }
+
+    private record HttpResult(int statusCode, String body) {
+    }
+
     private static final class RecordingDrainable implements DrainableComponent {
         private final AtomicBoolean draining = new AtomicBoolean();
 
@@ -154,6 +270,21 @@ class BootOpsHttpTest {
         @Override
         public boolean isDraining() {
             return draining.get();
+        }
+    }
+
+    private static final class FailingRepairInterests implements OwnerEventInterestControl {
+        @Override
+        public void watchOwner(String ownerKey) {
+        }
+
+        @Override
+        public void unwatchOwner(String ownerKey) {
+        }
+
+        @Override
+        public void requestRepairOwners(Collection<String> ownerKeys) {
+            throw new IllegalStateException("repair failed");
         }
     }
 }

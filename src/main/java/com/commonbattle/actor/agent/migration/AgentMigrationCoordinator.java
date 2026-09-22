@@ -25,6 +25,7 @@ public final class AgentMigrationCoordinator {
     private final AgentMigrationTaskStore taskStore;
     private final AgentMigrationTaskIdGenerator taskIds;
     private final Clock clock;
+    private final AgentMigrationSourceHook sourceHook;
     private final AgentMigrationCoordinatorMetrics metrics = new AgentMigrationCoordinatorMetrics();
 
     public AgentMigrationCoordinator(
@@ -57,6 +58,21 @@ public final class AgentMigrationCoordinator {
             AgentMigrationTaskIdGenerator taskIds,
             Clock clock
     ) {
+        this(sourceLifecycles, directory, client, completionExecutor, policy, taskStore, taskIds, clock,
+                AgentMigrationSourceHook.noop());
+    }
+
+    public AgentMigrationCoordinator(
+            AgentLifecycleManager sourceLifecycles,
+            AgentDirectory directory,
+            AgentMigrationClient client,
+            Executor completionExecutor,
+            AgentMigrationPolicy policy,
+            AgentMigrationTaskStore taskStore,
+            AgentMigrationTaskIdGenerator taskIds,
+            Clock clock,
+            AgentMigrationSourceHook sourceHook
+    ) {
         this.sourceLifecycles = Objects.requireNonNull(sourceLifecycles, "sourceLifecycles");
         this.directory = Objects.requireNonNull(directory, "directory");
         this.client = Objects.requireNonNull(client, "client");
@@ -65,6 +81,7 @@ public final class AgentMigrationCoordinator {
         this.taskStore = Objects.requireNonNull(taskStore, "taskStore");
         this.taskIds = Objects.requireNonNull(taskIds, "taskIds");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.sourceHook = Objects.requireNonNull(sourceHook, "sourceHook");
     }
 
     public boolean migrate(AgentIdentity identity, AgentLocation target, AgentMigrationStatePacker packer) {
@@ -126,6 +143,19 @@ public final class AgentMigrationCoordinator {
         );
         taskStore.mark(moved.taskId(), AgentMigrationTaskStatus.MOVED, "", moved.updatedAt());
         try {
+            sourceHook.sourceMoved(moved);
+        } catch (RuntimeException e) {
+            boolean rolledBack = rollback(moved);
+            callback.completed(result(
+                    moved,
+                    rolledBack
+                            ? AgentMigrationResultStatus.TARGET_FAILED_ROLLED_BACK
+                            : AgentMigrationResultStatus.TARGET_FAILED_ROLLBACK_FAILED,
+                    "source_cleanup_failed:" + messageOf(e)
+            ));
+            return;
+        }
+        try {
             completionExecutor.execute(() -> acceptTargetOrRollback(moved, callback));
         } catch (RejectedExecutionException e) {
             metrics.completionRejected();
@@ -145,6 +175,7 @@ public final class AgentMigrationCoordinator {
             AgentMigrationResultCallback callback
     ) {
         AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                task.taskId(),
                 task.identity(),
                 task.target().actorRef().id(),
                 task.snapshot().stateType(),
@@ -201,9 +232,17 @@ public final class AgentMigrationCoordinator {
     private boolean rollback(AgentMigrationTask task) {
         if (directory.move(task.identity(), task.target(), task.source())) {
             sourceLifecycles.resumeAfterMigrationRollback(task.identity(), task.source());
-            metrics.rollbackSucceeded();
-            taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLED_BACK, "", clock.instant());
-            return true;
+            try {
+                sourceHook.rollbackRestored(task);
+                metrics.rollbackSucceeded();
+                taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLED_BACK, "", clock.instant());
+                return true;
+            } catch (RuntimeException e) {
+                metrics.rollbackFailed();
+                taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLBACK_FAILED,
+                        "source_restore_failed:" + messageOf(e), clock.instant());
+                return false;
+            }
         } else {
             metrics.rollbackFailed();
             taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLBACK_FAILED, "directory_move_failed",
@@ -279,5 +318,9 @@ public final class AgentMigrationCoordinator {
                 status,
                 reason
         );
+    }
+
+    private static String messageOf(RuntimeException e) {
+        return e.getMessage() == null || e.getMessage().isBlank() ? e.getClass().getName() : e.getMessage();
     }
 }

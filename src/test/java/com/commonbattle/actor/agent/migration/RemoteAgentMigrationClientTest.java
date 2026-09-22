@@ -22,6 +22,7 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.persistence.InMemoryAtomicBytesStore;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -33,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,9 +60,8 @@ class RemoteAgentMigrationClientTest {
         targetDirectory.watch(ServiceKind.GAME);
 
         RecordingExecutor sourceExecutor = new RecordingExecutor();
-        RecordingExecutor targetExecutor = new RecordingExecutor();
         ActorSystem sourceActors = new ActorSystem(sourceExecutor, 64);
-        ActorSystem targetActors = new ActorSystem(targetExecutor, 64);
+        ActorSystem targetActors = new ActorSystem(Runnable::run, 64);
         InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
         AgentLifecycleManager sourceLifecycles = new AgentLifecycleManager(sourceGame.id(), sourceActors, agents, CLOCK);
         AgentLifecycleManager targetLifecycles = new AgentLifecycleManager(targetGame.id(), targetActors, agents, CLOCK);
@@ -88,7 +89,6 @@ class RemoteAgentMigrationClientTest {
                         "hp=100".getBytes(StandardCharsets.UTF_8)
                 )
         );
-        targetExecutor.runNext();
         LifecycleAwareAgentRouter targetRouter = new LifecycleAwareAgentRouter(
                 targetLifecycles,
                 new DefaultAgentMessagePort(targetActors, new NoopRpcGateway())
@@ -141,12 +141,133 @@ class RemoteAgentMigrationClientTest {
         assertEquals(0, targetExecutor.pending());
     }
 
+    @Test
+    void targetAcceptIsIdempotentForSameMigrationTask() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor sourceGame = descriptor("game-1", 9001);
+        ServiceDescriptor targetGame = descriptor("game-2", 9002);
+        registry.register(sourceGame);
+        registry.register(targetGame);
+        ClusterDirectory sourceDirectory = new ClusterDirectory(registry);
+        sourceDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory targetDirectory = new ClusterDirectory(registry);
+        targetDirectory.watch(ServiceKind.GAME);
+
+        RecordingExecutor sourceExecutor = new RecordingExecutor();
+        ActorSystem sourceActors = new ActorSystem(sourceExecutor, 64);
+        ActorSystem targetActors = new ActorSystem(Runnable::run, 64);
+        InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
+        AgentLifecycleManager sourceLifecycles = new AgentLifecycleManager(sourceGame.id(), sourceActors, agents, CLOCK);
+        AgentLifecycleManager targetLifecycles = new AgentLifecycleManager(targetGame.id(), targetActors, agents, CLOCK);
+        ClusterRpcGateway targetGateway = new ClusterRpcGateway(targetGame, targetDirectory, topology, transport);
+        AtomicInteger restores = new AtomicInteger();
+        new AgentMigrationTargetEndpoint(targetLifecycles, (request, context) -> restores.incrementAndGet())
+                .bind(targetGateway);
+        ClusterRpcGateway sourceGateway = new ClusterRpcGateway(sourceGame, sourceDirectory, topology, transport);
+        RemoteAgentMigrationClient migrationClient = new RemoteAgentMigrationClient(sourceGateway);
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AgentLocation targetLocation = new AgentLocation(targetGame.id(), new ActorRef("player-10001"));
+        sourceLifecycles.activate(player, "player-10001");
+        sourceExecutor.runNext();
+        sourceLifecycles.migrate(player, targetLocation, ignored -> {
+        });
+        sourceExecutor.runNext();
+        AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                "migration-10001",
+                player,
+                "player-10001",
+                "player.snapshot.v1",
+                "hp=100".getBytes(StandardCharsets.UTF_8)
+        );
+
+        AgentMigrationAcceptResponse first = migrationClient.accept(targetGame.id(), request);
+        AgentMigrationAcceptResponse replay = migrationClient.accept(targetGame.id(), request);
+
+        assertTrue(first.accepted(), first.reason());
+        assertTrue(replay.accepted(), replay.reason());
+        assertEquals(1, restores.get());
+        assertEquals(AgentLifecycleState.ACTIVE, targetLifecycles.record(player).orElseThrow().state());
+    }
+
+    @Test
+    void targetAcceptReceiptCanSurviveEndpointRecreation() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor sourceGame = descriptor("game-1", 9001);
+        ServiceDescriptor targetGame = descriptor("game-2", 9002);
+        registry.register(sourceGame);
+        registry.register(targetGame);
+        ClusterDirectory sourceDirectory = new ClusterDirectory(registry);
+        sourceDirectory.watch(ServiceKind.GAME);
+        ClusterDirectory targetDirectory = new ClusterDirectory(registry);
+        targetDirectory.watch(ServiceKind.GAME);
+
+        RecordingExecutor sourceExecutor = new RecordingExecutor();
+        ActorSystem sourceActors = new ActorSystem(sourceExecutor, 64);
+        ActorSystem targetActors = new ActorSystem(Runnable::run, 64);
+        InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
+        AgentLifecycleManager sourceLifecycles = new AgentLifecycleManager(sourceGame.id(), sourceActors, agents, CLOCK);
+        AgentLifecycleManager targetLifecycles = new AgentLifecycleManager(targetGame.id(), targetActors, agents, CLOCK);
+        ClusterRpcGateway targetGateway = new ClusterRpcGateway(targetGame, targetDirectory, topology, transport);
+        InMemoryAtomicBytesStore receiptBytes = new InMemoryAtomicBytesStore();
+        AtomicInteger restores = new AtomicInteger();
+        new AgentMigrationTargetEndpoint(
+                targetLifecycles,
+                (request, context) -> restores.incrementAndGet(),
+                receiptStore(receiptBytes)
+        ).bind(targetGateway);
+        ClusterRpcGateway sourceGateway = new ClusterRpcGateway(sourceGame, sourceDirectory, topology, transport);
+        RemoteAgentMigrationClient migrationClient = new RemoteAgentMigrationClient(sourceGateway);
+        AgentIdentity player = AgentIdentity.player(10001L);
+        AgentLocation targetLocation = new AgentLocation(targetGame.id(), new ActorRef("player-10001"));
+        sourceLifecycles.activate(player, "player-10001");
+        sourceExecutor.runNext();
+        sourceLifecycles.migrate(player, targetLocation, ignored -> {
+        });
+        sourceExecutor.runNext();
+        AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                "migration-10001",
+                player,
+                "player-10001",
+                "player.snapshot.v1",
+                "hp=100".getBytes(StandardCharsets.UTF_8)
+        );
+        AgentMigrationAcceptResponse first = migrationClient.accept(targetGame.id(), request);
+
+        AgentLifecycleManager recreatedLifecycles =
+                new AgentLifecycleManager(targetGame.id(), targetActors, agents, CLOCK);
+        new AgentMigrationTargetEndpoint(
+                recreatedLifecycles,
+                (next, context) -> restores.incrementAndGet(),
+                receiptStore(receiptBytes)
+        ).bind(targetGateway);
+        AgentMigrationAcceptResponse replay = migrationClient.accept(targetGame.id(), request);
+
+        assertTrue(first.accepted(), first.reason());
+        assertTrue(replay.accepted(), replay.reason());
+        assertEquals(1, restores.get());
+        assertTrue(recreatedLifecycles.record(player).isEmpty());
+    }
+
     private static ServiceDescriptor descriptor(String node, int port) {
         return new ServiceDescriptor(
                 ServiceId.of(ServiceKind.GAME, "r1", node),
                 new ServiceEndpoint("127.0.0.1", port),
                 Set.of(AgentMigrationOperations.ACCEPT),
                 Map.of()
+        );
+    }
+
+    private static SerializedAgentMigrationTargetReceiptStore receiptStore(InMemoryAtomicBytesStore bytes) {
+        return new SerializedAgentMigrationTargetReceiptStore(
+                bytes,
+                new ProtoAgentMigrationTargetReceiptSerializer(),
+                CLOCK
         );
     }
 

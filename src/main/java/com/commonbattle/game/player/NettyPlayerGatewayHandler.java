@@ -199,7 +199,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         }
         PlayerSession session = context.channel().attr(SESSION).get();
         if (session == null) {
-            metrics.rejectedCommand();
+            metrics.rejectedCommand(PlayerClientErrorCode.NOT_LOGGED_IN);
             rejectAndClose(context, command.playerId(), command.sequence(),
                     PlayerClientErrorCode.NOT_LOGGED_IN, "command requires login");
             return;
@@ -207,7 +207,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         if (session.playerId() != command.playerId()
                 || !session.sessionId().equals(command.sessionId())
                 || session.epoch() != command.sessionEpoch()) {
-            metrics.rejectedCommand();
+            metrics.rejectedCommand(PlayerClientErrorCode.SESSION_EXPIRED);
             rejectAndClose(context, command.playerId(), command.sequence(),
                     PlayerClientErrorCode.SESSION_EXPIRED, "stale player session");
             return;
@@ -222,7 +222,23 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
                     commandRateLimiter.retryAfter());
             return;
         }
-        commands.accept(command);
+        PlayerClientCommandAcceptResult result;
+        try {
+            result = commands.accept(command);
+        } catch (RuntimeException e) {
+            metrics.rejectedCommand(PlayerClientErrorCode.COMMAND_INGRESS_FAILED);
+            rejectAndClose(context, command.playerId(), command.sequence(),
+                    PlayerClientErrorCode.COMMAND_INGRESS_FAILED, message(e));
+            return;
+        }
+        if (!result.accepted()) {
+            metrics.rejectedCommand(result.code());
+            if (result.closeConnection()) {
+                rejectAndClose(context, command.playerId(), command.sequence(),
+                        result.code(), result.message(), result.retryAfter());
+            }
+            return;
+        }
         metrics.acceptedCommand();
     }
 
@@ -380,5 +396,11 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
                 Math.max(1, sequence),
                 clock.instant()
         )).addListener(ignored -> channel.close());
+    }
+
+    private static String message(RuntimeException error) {
+        return error.getMessage() == null || error.getMessage().isBlank()
+                ? error.getClass().getSimpleName()
+                : error.getMessage();
     }
 }

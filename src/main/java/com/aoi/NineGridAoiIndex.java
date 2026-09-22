@@ -1,7 +1,9 @@
 package com.aoi;
 
-import com.commonbattle.core.EntityId;
 
+
+
+import com.commonbattle.battle.state.EntityId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;

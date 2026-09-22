@@ -1,5 +1,7 @@
 package com.commonbattle.game.activity;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessFailure;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.bag.ItemDefinition;
@@ -14,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ActivityServiceTest {
@@ -33,13 +36,27 @@ class ActivityServiceTest {
         PlayerBag bag = new PlayerBag();
 
         service.increase(playerActivities, "kill-3", 2);
-        assertThrows(IllegalStateException.class, () -> service.claim(playerActivities, bag, "kill-3"));
+        IllegalStateException notReady = assertThrows(
+                IllegalStateException.class,
+                () -> service.claim(playerActivities, bag, "kill-3")
+        );
+        assertEquals(
+                GameBusinessErrorCodes.ACTIVITY_REWARD_NOT_READY,
+                assertInstanceOf(GameBusinessFailure.class, notReady).code()
+        );
 
         service.increase(playerActivities, "kill-3", 1);
         service.claim(playerActivities, bag, "kill-3");
 
         assertEquals(10, bag.count("gem"));
-        assertThrows(IllegalStateException.class, () -> service.claim(playerActivities, bag, "kill-3"));
+        IllegalStateException alreadyClaimed = assertThrows(
+                IllegalStateException.class,
+                () -> service.claim(playerActivities, bag, "kill-3")
+        );
+        assertEquals(
+                GameBusinessErrorCodes.ACTIVITY_REWARD_ALREADY_CLAIMED,
+                assertInstanceOf(GameBusinessFailure.class, alreadyClaimed).code()
+        );
     }
 
     @Test
@@ -68,8 +85,12 @@ class ActivityServiceTest {
                 ActivityParticipant.none()
         );
 
-        assertThrows(IllegalStateException.class, () ->
+        IllegalStateException notOpen = assertThrows(IllegalStateException.class, () ->
                 service.recordLogin(playerActivities, beforeOpen, "spring-login"));
+        assertEquals(
+                GameBusinessErrorCodes.ACTIVITY_NOT_OPEN,
+                assertInstanceOf(GameBusinessFailure.class, notOpen).code()
+        );
 
         service.recordLogin(playerActivities, opened, "spring-login");
 
@@ -108,10 +129,18 @@ class ActivityServiceTest {
         );
         PlayerActivities playerActivities = new PlayerActivities();
 
-        assertThrows(IllegalStateException.class, () ->
+        IllegalStateException tooEarlyFailure = assertThrows(IllegalStateException.class, () ->
                 service.increase(playerActivities, tooEarly, "open-day-2", 1));
-        assertThrows(IllegalStateException.class, () ->
+        assertEquals(
+                GameBusinessErrorCodes.ACTIVITY_NOT_OPEN,
+                assertInstanceOf(GameBusinessFailure.class, tooEarlyFailure).code()
+        );
+        IllegalStateException lowLevelFailure = assertThrows(IllegalStateException.class, () ->
                 service.increase(playerActivities, lowLevel, "open-day-2", 1));
+        assertEquals(
+                GameBusinessErrorCodes.ACTIVITY_NOT_ELIGIBLE,
+                assertInstanceOf(GameBusinessFailure.class, lowLevelFailure).code()
+        );
 
         service.increase(playerActivities, eligible, "open-day-2", 1);
 

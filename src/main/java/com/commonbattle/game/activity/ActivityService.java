@@ -1,5 +1,8 @@
 package com.commonbattle.game.activity;
 
+import com.commonbattle.game.GameBusinessErrorCodes;
+import com.commonbattle.game.GameBusinessIllegalArgumentException;
+import com.commonbattle.game.GameBusinessIllegalStateException;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.PlayerBag;
 import com.commonbattle.game.player.event.PlayerDomainEvent;
@@ -27,7 +30,10 @@ public final class ActivityService {
         ActivityDefinition definition = catalog.require(activityId);
         ensureAvailable(definition, access);
         if (definition.type() != ActivityType.LOGIN) {
-            throw new IllegalArgumentException(activityId + " is not a login activity");
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.ACTIVITY_WRONG_TYPE,
+                    activityId + " is not a login activity"
+            );
         }
         ActivityProgress progress = activities.progress(activityId);
         if (progress.value() == 0) {
@@ -41,12 +47,18 @@ public final class ActivityService {
 
     public void increase(PlayerActivities activities, ActivityAccessContext access, String activityId, int delta) {
         if (delta <= 0) {
-            throw new IllegalArgumentException("delta must be positive");
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.ACTIVITY_INVALID_DELTA,
+                    "delta must be positive"
+            );
         }
         ActivityDefinition definition = catalog.require(activityId);
         ensureAvailable(definition, access);
         if (definition.type() != ActivityType.COUNTER) {
-            throw new IllegalArgumentException(activityId + " is not a counter activity");
+            throw new GameBusinessIllegalArgumentException(
+                    GameBusinessErrorCodes.ACTIVITY_WRONG_TYPE,
+                    activityId + " is not a counter activity"
+            );
         }
         activities.progress(activityId).increase(delta);
     }
@@ -60,10 +72,16 @@ public final class ActivityService {
         ensureAvailable(definition, access);
         ActivityProgress progress = activities.progress(activityId);
         if (progress.claimed()) {
-            throw new IllegalStateException("Activity reward already claimed: " + activityId);
+            throw new GameBusinessIllegalStateException(
+                    GameBusinessErrorCodes.ACTIVITY_REWARD_ALREADY_CLAIMED,
+                    "Activity reward already claimed: " + activityId
+            );
         }
         if (progress.value() < definition.threshold()) {
-            throw new IllegalStateException("Activity reward is not ready: " + activityId);
+            throw new GameBusinessIllegalStateException(
+                    GameBusinessErrorCodes.ACTIVITY_REWARD_NOT_READY,
+                    "Activity reward is not ready: " + activityId
+            );
         }
         // 活动领奖边界：先标记已领取，再发奖励，避免奖励发放链路触发重入时重复领取。
         progress.claim();
@@ -95,10 +113,16 @@ public final class ActivityService {
     private void ensureAvailable(ActivityDefinition definition, ActivityAccessContext access) {
         // 活动结算入口边界：开放时间和参与条件必须先于进度、领奖、发包执行。
         if (!definition.schedule().isOpen(access)) {
-            throw new IllegalStateException("Activity is not open: " + definition.activityId());
+            throw new GameBusinessIllegalStateException(
+                    GameBusinessErrorCodes.ACTIVITY_NOT_OPEN,
+                    "Activity is not open: " + definition.activityId()
+            );
         }
         if (!definition.participation().allows(access)) {
-            throw new IllegalStateException("Activity participant is not eligible: " + definition.activityId());
+            throw new GameBusinessIllegalStateException(
+                    GameBusinessErrorCodes.ACTIVITY_NOT_ELIGIBLE,
+                    "Activity participant is not eligible: " + definition.activityId()
+            );
         }
     }
 }

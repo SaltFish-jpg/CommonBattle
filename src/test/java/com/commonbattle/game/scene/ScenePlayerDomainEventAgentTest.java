@@ -8,12 +8,14 @@ import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshot;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,7 +58,8 @@ class ScenePlayerDomainEventAgentTest {
     @Test
     void gapMarksSceneDomainViewStale() {
         RecordingExecutor executor = new RecordingExecutor();
-        ScenePlayerDomainEventAgent scene = createScene(executor);
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        ScenePlayerDomainEventAgent scene = createScene(executor, interests);
 
         scene.enter(10001L);
         executor.runNext();
@@ -66,6 +69,33 @@ class ScenePlayerDomainEventAgentTest {
         assertEquals(1, scene.stageClears(10001L).orElseThrow());
         assertTrue(scene.stale(10001L));
         assertEquals(3, scene.revisionOf(10001L));
+        assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), interests.repairs);
+    }
+
+    @Test
+    void snapshotRefreshRunsInsideSceneMailboxAndClearsStaleProjection() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ScenePlayerDomainEventAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onPlayerDomainEvent(event(10001L, 3, 1));
+        executor.runNext();
+
+        scene.refresh(new PlayerDomainProjectionSnapshot(
+                10001L,
+                3,
+                Map.of("forest-1", 2, "cave-1", 1)
+        ));
+
+        assertEquals(1, scene.stageClears(10001L).orElseThrow());
+        assertTrue(scene.stale(10001L));
+
+        executor.runNext();
+
+        assertEquals(3, scene.stageClears(10001L).orElseThrow());
+        assertEquals(3, scene.revisionOf(10001L));
+        assertFalse(scene.stale(10001L));
     }
 
     @Test
@@ -134,6 +164,7 @@ class ScenePlayerDomainEventAgentTest {
     private static final class RecordingOwnerInterests implements OwnerEventInterestControl {
         private final List<String> watched = new ArrayList<>();
         private final List<String> unwatched = new ArrayList<>();
+        private final List<String> repairs = new ArrayList<>();
 
         @Override
         public void watchOwner(String ownerKey) {
@@ -143,6 +174,11 @@ class ScenePlayerDomainEventAgentTest {
         @Override
         public void unwatchOwner(String ownerKey) {
             unwatched.add(ownerKey);
+        }
+
+        @Override
+        public void requestRepairOwner(String ownerKey) {
+            repairs.add(ownerKey);
         }
     }
 }
