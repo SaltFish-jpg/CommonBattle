@@ -256,6 +256,43 @@ class ProfileInterestSubscriptionTest {
         }
     }
 
+    @Test
+    void businessCanReadFreshSnapshotAtEventRevisionAcrossServices() throws Exception {
+        try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
+            LocalProfileCache sceneCache = new LocalProfileCache();
+            RecordingExecutor repairExecutor = new RecordingExecutor();
+            sceneCache.apply(profileEvent(10001L, 1, "avatar_1"));
+            fixture.repository().save(profileEvent(10001L, 3, "avatar_3").snapshot());
+
+            try (ProfileInterestSubscription interests = new ProfileInterestSubscription(
+                    fixture.sceneEvents(),
+                    sceneCache,
+                    new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1)),
+                    repairExecutor
+            )) {
+                ProfileRuntime runtime = new ProfileRuntime(
+                        sceneCache,
+                        interests,
+                        new RemoteProfileSnapshotReader(fixture.sceneGateway(), Duration.ofSeconds(1))
+                );
+                interests.watch(10001L);
+                ProfileChangedEvent event = profileEvent(10001L, 3, "avatar_gap");
+                fixture.gameEvents().publish(event);
+
+                assertTrue(sceneCache.isStale(10001L));
+                assertEquals(1, repairExecutor.pending());
+
+                ProfileReadResult result = runtime.readAtLeast(event);
+
+                assertEquals(ProfileReadStatus.REFRESHED, result.status());
+                assertTrue(result.fresh());
+                assertEquals("avatar_3", result.profile().orElseThrow().snapshot().appearance().avatar());
+                assertFalse(sceneCache.isStale(10001L));
+                assertEquals(new ProfileRuntimeStats(1, 0, 0, 0, 1, 0, 0, 0), runtime.stats());
+            }
+        }
+    }
+
     private static ProfileChangedEvent profileEvent(long playerId, long revision, String avatar) {
         return new ProfileChangedEvent(
                 playerId,

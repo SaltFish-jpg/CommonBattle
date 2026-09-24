@@ -14,11 +14,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneFriendAwarenessAgentTest {
@@ -131,6 +134,50 @@ class SceneFriendAwarenessAgentTest {
         assertEquals(Set.of(20002L, 30003L), view.friends());
         assertEquals(3, view.revision());
         assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void friendEventBusinessCallbackRunsAfterMailboxAppliesView() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(executor);
+        AtomicReference<Optional<ScenePlayerFriendView>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChangedAndReadView(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1),
+                callback::set
+        );
+
+        assertNull(callback.get());
+
+        executor.runNext();
+
+        ScenePlayerFriendView view = callback.get().orElseThrow();
+        assertTrue(view.contains(20002L));
+        assertFalse(view.stale());
+        assertEquals(1, view.revision());
+    }
+
+    @Test
+    void friendEventMailboxCallbackReturnsStaleViewOnRevisionGap() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        SceneFriendAwarenessAgent scene = createScene(executor, interests);
+        AtomicReference<Optional<ScenePlayerFriendView>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChangedAndReadView(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                callback::set
+        );
+        executor.runNext();
+
+        ScenePlayerFriendView view = callback.get().orElseThrow();
+        assertTrue(view.stale());
+        assertEquals(3, view.revision());
+        assertEquals(List.of(FriendOwnerKeyParser.ownerKey(10001L)), interests.repairs);
     }
 
     @Test

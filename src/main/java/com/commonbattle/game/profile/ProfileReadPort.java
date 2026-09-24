@@ -1,5 +1,6 @@
 package com.commonbattle.game.profile;
 
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -11,8 +12,18 @@ public interface ProfileReadPort {
 
     ProfileReadResult readAtLeast(long playerId, long minimumRevision);
 
+    default ProfileReadResult readAtLeast(ProfileChangedEvent event) {
+        Objects.requireNonNull(event, "event");
+        return readAtLeast(event.playerId(), event.revision());
+    }
+
     default Optional<PlayerProfileSnapshot> freshSnapshot(long playerId, long minimumRevision) {
         ProfileReadResult result = readAtLeast(playerId, minimumRevision);
+        return result.fresh() ? result.profile().map(CachedProfile::snapshot) : Optional.empty();
+    }
+
+    default Optional<PlayerProfileSnapshot> freshSnapshot(ProfileChangedEvent event) {
+        ProfileReadResult result = readAtLeast(event);
         return result.fresh() ? result.profile().map(CachedProfile::snapshot) : Optional.empty();
     }
 }

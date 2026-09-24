@@ -27,6 +27,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AllianceAwareChatChannelAccessPolicyTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
@@ -163,6 +164,30 @@ class AllianceAwareChatChannelAccessPolicyTest {
         assertEquals(1, fixture.channels.stats().allianceRemovedMembers());
         assertEquals(0, fixture.channels.stats().allianceEventRemovedMembers());
         assertEquals(1, fixture.channels.stats().allianceSnapshotRemovedMembers());
+    }
+
+    @Test
+    void allianceEventDoesNotAffectChannelAccessBeforeAwarenessMailboxRuns() {
+        Fixture fixture = Fixture.create();
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AllianceAwareChatChannelAccessPolicy policy = new AllianceAwareChatChannelAccessPolicy(fixture.allianceAwareness);
+        ChatJoinRequest request = new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L);
+
+        fixture.allianceAwareness.onAllianceChanged(new AllianceMemberChangedEvent(
+                900L,
+                10001L,
+                AllianceMemberAction.JOIN,
+                1
+        ));
+
+        assertTrue(fixture.allianceAwareness.allianceOf(10001L).isEmpty());
+        assertEquals(ChatJoinStatus.STALE_ALLIANCE, policy.inspectJoin(request));
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatJoinStatus.JOINED, policy.inspectJoin(request));
     }
 
     private record Fixture(

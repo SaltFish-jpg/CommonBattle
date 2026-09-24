@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 场景联盟感知 Agent。
@@ -125,6 +126,30 @@ public final class SceneAllianceAwarenessAgent {
 
     public void onAllianceChanged(AllianceMemberChangedEvent event) {
         messages.tellLocal(self, ignored -> handleAllianceChanged(event));
+    }
+
+    public void onAllianceChangedAndReadView(
+            AllianceMemberChangedEvent event,
+            Consumer<Optional<ScenePlayerAllianceView>> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleAllianceChanged(event);
+            callback.accept(allianceOf(event.playerId()));
+        });
+    }
+
+    public void onAllianceChangedAndReadMembership(
+            AllianceMemberChangedEvent event,
+            Consumer<AllianceMembershipDecision> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleAllianceChanged(event);
+            callback.accept(membershipOf(event.allianceId(), event.playerId()));
+        });
     }
 
     public synchronized void handleAllianceChanged(AllianceMemberChangedEvent event) {

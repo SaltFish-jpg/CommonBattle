@@ -21,6 +21,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FriendAwareDirectChatAccessPolicyTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
@@ -92,6 +93,30 @@ class FriendAwareDirectChatAccessPolicyTest {
         assertEquals(ChatSendStatus.SENT, repaired.get().status());
         assertEquals(List.of("after repair"),
                 fixture.directSessions.session(10001L, 10002L).snapshotNow().history().stream().map(ChatDelivery::text).toList());
+    }
+
+    @Test
+    void friendEventDoesNotAffectDirectChatPolicyBeforeAwarenessMailboxRuns() {
+        Fixture fixture = Fixture.create();
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        FriendAwareDirectChatAccessPolicy policy = new FriendAwareDirectChatAccessPolicy(fixture.friendAwareness);
+
+        fixture.friendAwareness.onFriendChanged(new FriendChangedEvent(
+                10001L,
+                10002L,
+                FriendRelationAction.ADD,
+                1
+        ));
+
+        assertTrue(fixture.friendAwareness.friendsOf(10001L).isEmpty());
+        assertEquals(ChatSendStatus.STALE_FRIENDS,
+                policy.inspect(new DirectChatSendRequest(10001L, 10002L, "private", 0)));
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.SENT,
+                policy.inspect(new DirectChatSendRequest(10001L, 10002L, "private", 0)));
     }
 
     private record Fixture(

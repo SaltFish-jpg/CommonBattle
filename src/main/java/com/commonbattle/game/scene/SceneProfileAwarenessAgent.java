@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 场景内玩家基础资料感知 Agent。
@@ -98,6 +99,23 @@ public final class SceneProfileAwarenessAgent {
         messages.tellLocal(self, ignored -> handleProfileChanged(event));
     }
 
+    public void onProfileChangedAndReadFresh(
+            ProfileChangedEvent event,
+            Consumer<Optional<CachedProfile>> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            if (!onlineInterests.containsKey(event.playerId())) {
+                callback.accept(Optional.empty());
+                return;
+            }
+            handleProfileChanged(event);
+            ProfileReadResult result = profiles.readAtLeast(event);
+            callback.accept(result.fresh() ? result.profile() : Optional.empty());
+        });
+    }
+
     public void handleProfileChanged(ProfileChangedEvent event) {
         Objects.requireNonNull(event, "event");
         if (onlineInterests.containsKey(event.playerId())) {
@@ -130,6 +148,19 @@ public final class SceneProfileAwarenessAgent {
     public Optional<CachedProfile> freshProfileOf(long playerId, long minimumRevision) {
         ProfileReadResult result = profiles.readAtLeast(playerId, minimumRevision);
         return result.fresh() ? result.profile() : Optional.empty();
+    }
+
+    public void readFreshProfileAtLeast(ProfileChangedEvent event, Consumer<Optional<CachedProfile>> callback) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            if (!onlineInterests.containsKey(event.playerId())) {
+                callback.accept(Optional.empty());
+                return;
+            }
+            ProfileReadResult result = profiles.readAtLeast(event);
+            callback.accept(result.fresh() ? result.profile() : Optional.empty());
+        });
     }
 
     public ProfileRuntime profileRuntime() {

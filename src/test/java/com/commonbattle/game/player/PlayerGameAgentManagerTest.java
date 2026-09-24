@@ -18,10 +18,16 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.example.config.ExampleGameConfigs;
+import com.commonbattle.game.bag.BagSnapshot;
+import com.commonbattle.game.bag.ItemDefinition;
+import com.commonbattle.game.bag.ItemStack;
+import com.commonbattle.game.bag.Reward;
 import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.battle.BattleSettlementStatus;
+import com.commonbattle.game.config.GameConfigPackage;
 import com.commonbattle.game.config.GameConfigPublishStatus;
 import com.commonbattle.game.config.GameConfigValidator;
+import com.commonbattle.game.config.GrowthTuning;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
 import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
@@ -39,6 +45,14 @@ import com.commonbattle.game.session.PlayerLoginDrainingException;
 import com.commonbattle.game.session.PlayerLoginResult;
 import com.commonbattle.game.session.PlayerLoginService;
 import com.commonbattle.game.session.PlayerCommandStatus;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
+import com.commonbattle.game.shop.ShopStockAsyncClient;
+import com.commonbattle.game.shop.ShopStockCallback;
+import com.commonbattle.game.shop.ShopStockReleaseResponse;
+import com.commonbattle.game.shop.ShopStockRemainingResponse;
+import com.commonbattle.game.shop.ShopStockReserveResponse;
 import com.commonbattle.observability.RuntimeHealthJsonFormatter;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
@@ -55,6 +69,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -150,6 +165,46 @@ class PlayerGameAgentManagerTest {
         assertEquals(BattleSettlementStatus.VICTORY, settlement.status());
         assertSame(agent, fixture.manager.get(10001L).orElseThrow());
         assertEquals(PlayerCommandAuditOutcome.EXECUTED, audit.last().outcome());
+    }
+
+    @Test
+    void managerCreatedAgentRecordsAsyncCompletionAuditAfterStockRpcCallback() {
+        RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+        InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
+        Fixture fixture = Fixture.create(null, limitedStockConfig(), stocks, audit);
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        long epoch = sessions.bind(10001L, "session-1").epoch();
+        RecordingResultSink results = new RecordingResultSink();
+        PlayerCommandDispatcher dispatcher = dispatcher(fixture, sessions, audit, results);
+
+        PlayerCommandResult result = dispatcher.dispatch(new PlayerCommand(
+                10001L,
+                "session-1",
+                epoch,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+        ));
+        fixture.executor.runAll();
+
+        assertEquals(PlayerCommandStatus.ACCEPTED, result.status());
+        assertEquals("order-10001-1", stocks.reserveReservationId);
+        assertEquals("limited_pack", stocks.reserveSku);
+        assertEquals(0, results.responses.size());
+        assertEquals(PlayerCommandAuditOutcome.EXECUTED, audit.last().outcome());
+
+        stocks.reserveCallback.success(new ShopStockReserveResponse(true, 0));
+        fixture.executor.runAll();
+
+        ShopPurchaseResult purchase = assertInstanceOf(ShopPurchaseResult.class, results.responses.getFirst());
+        assertEquals(ShopPurchaseStatus.SUCCESS, purchase.status());
+        assertEquals(2, audit.records().size());
+        assertEquals(PlayerCommandAuditOutcome.ASYNC_COMPLETED, audit.last().outcome());
+        assertEquals(PlayerBusinessResponse.OK, audit.last().resultCode());
+        assertEquals(7, audit.last().configVersion());
     }
 
     @Test
@@ -510,6 +565,15 @@ class PlayerGameAgentManagerTest {
         }
 
         private static Fixture create(EventPublisher publisher) {
+            return create(publisher, ExampleGameConfigs.basic(7, CLOCK.instant()), null, new InMemoryPlayerCommandAuditLog());
+        }
+
+        private static Fixture create(
+                EventPublisher publisher,
+                GameConfigPackage configPackage,
+                ShopStockAsyncClient shopStockAsyncClient,
+                InMemoryPlayerCommandAuditLog audit
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
@@ -522,8 +586,7 @@ class PlayerGameAgentManagerTest {
                     CLOCK
             );
             InMemoryGameConfigRegistry configs = new InMemoryGameConfigRegistry(new GameConfigValidator(), CLOCK);
-            assertEquals(GameConfigPublishStatus.PUBLISHED,
-                    configs.publish(ExampleGameConfigs.basic(7, CLOCK.instant())).status());
+            assertEquals(GameConfigPublishStatus.PUBLISHED, configs.publish(configPackage).status());
             PlayerGameAgentManager manager = new PlayerGameAgentManager(
                     actors,
                     messages,
@@ -532,10 +595,37 @@ class PlayerGameAgentManagerTest {
                     lifecycles,
                     CLOCK,
                     SERVER_OPEN_TIME,
-                    publisher
+                    publisher,
+                    null,
+                    PlayerStateSaveListener.ignore(),
+                    shopStockAsyncClient,
+                    PlayerPushPort.NOOP,
+                    audit
             );
             return new Fixture(executor, actors, messages, repository, directory, lifecycles, manager);
         }
+    }
+
+    private static GameConfigPackage limitedStockConfig() {
+        return new GameConfigPackage(
+                7,
+                List.of(
+                        new ItemDefinition("gold", "currency", 999_999),
+                        new ItemDefinition("ticket", "ticket", 999_999),
+                        new ItemDefinition("exp_potion", "growth", 999)
+                ),
+                List.of(),
+                List.of(new ShopItemDefinition(
+                        "limited_pack",
+                        new ItemStack("gold", 50),
+                        Reward.of(new ItemStack("ticket", 1)),
+                        0,
+                        0,
+                        1
+                )),
+                new GrowthTuning("exp_potion", 60, 100),
+                CLOCK.instant()
+        );
     }
 
     private static PlayerCommandDispatcher dispatcher(
@@ -582,6 +672,38 @@ class PlayerGameAgentManagerTest {
         @Override
         public void failed(PlayerCommand command, Throwable error) {
             throw new AssertionError(error);
+        }
+    }
+
+    private static final class RecordingShopStockAsyncClient implements ShopStockAsyncClient {
+        private String reserveReservationId;
+        private String reserveSku;
+        private ShopStockCallback<ShopStockReserveResponse> reserveCallback;
+
+        @Override
+        public void reserve(
+                String reservationId,
+                String sku,
+                int count,
+                ShopStockCallback<ShopStockReserveResponse> callback
+        ) {
+            reserveReservationId = reservationId;
+            reserveSku = sku;
+            reserveCallback = callback;
+        }
+
+        @Override
+        public void release(
+                String reservationId,
+                String sku,
+                int count,
+                ShopStockCallback<ShopStockReleaseResponse> callback
+        ) {
+            callback.success(new ShopStockReleaseResponse(1));
+        }
+
+        @Override
+        public void remaining(String sku, ShopStockCallback<ShopStockRemainingResponse> callback) {
         }
     }
 

@@ -7,6 +7,7 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.profile.AllianceBrief;
 import com.commonbattle.game.profile.AppearanceSummary;
+import com.commonbattle.game.profile.CachedProfile;
 import com.commonbattle.game.profile.FriendBrief;
 import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
@@ -18,11 +19,14 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneProfileAwarenessAgentTest {
@@ -139,6 +143,55 @@ class SceneProfileAwarenessAgentTest {
         PlayerProfileSnapshot snapshot = scene.freshProfileOf(10001L, 3).orElseThrow().snapshot();
         assertEquals("avatar_3", snapshot.appearance().avatar());
         assertFalse(scene.profileOf(10001L).orElseThrow().stale());
+    }
+
+    @Test
+    void profileEventBusinessCallbackRunsInSceneMailboxWithFreshSnapshot() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        var cache = new com.commonbattle.game.profile.LocalProfileCache();
+        ProfileRuntime runtime = new ProfileRuntime(
+                cache,
+                ProfileInterestControl.noop(),
+                playerId -> java.util.Optional.of(event(playerId, 3, "hero", "avatar_3").snapshot())
+        );
+        SceneProfileAwarenessAgent scene = new SceneProfileAwarenessAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                actors.actor("scene-profile"),
+                runtime
+        );
+        AtomicReference<Optional<CachedProfile>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onProfileChangedAndReadFresh(
+                event(10001L, 3, "hero", "avatar_gap"),
+                callback::set
+        );
+
+        assertNull(callback.get());
+
+        executor.runNext();
+
+        PlayerProfileSnapshot snapshot = callback.get().orElseThrow().snapshot();
+        assertEquals("avatar_3", snapshot.appearance().avatar());
+        assertFalse(scene.profileOf(10001L).orElseThrow().stale());
+    }
+
+    @Test
+    void mailboxFreshReadIgnoresOfflineProfileEvent() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneProfileAwarenessAgent scene = createScene(executor);
+        AtomicReference<Optional<CachedProfile>> callback = new AtomicReference<>();
+
+        scene.onProfileChangedAndReadFresh(
+                event(10001L, 1, "hero", "avatar_1"),
+                callback::set
+        );
+        executor.runNext();
+
+        assertTrue(callback.get().isEmpty());
+        assertTrue(scene.profileOf(10001L).isEmpty());
     }
 
     private static SceneProfileAwarenessAgent createScene(Executor executor) {

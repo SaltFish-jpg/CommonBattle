@@ -14,10 +14,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneAllianceAwarenessAgentTest {
@@ -151,6 +154,55 @@ class SceneAllianceAwarenessAgentTest {
         assertFalse(view.stale());
         assertEquals(3, view.revision());
         assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void allianceEventBusinessCallbackRunsAfterMailboxAppliesView() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneAllianceAwarenessAgent scene = createScene(executor);
+        AtomicReference<Optional<ScenePlayerAllianceView>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.watchAlliance(100);
+        executor.runNext();
+        scene.onAllianceChangedAndReadView(
+                new AllianceMemberChangedEvent(100, 10001L, AllianceMemberAction.JOIN, 1),
+                callback::set
+        );
+
+        assertNull(callback.get());
+
+        executor.runNext();
+
+        ScenePlayerAllianceView view = callback.get().orElseThrow();
+        assertEquals(100, view.allianceId());
+        assertEquals(1, view.revision());
+        assertFalse(view.stale());
+    }
+
+    @Test
+    void allianceEventMailboxCallbackReturnsStaleMembershipOnRevisionGap() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        SceneAllianceAwarenessAgent scene = createScene(executor, interests);
+        AtomicReference<AllianceMembershipDecision> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.watchAlliance(100);
+        executor.runNext();
+        scene.onAllianceChangedAndReadMembership(
+                new AllianceMemberChangedEvent(100, 10001L, AllianceMemberAction.JOIN, 3),
+                callback::set
+        );
+
+        assertNull(callback.get());
+
+        executor.runNext();
+
+        assertEquals(AllianceMembershipDecision.STALE, callback.get());
+        assertEquals(List.of(AllianceOwnerKeyParser.ownerKey(100)), interests.repairs);
     }
 
     @Test

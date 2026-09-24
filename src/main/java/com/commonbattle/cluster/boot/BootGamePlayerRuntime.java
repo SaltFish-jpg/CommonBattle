@@ -562,6 +562,7 @@ record BootGamePlayerRuntime(
                 maxPendingAckMessagesPerPlayer,
                 PlayerDeliveryOverflowStrategy.DROP_OLDEST
         );
+        InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
         PlayerGameAgentManager agents = new PlayerGameAgentManager(
                 actors,
                 messages,
@@ -575,13 +576,13 @@ record BootGamePlayerRuntime(
                 new PlayerProfileSnapshotProjector(profileSnapshots)::project,
                 shopStockAsyncClient,
                 new OutboundPlayerPushPort(outbound),
+                audit,
                 actorSchedules,
                 growthStaminaRecoveryEnabled,
                 growthStaminaRecoveryInitialDelay,
                 growthStaminaRecoveryInterval
         );
         PlayerLoginService logins = new PlayerLoginService(agents, sessions);
-        InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
         LifecycleAwareAgentRouter lifecycleRouter = new LifecycleAwareAgentRouter(lifecycles, messages);
         InboundAdmissionController commandMailboxAdmissions = new ActorMailboxPressureAdmissionController(
                 new TokenBucketAgentAdmissionController(commandRateLimitPolicy, clock),

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 场景好友关系感知 Agent。
@@ -78,6 +79,18 @@ public final class SceneFriendAwarenessAgent {
 
     public void onFriendChanged(FriendChangedEvent event) {
         messages.tellLocal(self, ignored -> handleFriendChanged(event));
+    }
+
+    public void onFriendChangedAndReadView(
+            FriendChangedEvent event,
+            Consumer<Optional<ScenePlayerFriendView>> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleFriendChanged(event);
+            callback.accept(friendsOf(event.playerId()));
+        });
     }
 
     public synchronized void handleFriendChanged(FriendChangedEvent event) {

@@ -9,6 +9,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.config.GameConfigView;
 import com.commonbattle.game.event.EventPublisher;
+import com.commonbattle.game.session.PlayerCommandAuditSink;
 import com.commonbattle.game.shop.ShopStockAsyncClient;
 
 import java.time.Clock;
@@ -39,6 +40,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     private final PlayerStateSaveListener saveListener;
     private final ShopStockAsyncClient shopStockAsyncClient;
     private final PlayerPushPort pushes;
+    private final PlayerCommandAuditSink asyncCommandAuditSink;
     private final ActorScheduleRegistry actorSchedules;
     private final boolean growthStaminaRecoveryEnabled;
     private final Duration growthStaminaInitialDelay;
@@ -136,7 +138,27 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     ) {
         this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
                 domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, pushes,
-                null, false, Duration.ZERO, Duration.ofMinutes(5));
+                PlayerCommandAuditSink.NOOP);
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink
+    ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, pushes,
+                asyncCommandAuditSink, null, false, Duration.ZERO, Duration.ofMinutes(5));
     }
 
     public PlayerGameAgentManager(
@@ -157,6 +179,31 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
             Duration growthStaminaInitialDelay,
             Duration growthStaminaInterval
     ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, pushes,
+                PlayerCommandAuditSink.NOOP, actorSchedules, growthStaminaRecoveryEnabled,
+                growthStaminaInitialDelay, growthStaminaInterval);
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink,
+            ActorScheduleRegistry actorSchedules,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaInitialDelay,
+            Duration growthStaminaInterval
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -171,6 +218,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         this.saveListener = Objects.requireNonNull(saveListener, "saveListener");
         this.shopStockAsyncClient = shopStockAsyncClient;
         this.pushes = Objects.requireNonNull(pushes, "pushes");
+        this.asyncCommandAuditSink = Objects.requireNonNull(asyncCommandAuditSink, "asyncCommandAuditSink");
         this.actorSchedules = actorSchedules;
         this.growthStaminaRecoveryEnabled = growthStaminaRecoveryEnabled;
         this.growthStaminaInitialDelay = positiveOrZero(growthStaminaInitialDelay, "growthStaminaInitialDelay");
@@ -360,7 +408,8 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 domainEventListener,
                 shopStockAsyncClient,
                 asyncShopPurchases,
-                pushes
+                pushes,
+                asyncCommandAuditSink
         );
     }
 
