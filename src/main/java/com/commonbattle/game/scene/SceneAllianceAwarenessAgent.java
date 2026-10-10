@@ -11,6 +11,9 @@ import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import com.commonbattle.game.social.AllianceSnapshot;
 import com.commonbattle.game.social.AllianceSnapshotReader;
+import com.commonbattle.game.snapshot.SnapshotReadMetrics;
+import com.commonbattle.game.snapshot.SnapshotReadStats;
+import com.commonbattle.game.snapshot.SnapshotReadStatus;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,11 +45,7 @@ public final class SceneAllianceAwarenessAgent {
     private long repairRequests;
     private long appliedSnapshots;
     private long ignoredSnapshots;
-    private long freshReadRequests;
-    private long freshReadLocalHits;
-    private long freshReadRefreshes;
-    private long freshReadRemoteStale;
-    private long freshReadRemoteMisses;
+    private final SnapshotReadMetrics freshReads = new SnapshotReadMetrics();
 
     public SceneAllianceAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, OwnerEventInterestControl.noop());
@@ -270,11 +269,11 @@ public final class SceneAllianceAwarenessAgent {
         if (minimumRevision < 0) {
             throw new IllegalArgumentException("minimumRevision must not be negative");
         }
-        freshReadRequests++;
+        freshReads.request();
         AllianceMembershipDecision local = membershipOf(allianceId, playerId);
         if (local != AllianceMembershipDecision.STALE
                 && checkpoint.revisionOf(AllianceOwnerKeyParser.ownerKey(allianceId)) >= minimumRevision) {
-            freshReadLocalHits++;
+            freshReads.record(SnapshotReadStatus.LOCAL_HIT);
             return new SceneAllianceReadResult(local, SceneAllianceReadStatus.LOCAL_HIT);
         }
         Optional<AllianceSnapshot> snapshot = snapshotReader.find(allianceId);
@@ -283,17 +282,17 @@ public final class SceneAllianceAwarenessAgent {
             AllianceMembershipDecision refreshed = membershipOf(allianceId, playerId);
             if (refreshed != AllianceMembershipDecision.STALE
                     && checkpoint.revisionOf(AllianceOwnerKeyParser.ownerKey(allianceId)) >= minimumRevision) {
-                freshReadRefreshes++;
+                freshReads.record(SnapshotReadStatus.REFRESHED);
                 return new SceneAllianceReadResult(refreshed, SceneAllianceReadStatus.REFRESHED);
             }
-            freshReadRemoteStale++;
+            freshReads.record(SnapshotReadStatus.REMOTE_STALE);
             return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_STALE);
         }
         if (snapshot.isPresent()) {
-            freshReadRemoteStale++;
+            freshReads.record(SnapshotReadStatus.REMOTE_STALE);
             return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_STALE);
         } else {
-            freshReadRemoteMisses++;
+            freshReads.record(SnapshotReadStatus.REMOTE_MISS);
             return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_MISS);
         }
     }
@@ -309,6 +308,7 @@ public final class SceneAllianceAwarenessAgent {
                 staleViews++;
             }
         }
+        SnapshotReadStats readStats = freshReads.snapshot();
         return new SceneProjectionStats(
                 receivedEvents,
                 appliedEvents,
@@ -318,11 +318,11 @@ public final class SceneAllianceAwarenessAgent {
                 appliedSnapshots,
                 ignoredSnapshots,
                 staleViews,
-                freshReadRequests,
-                freshReadLocalHits,
-                freshReadRefreshes,
-                freshReadRemoteStale,
-                freshReadRemoteMisses
+                readStats.requests(),
+                readStats.localHits(),
+                readStats.refreshes(),
+                readStats.remoteStale(),
+                readStats.remoteMisses()
         );
     }
 

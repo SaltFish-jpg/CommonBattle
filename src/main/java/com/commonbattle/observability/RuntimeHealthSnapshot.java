@@ -11,6 +11,7 @@ import com.commonbattle.cluster.rpc.RpcGatewayStats;
 import com.commonbattle.game.session.PlayerCommandStats;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * 单个游戏服进程的运行时健康快照。
@@ -70,6 +71,10 @@ public record RuntimeHealthSnapshot(
         ShopRuntimeHealthStats shopRuntimes,
         EventGatedCommandAuditHealthStats eventGatedCommandAudits,
         BagChangeAuditHealthStats bagChangeAudits,
-        PlayerCommandAuditHealthStats commandAudits
+        PlayerCommandAuditHealthStats commandAudits,
+        List<RuntimeHealthIssue> issues
 ) {
+    public RuntimeHealthSnapshot {
+        issues = List.copyOf(issues);
+    }
 }

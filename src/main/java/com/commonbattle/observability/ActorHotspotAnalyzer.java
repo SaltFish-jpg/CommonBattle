@@ -4,10 +4,12 @@ import com.commonbattle.actor.ActorMailboxStats;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Actor 热点治理分析器。
@@ -41,18 +43,20 @@ public final class ActorHotspotAnalyzer {
             if (action == null) {
                 continue;
             }
+            Set<ActorHotspotReason> reasons = reasonsOf(accumulator, policy, action);
             result.add(new ActorHotspotCandidate(
                     accumulator.actorId,
                     ActorMailboxDiagnostics.groupOfActorId(accumulator.actorId),
                     accumulator.queuedTasks,
                     accumulator.recentSlowTasks,
                     accumulator.maxSlowTaskMillis,
-                    action
+                    action,
+                    reasons,
+                    scoreOf(accumulator, action)
             ));
         }
         return result.stream()
-                .sorted(Comparator.comparingInt((ActorHotspotCandidate candidate) -> severity(candidate.action()))
-                        .reversed()
+                .sorted(Comparator.comparingLong(ActorHotspotCandidate::score).reversed()
                         .thenComparing(ActorHotspotCandidate::queuedTasks, Comparator.reverseOrder())
                         .thenComparing(ActorHotspotCandidate::maxSlowTaskMillis, Comparator.reverseOrder())
                         .thenComparing(ActorHotspotCandidate::actorId))
@@ -74,6 +78,52 @@ public final class ActorHotspotAnalyzer {
             return ActorHotspotAction.OBSERVE;
         }
         return null;
+    }
+
+    private static Set<ActorHotspotReason> reasonsOf(
+            Accumulator accumulator,
+            ActorHotspotPolicy policy,
+            ActorHotspotAction action
+    ) {
+        EnumSet<ActorHotspotReason> reasons = EnumSet.noneOf(ActorHotspotReason.class);
+        switch (action) {
+            case MIGRATION_CANDIDATE -> {
+                addIf(reasons, ActorHotspotReason.QUEUE_BACKLOG,
+                        accumulator.queuedTasks >= policy.migrationQueuedTasks());
+                addIf(reasons, ActorHotspotReason.SLOW_TASK_COUNT,
+                        accumulator.recentSlowTasks >= policy.migrationSlowTasks());
+                addIf(reasons, ActorHotspotReason.SLOW_TASK_MILLIS,
+                        accumulator.maxSlowTaskMillis >= policy.migrationSlowTaskMillis());
+            }
+            case THROTTLE -> {
+                addIf(reasons, ActorHotspotReason.QUEUE_BACKLOG,
+                        accumulator.queuedTasks >= policy.throttleQueuedTasks());
+                addIf(reasons, ActorHotspotReason.SLOW_TASK_COUNT,
+                        accumulator.recentSlowTasks >= policy.throttleSlowTasks());
+                addIf(reasons, ActorHotspotReason.SLOW_TASK_MILLIS,
+                        accumulator.maxSlowTaskMillis >= policy.throttleSlowTaskMillis());
+            }
+            case OBSERVE -> {
+                addIf(reasons, ActorHotspotReason.QUEUE_BACKLOG,
+                        accumulator.queuedTasks >= policy.observeQueuedTasks());
+                addIf(reasons, ActorHotspotReason.SLOW_TASK_COUNT,
+                        accumulator.recentSlowTasks > 0);
+            }
+        }
+        return reasons;
+    }
+
+    private static void addIf(EnumSet<ActorHotspotReason> reasons, ActorHotspotReason reason, boolean matched) {
+        if (matched) {
+            reasons.add(reason);
+        }
+    }
+
+    private static long scoreOf(Accumulator accumulator, ActorHotspotAction action) {
+        return severity(action) * 1_000_000_000L
+                + accumulator.queuedTasks * 10_000L
+                + accumulator.recentSlowTasks * 1_000L
+                + accumulator.maxSlowTaskMillis;
     }
 
     private static int severity(ActorHotspotAction action) {

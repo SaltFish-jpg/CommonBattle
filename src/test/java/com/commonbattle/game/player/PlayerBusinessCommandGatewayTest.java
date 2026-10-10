@@ -24,18 +24,35 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.boot.BootPayloadCodecs;
 import com.commonbattle.cluster.network.LocalClusterTransport;
+import com.commonbattle.cluster.network.ClusterMessageHandler;
+import com.commonbattle.cluster.network.ClusterTransport;
+import com.commonbattle.cluster.network.ClusterEnvelope;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
+import com.commonbattle.cluster.protocol.ProtoClusterCodec;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.game.activity.ActivityCatalog;
 import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.battle.BattleService;
+import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.battle.BattleSettlementStatus;
+import com.commonbattle.game.battle.BattleStageCatalog;
+import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.growth.GrowthService;
+import com.commonbattle.game.shop.ShopCatalog;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
+import com.commonbattle.game.shop.ShopService;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
@@ -57,6 +74,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -220,6 +238,105 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void remoteForwardReturnsSerializedShopResultFromOwnerMailbox() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        SerializingClusterTransport transport = new SerializingClusterTransport(BootPayloadCodecs.gameServer());
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback callback = new RecordingCallback();
+
+        caller.commands.submit(new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemCommand("order-rpc-1", "growth_pack", 1)
+        ), callback);
+
+        assertNull(callback.response.get());
+        assertEquals(1, owner.responses.pendingResponses());
+        owner.executor.runAll();
+
+        PlayerBusinessResponse response = callback.response.get();
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status(), response.code() + ":" + response.message());
+        ShopPurchaseResult payload = assertInstanceOf(ShopPurchaseResult.class, response.payload());
+        assertEquals(ShopPurchaseStatus.SUCCESS, payload.status());
+        assertEquals("growth_pack", payload.sku());
+        assertEquals(70, owner.agent.profile().bag().count("gold"));
+        assertEquals(2, owner.agent.profile().bag().count("exp_potion"));
+        assertTrue(transport.encodedMessages() >= 2);
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+    }
+
+    @Test
+    void remoteForwardReturnsSerializedBattleResultFromOwnerMailbox() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        SerializingClusterTransport transport = new SerializingClusterTransport(BootPayloadCodecs.gameServer());
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback callback = new RecordingCallback();
+
+        caller.commands.submit(new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                1,
+                PlayerBusinessOperations.BATTLE_CLEAR_STAGE,
+                new BattleStageClearCommand("settle-rpc-1", "forest-1")
+        ), callback);
+
+        assertNull(callback.response.get());
+        assertEquals(1, owner.responses.pendingResponses());
+        owner.executor.runAll();
+
+        PlayerBusinessResponse response = callback.response.get();
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status(), response.code() + ":" + response.message());
+        BattleSettlementResult payload = assertInstanceOf(BattleSettlementResult.class, response.payload());
+        assertEquals(BattleSettlementStatus.VICTORY, payload.status());
+        assertEquals("forest-1", payload.stageId());
+        assertEquals("settle-rpc-1", payload.settlementId());
+        assertEquals("battle-win-1", payload.progressActivityId());
+        assertEquals(1, payload.progressDelta());
+        assertEquals(3, payload.stars());
+        assertTrue(payload.firstClear());
+        assertTrue(payload.log().size() > 0);
+        assertEquals(130, owner.agent.profile().bag().count("gold"));
+        assertEquals(1, owner.agent.profile().bag().count("exp_potion"));
+        assertEquals(5, owner.agent.profile().bag().count("gem"));
+        assertTrue(transport.encodedMessages() >= 2);
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+    }
+
+    @Test
     void remoteForwardTimeoutReturnsClassifiedFailureEnvelope() {
         Duration timeout = Duration.ofMillis(25);
         Fixture fixture = Fixture.createRemoteOwner(
@@ -273,6 +390,50 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals("maintenance", callback.response.get().message());
         assertEquals(80, callback.response.get().retryAfterMillis());
         assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
+    void remoteForwardToMigratingOwnerReturnsRetryableProtectionFailure() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        owner.lifecycles.migrate(
+                AgentIdentity.player(10001L),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-3"), new ActorRef("player-10001")),
+                ignored -> {
+                    throw new AssertionError("migration snapshot should stay queued during ingress protection");
+                }
+        );
+        RecordingCallback callback = new RecordingCallback();
+
+        caller.commands.submit(command(1), callback);
+
+        PlayerBusinessResponse response = callback.response.get();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(PlayerCommandStatus.AGENT_MIGRATING.name(), response.code());
+        assertEquals("agent_migrating", response.message());
+        assertEquals(100, response.retryAfterMillis());
+        assertEquals(0, owner.responses.pendingResponses());
+        assertEquals(0, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, owner.dispatcher.stats().count(PlayerCommandStatus.AGENT_MIGRATING));
+        assertEquals(1, owner.executor.queued());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardMigrationProtectedResponses());
     }
 
     @Test
@@ -421,6 +582,7 @@ class PlayerBusinessCommandGatewayTest {
             PlayerBusinessResponseHub responses,
             PlayerCommandSequencer sequencer,
             PlayerCommandDispatcher dispatcher,
+            PlayerGameAgent agent,
             PlayerBusinessCommandGateway commands
     ) {
         private static Fixture create(ServiceId local, RpcGateway rpc) {
@@ -436,12 +598,16 @@ class PlayerBusinessCommandGatewayTest {
             lifecycles.activate(AgentIdentity.player(10001L), self.id());
             executor.runAll();
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, rpc);
+            PlayerProfile profile = new PlayerProfile(10001L, SERVER_OPEN_TIME);
+            profile.bag().restore(new BagSnapshot(Map.of("gold", 100)));
             PlayerGameAgent agent = new PlayerGameAgent(
                     messages,
                     self,
-                    new PlayerProfile(10001L, SERVER_OPEN_TIME),
+                    profile,
                     activityService(),
                     growthService(),
+                    shopService(),
+                    battleService(),
                     CLOCK,
                     SERVER_OPEN_TIME
             );
@@ -464,7 +630,7 @@ class PlayerBusinessCommandGatewayTest {
                     dispatcher,
                     new PlayerBusinessCommandHandler(playerId -> agent, responses)
             );
-            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher,
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, agent,
                     new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
 
@@ -499,10 +665,10 @@ class PlayerBusinessCommandGatewayTest {
                     ignored -> 1,
                     CLOCK
             );
-            dispatcher.handle(PlayerBusinessOperations.ACTIVITY_PROGRESS, (context, command) -> {
+            PlayerBusinessCommandBinder.registerExamples(dispatcher, (context, command) -> {
             });
             PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
-            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher,
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, null,
                     new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
     }
@@ -515,6 +681,12 @@ class PlayerBusinessCommandGatewayTest {
                 3,
                 Reward.of(new ItemStack("gem", 5))
         ));
+        activities.register(new ActivityDefinition(
+                "battle-win-1",
+                ActivityType.COUNTER,
+                1,
+                Reward.of(new ItemStack("gem", 2))
+        ));
         return new ActivityService(activities, bagService());
     }
 
@@ -522,8 +694,41 @@ class PlayerBusinessCommandGatewayTest {
         return new GrowthService(bagService(), "exp_potion", 60, 100);
     }
 
+    private static ShopService shopService() {
+        ShopCatalog shops = new ShopCatalog();
+        shops.register(new ShopItemDefinition(
+                "growth_pack",
+                new ItemStack("gold", 30),
+                Reward.of(new ItemStack("exp_potion", 2)),
+                0,
+                0,
+                ShopItemDefinition.UNLIMITED_STOCK
+        ));
+        return new ShopService(shops, bagService(), CLOCK, ZoneOffset.UTC);
+    }
+
+    private static BattleService battleService() {
+        BattleStageCatalog battles = new BattleStageCatalog();
+        battles.register(new BattleStageDefinition(
+                "forest-1",
+                100,
+                40,
+                70,
+                8,
+                5,
+                Reward.of(new ItemStack("gold", 30), new ItemStack("exp_potion", 1)),
+                "battle-win-1",
+                1,
+                Reward.of(new ItemStack("gem", 5)),
+                3,
+                5
+        ));
+        return new BattleService(battles, bagService(), activityService());
+    }
+
     private static BagService bagService() {
         ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gold", "currency", 999999));
         items.register(new ItemDefinition("gem", "currency", 999999));
         items.register(new ItemDefinition("exp_potion", "growth", 999));
         return new BagService(items);
@@ -566,6 +771,36 @@ class PlayerBusinessCommandGatewayTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class SerializingClusterTransport implements ClusterTransport {
+        private final LocalClusterTransport delegate = new LocalClusterTransport();
+        private final ProtoClusterCodec codec;
+        private int encodedMessages;
+
+        private SerializingClusterTransport(PayloadCodecRegistry registry) {
+            this.codec = new ProtoClusterCodec(registry);
+        }
+
+        @Override
+        public void bind(ServiceDescriptor local, ClusterMessageHandler handler) {
+            delegate.bind(local, handler);
+        }
+
+        @Override
+        public void send(ServiceId nextHop, ClusterEnvelope envelope) {
+            encodedMessages++;
+            delegate.send(nextHop, codec.decode(codec.encode(envelope)));
+        }
+
+        int encodedMessages() {
+            return encodedMessages;
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
         }
     }
 

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -32,11 +33,17 @@ class ActorHotspotAnalyzerTest {
         assertEquals(4, candidates.size());
         assertEquals("scene-shard:world-1:0", candidates.get(0).actorId());
         assertEquals(ActorHotspotAction.MIGRATION_CANDIDATE, candidates.get(0).action());
+        assertEquals(Set.of(ActorHotspotReason.QUEUE_BACKLOG), candidates.get(0).reasons());
+        assertEquals(3_000_050_000L, candidates.get(0).score());
         assertEquals("player-10002", candidates.get(1).actorId());
         assertEquals(ActorHotspotAction.THROTTLE, candidates.get(1).action());
+        assertEquals(Set.of(ActorHotspotReason.QUEUE_BACKLOG), candidates.get(1).reasons());
+        assertEquals(2_000_031_080L, candidates.get(1).score());
         assertEquals("chat-world", candidates.get(2).actorId());
         assertEquals(ActorHotspotAction.THROTTLE, candidates.get(2).action());
+        assertEquals(Set.of(ActorHotspotReason.SLOW_TASK_MILLIS), candidates.get(2).reasons());
         assertEquals("player-10001", candidates.get(3).actorId());
         assertEquals(ActorHotspotAction.OBSERVE, candidates.get(3).action());
+        assertEquals(Set.of(ActorHotspotReason.QUEUE_BACKLOG), candidates.get(3).reasons());
     }
 }

@@ -8,6 +8,7 @@ final class PlayerBusinessCommandGatewayMetrics {
     private final LongAdder remoteForwardFailureResponses = new LongAdder();
     private final LongAdder remoteForwardTimedOutResponses = new LongAdder();
     private final LongAdder lateRemoteForwardResponses = new LongAdder();
+    private final LongAdder remoteForwardMigrationProtectedResponses = new LongAdder();
 
     void remoteForward() {
         remoteForwards.increment();
@@ -29,13 +30,18 @@ final class PlayerBusinessCommandGatewayMetrics {
         lateRemoteForwardResponses.increment();
     }
 
+    void remoteForwardMigrationProtectedResponse() {
+        remoteForwardMigrationProtectedResponses.increment();
+    }
+
     PlayerBusinessCommandGatewayStats snapshot() {
         return new PlayerBusinessCommandGatewayStats(
                 remoteForwards.sum(),
                 remoteForwardSuccessResponses.sum(),
                 remoteForwardFailureResponses.sum(),
                 remoteForwardTimedOutResponses.sum(),
-                lateRemoteForwardResponses.sum()
+                lateRemoteForwardResponses.sum(),
+                remoteForwardMigrationProtectedResponses.sum()
         );
     }
 }

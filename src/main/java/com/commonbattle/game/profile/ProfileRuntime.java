@@ -1,11 +1,12 @@
 package com.commonbattle.game.profile;
 
 import com.commonbattle.game.event.SubscriptionDecision;
+import com.commonbattle.game.snapshot.SnapshotReadMetrics;
+import com.commonbattle.game.snapshot.SnapshotReadStatus;
 
 import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 玩家基础资料在非 owner 服务内的运行时门面。
@@ -15,14 +16,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRead
     private final LocalProfileCache cache;
     private final ProfileInterestControl interests;
     private final ProfileSnapshotReader reader;
-    private final AtomicLong readRequests = new AtomicLong();
-    private final AtomicLong localHits = new AtomicLong();
-    private final AtomicLong localStale = new AtomicLong();
-    private final AtomicLong localMisses = new AtomicLong();
-    private final AtomicLong refreshes = new AtomicLong();
-    private final AtomicLong remoteStale = new AtomicLong();
-    private final AtomicLong remoteMisses = new AtomicLong();
-    private final AtomicLong localFallbacks = new AtomicLong();
+    private final SnapshotReadMetrics reads = new SnapshotReadMetrics();
 
     public ProfileRuntime(LocalProfileCache cache, ProfileInterestControl interests, ProfileSnapshotReader reader) {
         this.cache = Objects.requireNonNull(cache, "cache");
@@ -75,7 +69,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRead
     @Override
     public ProfileReadResult read(long playerId, ProfileReadMode mode) {
         Objects.requireNonNull(mode, "mode");
-        readRequests.incrementAndGet();
+        reads.request();
         Optional<CachedProfile> cached = cache.get(playerId);
         if (mode == ProfileReadMode.LOCAL_FAST) {
             return record(cached.map(profile -> ProfileReadResult.of(profile,
@@ -101,7 +95,7 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRead
         if (minimumRevision < 0) {
             throw new IllegalArgumentException("minimumRevision must not be negative");
         }
-        readRequests.incrementAndGet();
+        reads.request();
         Optional<CachedProfile> cached = cache.get(playerId);
         if (cached.filter(profile -> !profile.stale() && profile.snapshot().revision() >= minimumRevision).isPresent()) {
             return record(ProfileReadResult.of(cached.orElseThrow(), ProfileReadStatus.LOCAL_HIT));
@@ -128,28 +122,23 @@ public final class ProfileRuntime implements ProfileInterestControl, ProfileRead
 
     @Override
     public ProfileRuntimeStats stats() {
-        return new ProfileRuntimeStats(
-                readRequests.get(),
-                localHits.get(),
-                localStale.get(),
-                localMisses.get(),
-                refreshes.get(),
-                remoteStale.get(),
-                remoteMisses.get(),
-                localFallbacks.get()
-        );
+        return ProfileRuntimeStats.from(reads.snapshot());
     }
 
     private ProfileReadResult record(ProfileReadResult result) {
-        switch (result.status()) {
-            case LOCAL_HIT -> localHits.incrementAndGet();
-            case LOCAL_STALE -> localStale.incrementAndGet();
-            case LOCAL_MISS -> localMisses.incrementAndGet();
-            case REFRESHED -> refreshes.incrementAndGet();
-            case REMOTE_STALE -> remoteStale.incrementAndGet();
-            case REMOTE_MISS -> remoteMisses.incrementAndGet();
-            case LOCAL_FALLBACK -> localFallbacks.incrementAndGet();
-        }
+        reads.record(toSnapshotStatus(result.status()));
         return result;
+    }
+
+    private static SnapshotReadStatus toSnapshotStatus(ProfileReadStatus status) {
+        return switch (status) {
+            case LOCAL_HIT -> SnapshotReadStatus.LOCAL_HIT;
+            case LOCAL_STALE -> SnapshotReadStatus.LOCAL_STALE;
+            case LOCAL_MISS -> SnapshotReadStatus.LOCAL_MISS;
+            case REFRESHED -> SnapshotReadStatus.REFRESHED;
+            case REMOTE_STALE -> SnapshotReadStatus.REMOTE_STALE;
+            case REMOTE_MISS -> SnapshotReadStatus.REMOTE_MISS;
+            case LOCAL_FALLBACK -> SnapshotReadStatus.LOCAL_FALLBACK;
+        };
     }
 }

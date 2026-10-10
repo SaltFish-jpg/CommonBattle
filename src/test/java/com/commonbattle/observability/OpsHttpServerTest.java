@@ -8,9 +8,15 @@ import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.DeadLetter;
 import com.commonbattle.actor.DeadLetterReason;
+import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationAdmin;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationResult;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationStatus;
+import com.commonbattle.actor.agent.migration.AgentMigrationSnapshot;
+import com.commonbattle.actor.agent.migration.AgentMigrationTask;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStatus;
+import com.commonbattle.actor.agent.migration.InMemoryAgentMigrationTaskStore;
 import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideMode;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
@@ -49,6 +55,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -186,6 +193,8 @@ class OpsHttpServerTest {
 
             assertEquals(200, list.statusCode());
             assertTrue(list.body().contains("\"ownerKey\":\"friend:10001\""));
+            assertTrue(list.body().contains("\"failureCount\":0"));
+            assertTrue(list.body().contains("\"lastFailureMessage\":\"\""));
             assertEquals(200, release.statusCode());
             assertEquals("{\"released\":1,\"ownerKey\":\"friend:10001\"}", release.body());
             assertEquals("{\"owners\":[]}", listAfterRelease.body());
@@ -788,8 +797,11 @@ class OpsHttpServerTest {
             assertTrue(all.body().contains("\"matched\":4,\"offset\":0,\"limit\":128"));
             assertTrue(all.body().contains("\"actorId\":\"scene-shard:world-1:0\""));
             assertTrue(all.body().contains("\"action\":\"MIGRATION_CANDIDATE\""));
+            assertTrue(all.body().contains("\"score\":3000030000"));
+            assertTrue(all.body().contains("\"reasons\":[\"QUEUE_BACKLOG\"]"));
             assertTrue(all.body().contains("\"actorId\":\"chat-world\""));
             assertTrue(all.body().contains("\"maxSlowTaskMillis\":150"));
+            assertTrue(all.body().contains("\"reasons\":[\"SLOW_TASK_MILLIS\"]"));
 
             assertEquals(200, migration.statusCode());
             assertTrue(migration.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
@@ -926,6 +938,8 @@ class OpsHttpServerTest {
             assertTrue(submit.body().contains("\"status\":\"SUBMITTED\""));
             assertEquals(1, migrations.candidates.size());
             assertEquals("player-10001", migrations.candidates.getFirst().actorId());
+            assertEquals(Set.of(ActorHotspotReason.QUEUE_BACKLOG), migrations.candidates.getFirst().reasons());
+            assertEquals(3_000_030_000L, migrations.candidates.getFirst().score());
 
             assertEquals(400, invalidMax.statusCode());
             assertEquals("{\"submitted\":0,\"error\":\"invalid_maxSubmissions\"}", invalidMax.body());
@@ -947,6 +961,95 @@ class OpsHttpServerTest {
 
             assertEquals(503, submit.statusCode());
             assertEquals("{\"submitted\":0,\"error\":\"hotspot_migration_not_configured\"}", submit.body());
+        }
+    }
+
+    @Test
+    void agentMigrationTasksCanBeListedAndFiltered() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        InMemoryAgentMigrationTaskStore store = new InMemoryAgentMigrationTaskStore();
+        store.save(migrationTask(
+                "migration-old",
+                AgentIdentity.player(10001L),
+                AgentMigrationTaskStatus.PREPARED,
+                "hotspot",
+                CLOCK.instant().minus(Duration.ofMinutes(5))
+        ));
+        store.save(migrationTask(
+                "migration-leased",
+                AgentIdentity.scene("world-1"),
+                AgentMigrationTaskStatus.MOVED,
+                "",
+                CLOCK.instant().minus(Duration.ofMinutes(1))
+        ));
+        store.claim("migration-leased", "recovery-1", CLOCK.instant(), Duration.ofSeconds(30)).orElseThrow();
+        store.save(migrationTask(
+                "migration-done",
+                AgentIdentity.player(10002L),
+                AgentMigrationTaskStatus.TARGET_ACCEPTED,
+                "",
+                CLOCK.instant().minus(Duration.ofSeconds(30))
+        ));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(store);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe
+        )) {
+            server.start();
+
+            HttpResult all = get(server, "/agent-migration-tasks");
+            HttpResult prepared = get(server, "/agent-migration-tasks?status=PREPARED");
+            HttpResult identity = get(server, "/agent-migration-tasks?identityType=player&identityKey=10002");
+            HttpResult pendingOnly = get(server, "/agent-migration-tasks?pendingOnly=true");
+            HttpResult invalidStatus = get(server, "/agent-migration-tasks?status=BAD");
+            HttpResult invalidPendingOnly = get(server, "/agent-migration-tasks?pendingOnly=yes");
+            HttpResult wrongMethod = post(server, "/agent-migration-tasks");
+
+            assertEquals(200, all.statusCode());
+            assertTrue(all.body().contains("\"matched\":3,\"offset\":0,\"limit\":128"));
+            assertTrue(all.body().contains("\"taskId\":\"migration-old\""));
+            assertTrue(all.body().contains("\"identity\":\"player:10001\""));
+            assertTrue(all.body().contains("\"sourceService\":\"game:r1:game-1\""));
+            assertTrue(all.body().contains("\"targetService\":\"game:r1:game-2\""));
+            assertTrue(all.body().contains("\"snapshotType\":\"player.snapshot.v1\""));
+            assertTrue(all.body().contains("\"pendingAgeMillis\":300000"));
+            assertTrue(all.body().contains("\"taskId\":\"migration-leased\""));
+            assertTrue(all.body().contains("\"leaseOwner\":\"recovery-1\""));
+            assertTrue(all.body().contains("\"leased\":true"));
+
+            assertEquals(200, prepared.statusCode());
+            assertTrue(prepared.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
+            assertTrue(prepared.body().contains("\"taskId\":\"migration-old\""));
+
+            assertEquals(200, identity.statusCode());
+            assertTrue(identity.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
+            assertTrue(identity.body().contains("\"taskId\":\"migration-done\""));
+
+            assertEquals(200, pendingOnly.statusCode());
+            assertTrue(pendingOnly.body().contains("\"matched\":2,\"offset\":0,\"limit\":128"));
+            assertFalse(pendingOnly.body().contains("\"taskId\":\"migration-done\""));
+
+            assertEquals(400, invalidStatus.statusCode());
+            assertEquals("{\"error\":\"invalid_status\"}", invalidStatus.body());
+            assertEquals(400, invalidPendingOnly.statusCode());
+            assertEquals("{\"error\":\"invalid_pendingOnly\"}", invalidPendingOnly.body());
+            assertEquals(405, wrongMethod.statusCode());
+            assertEquals("{\"error\":\"method_not_allowed\"}", wrongMethod.body());
         }
     }
 
@@ -1216,6 +1319,27 @@ class OpsHttpServerTest {
     }
 
     private record HttpResult(int statusCode, String contentType, String body) {
+    }
+
+    private static AgentMigrationTask migrationTask(
+            String taskId,
+            AgentIdentity identity,
+            AgentMigrationTaskStatus status,
+            String reason,
+            Instant updatedAt
+    ) {
+        return new AgentMigrationTask(
+                taskId,
+                identity,
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        new ActorRef(identity.type() + "-" + identity.key())),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                        new ActorRef(identity.type() + "-" + identity.key())),
+                new AgentMigrationSnapshot("player.snapshot.v1", new byte[]{1}),
+                status,
+                reason,
+                updatedAt
+        );
     }
 
     private static final class RecordingHotspotMigrationAdmin implements ActorHotspotMigrationAdmin {

@@ -9,10 +9,22 @@ public record PlayerBusinessCommandGatewayStats(
         long remoteForwardSuccessResponses,
         long remoteForwardFailureResponses,
         long remoteForwardTimedOutResponses,
-        long lateRemoteForwardResponses
+        long lateRemoteForwardResponses,
+        long remoteForwardMigrationProtectedResponses
 ) {
     public static PlayerBusinessCommandGatewayStats empty() {
-        return new PlayerBusinessCommandGatewayStats(0, 0, 0, 0, 0);
+        return new PlayerBusinessCommandGatewayStats(0, 0, 0, 0, 0, 0);
+    }
+
+    public PlayerBusinessCommandGatewayStats(
+            long remoteForwards,
+            long remoteForwardSuccessResponses,
+            long remoteForwardFailureResponses,
+            long remoteForwardTimedOutResponses,
+            long lateRemoteForwardResponses
+    ) {
+        this(remoteForwards, remoteForwardSuccessResponses, remoteForwardFailureResponses,
+                remoteForwardTimedOutResponses, lateRemoteForwardResponses, 0);
     }
 
     public PlayerBusinessCommandGatewayStats plus(PlayerBusinessCommandGatewayStats other) {
@@ -21,7 +33,8 @@ public record PlayerBusinessCommandGatewayStats(
                 remoteForwardSuccessResponses + other.remoteForwardSuccessResponses,
                 remoteForwardFailureResponses + other.remoteForwardFailureResponses,
                 remoteForwardTimedOutResponses + other.remoteForwardTimedOutResponses,
-                lateRemoteForwardResponses + other.lateRemoteForwardResponses
+                lateRemoteForwardResponses + other.lateRemoteForwardResponses,
+                remoteForwardMigrationProtectedResponses + other.remoteForwardMigrationProtectedResponses
         );
     }
 }

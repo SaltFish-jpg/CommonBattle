@@ -306,7 +306,7 @@ public final class OwnerEventRepairScheduler
                 return batch.size();
             } catch (RuntimeException e) {
                 failedRuns.increment();
-                recordFailedBatch(batch);
+                recordFailedBatch(batch, e);
                 applyBackoff();
                 throw e;
             }
@@ -354,7 +354,9 @@ public final class OwnerEventRepairScheduler
                     .map(entry -> new OwnerEventRepairIsolatedOwner(
                             entry.getKey(),
                             entry.getValue().priority(),
-                            remainingIsolationMillis(entry.getValue(), nowNanos)
+                            remainingIsolationMillis(entry.getValue(), nowNanos),
+                            entry.getValue().failureCount(),
+                            entry.getValue().lastFailureMessage()
                     ))
                     .sorted(Comparator.comparing(OwnerEventRepairIsolatedOwner::ownerKey))
                     .toList();
@@ -459,7 +461,7 @@ public final class OwnerEventRepairScheduler
         }
     }
 
-    private void recordFailedBatch(RepairBatch batch) {
+    private void recordFailedBatch(RepairBatch batch, RuntimeException error) {
         if (batch.size() > 1 && isolationPolicy.enabled()) {
             singleOwnerProbeMode = true;
             requeue(batch);
@@ -473,17 +475,19 @@ public final class OwnerEventRepairScheduler
         synchronized (ownerPriorities) {
             int failures = ownerFailureCounts.merge(ownerKey, 1, Integer::sum);
             if (failures >= isolationPolicy.maxFailures()) {
-                isolateOwner(ownerKey, batch.priorityOf(ownerKey));
+                isolateOwner(ownerKey, batch.priorityOf(ownerKey), failures, error);
             } else {
                 enqueuePending(ownerKey, batch.priorityOf(ownerKey));
             }
         }
     }
 
-    private void isolateOwner(String ownerKey, int priority) {
+    private void isolateOwner(String ownerKey, int priority, int failureCount, RuntimeException error) {
         ownerFailureCounts.remove(ownerKey);
         isolatedOwners.put(ownerKey, new IsolatedOwner(priority,
-                safeAdd(nanoTime.getAsLong(), isolationPolicy.duration().toNanos())));
+                safeAdd(nanoTime.getAsLong(), isolationPolicy.duration().toNanos()),
+                failureCount,
+                failureMessage(error)));
         isolatedOwnersTotal.increment();
     }
 
@@ -637,6 +641,18 @@ public final class OwnerEventRepairScheduler
         }
     }
 
-    private record IsolatedOwner(int priority, long releaseAtNanos) {
+    private static String failureMessage(RuntimeException error) {
+        if (error == null || error.getMessage() == null) {
+            return "";
+        }
+        return error.getMessage();
+    }
+
+    private record IsolatedOwner(
+            int priority,
+            long releaseAtNanos,
+            int failureCount,
+            String lastFailureMessage
+    ) {
     }
 }

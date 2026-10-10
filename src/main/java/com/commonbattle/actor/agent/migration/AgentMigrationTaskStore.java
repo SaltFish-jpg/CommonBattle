@@ -18,6 +18,14 @@ public interface AgentMigrationTaskStore {
 
     List<AgentMigrationTask> pendingTasks();
 
+    /**
+     * 返回当前保留的迁移任务明细。
+     * 生产实现应尽量包含终态任务，便于运维排查迁移失败和回滚原因。
+     */
+    default List<AgentMigrationTask> tasks() {
+        return pendingTasks();
+    }
+
     int purgeTerminalTasksBefore(Instant cutoff);
 
     AgentMigrationTaskStoreStats stats(Instant now);

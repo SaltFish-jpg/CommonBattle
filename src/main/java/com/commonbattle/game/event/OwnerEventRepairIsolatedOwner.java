@@ -6,6 +6,15 @@ package com.commonbattle.game.event;
 public record OwnerEventRepairIsolatedOwner(
         String ownerKey,
         int priority,
-        long remainingMillis
+        long remainingMillis,
+        int failureCount,
+        String lastFailureMessage
 ) {
+    public OwnerEventRepairIsolatedOwner(String ownerKey, int priority, long remainingMillis) {
+        this(ownerKey, priority, remainingMillis, 0, "");
+    }
+
+    public OwnerEventRepairIsolatedOwner {
+        lastFailureMessage = lastFailureMessage == null ? "" : lastFailureMessage;
+    }
 }

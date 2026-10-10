@@ -76,9 +76,15 @@ public final class SerializedAgentMigrationTaskStore implements AgentMigrationTa
 
     @Override
     public List<AgentMigrationTask> pendingTasks() {
+        return tasks().stream()
+                .filter(SerializedAgentMigrationTaskStore::isPending)
+                .toList();
+    }
+
+    @Override
+    public List<AgentMigrationTask> tasks() {
         return bytesStore.loadAll().stream()
                 .map(serializer::decode)
-                .filter(SerializedAgentMigrationTaskStore::isPending)
                 .toList();
     }
 

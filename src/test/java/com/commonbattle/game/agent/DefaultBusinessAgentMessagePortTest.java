@@ -127,6 +127,136 @@ class DefaultBusinessAgentMessagePortTest {
     }
 
     @Test
+    void requestsLocalPlayerCommandPayloadOnRequesterMailbox() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
+            ActorRef requester = node.actors().actor("requester");
+            AtomicReference<String> response = new AtomicReference<>();
+            AtomicReference<String> callbackActor = new AtomicReference<>();
+
+            node.business().requestPlayerCommand(
+                    requester,
+                    command(1),
+                    String.class,
+                    new com.commonbattle.actor.message.LocalAskCallback<>() {
+                        @Override
+                        public void success(com.commonbattle.actor.ActorContext context, String result) {
+                            assertEquals(requester, ActorContext.requireCurrent(requester).self());
+                            callbackActor.set(context.self().id());
+                            response.set(result);
+                        }
+
+                        @Override
+                        public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                            throw new AssertionError(error);
+                        }
+                    }
+            );
+
+            assertNull(response.get());
+            node.executor().runAll();
+
+            assertEquals("player-10001", response.get());
+            assertEquals("requester", callbackActor.get());
+            assertEquals(0, rpc.calls.get());
+        }
+    }
+
+    @Test
+    void requestsRemotePlayerCommandPayloadOnRequesterMailbox() {
+        try (RemoteFixture fixture = RemoteFixture.create()) {
+            ActorRef requester = fixture.caller().actors().actor("requester");
+            AtomicReference<String> response = new AtomicReference<>();
+            AtomicReference<String> callbackActor = new AtomicReference<>();
+
+            fixture.caller().business().requestPlayerCommand(
+                    requester,
+                    command(1),
+                    String.class,
+                    new com.commonbattle.actor.message.LocalAskCallback<>() {
+                        @Override
+                        public void success(com.commonbattle.actor.ActorContext context, String result) {
+                            assertEquals(requester, ActorContext.requireCurrent(requester).self());
+                            callbackActor.set(context.self().id());
+                            response.set(result);
+                        }
+
+                        @Override
+                        public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                            throw new AssertionError(error);
+                        }
+                    }
+            );
+
+            fixture.owner().executor().runAll();
+            assertNull(response.get());
+            fixture.caller().executor().runAll();
+
+            assertEquals("player-10001", response.get());
+            assertEquals("requester", callbackActor.get());
+        }
+    }
+
+    @Test
+    void playerCommandFailureIsDeliveredOnRequesterMailbox() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
+            ActorRef requester = node.actors().actor("requester");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicReference<String> callbackActor = new AtomicReference<>();
+
+            node.business().requestPlayerCommand(
+                    requester,
+                    new PlayerCommand(10001L, "session-1", 1, 1, "missing.operation", "payload"),
+                    String.class,
+                    new com.commonbattle.actor.message.LocalAskCallback<>() {
+                        @Override
+                        public void success(com.commonbattle.actor.ActorContext context, String result) {
+                            throw new AssertionError(result);
+                        }
+
+                        @Override
+                        public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                            callbackActor.set(context.self().id());
+                            failure.set(error);
+                        }
+                    }
+            );
+
+            assertNull(failure.get());
+            node.executor().runAll();
+
+            PlayerBusinessCommandRequestException error =
+                    assertInstanceOf(PlayerBusinessCommandRequestException.class, failure.get());
+            assertEquals("requester", callbackActor.get());
+            assertEquals("missing.operation", error.command().operation());
+            assertEquals(PlayerBusinessResponseStatus.FAILED, error.response().status());
+        }
+    }
+
+    @Test
+    void playerCommandPayloadTypeMismatchIsDeliveredOnRequesterMailbox() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
+            ActorRef requester = node.actors().actor("requester");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            node.business().requestPlayerCommand(
+                    requester,
+                    command(1),
+                    Integer.class,
+                    failureOnly(failure)
+            );
+            node.executor().runAll();
+
+            PlayerBusinessCommandPayloadTypeException error =
+                    assertInstanceOf(PlayerBusinessCommandPayloadTypeException.class, failure.get());
+            assertEquals(String.class, error.actualType());
+            assertEquals(Integer.class, error.expectedType());
+        }
+    }
+
+    @Test
     void requestsLocalBusinessAgentThroughOwnerMailboxAndRequesterCallbackMailbox() {
         CountingRpcGateway rpc = new CountingRpcGateway();
         try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {

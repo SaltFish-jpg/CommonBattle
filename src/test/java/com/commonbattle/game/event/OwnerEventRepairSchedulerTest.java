@@ -201,6 +201,8 @@ class OwnerEventRepairSchedulerTest {
 
         assertEquals(1, scheduler.isolatedOwners().size());
         assertEquals("owner:bad", scheduler.isolatedOwners().getFirst().ownerKey());
+        assertEquals(1, scheduler.isolatedOwners().getFirst().failureCount());
+        assertEquals("repair failed", scheduler.isolatedOwners().getFirst().lastFailureMessage());
         assertEquals(1, scheduler.releaseIsolatedOwner("owner:bad"));
         assertEquals(0, scheduler.isolatedOwners().size());
         assertEquals(1, scheduler.repairSchedulerStats().pendingOwners());

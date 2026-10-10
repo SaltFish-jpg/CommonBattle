@@ -25,6 +25,7 @@ public final class RuntimeHealthJsonFormatter {
         json.append('{');
         field(json, "timestamp", snapshot.timestamp().toString()).append(',');
         field(json, "status", snapshot.status().name()).append(',');
+        object(json, "issues", healthIssues(snapshot)).append(',');
         object(json, "actorSystem", actorSystem(snapshot)).append(',');
         object(json, "actorMailboxes", actorMailboxes(snapshot)).append(',');
         object(json, "actorMailboxPressures", actorMailboxPressures(snapshot)).append(',');
@@ -80,6 +81,26 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "commandAudits", commandAudits(snapshot));
         json.append('}');
         return json.toString();
+    }
+
+    private static StringBuilder healthIssues(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('[');
+        boolean first = true;
+        for (RuntimeHealthIssue issue : snapshot.issues()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append('{');
+            field(json, "status", issue.status().name()).append(',');
+            field(json, "component", issue.component()).append(',');
+            field(json, "code", issue.code()).append(',');
+            number(json, "value", issue.value());
+            json.append('}');
+        }
+        json.append(']');
+        return json;
     }
 
     private static StringBuilder actorSystem(RuntimeHealthSnapshot snapshot) {
@@ -354,7 +375,9 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "remoteForwardSuccessResponses", stats.remoteForwardSuccessResponses()).append(',');
         number(json, "remoteForwardFailureResponses", stats.remoteForwardFailureResponses()).append(',');
         number(json, "remoteForwardTimedOutResponses", stats.remoteForwardTimedOutResponses()).append(',');
-        number(json, "lateRemoteForwardResponses", stats.lateRemoteForwardResponses());
+        number(json, "lateRemoteForwardResponses", stats.lateRemoteForwardResponses()).append(',');
+        number(json, "remoteForwardMigrationProtectedResponses",
+                stats.remoteForwardMigrationProtectedResponses());
         json.append('}');
         return json;
     }

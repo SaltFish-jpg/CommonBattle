@@ -11,10 +11,11 @@ public record PlayerBusinessCommandGatewayHealthStats(
         long remoteForwardSuccessResponses,
         long remoteForwardFailureResponses,
         long remoteForwardTimedOutResponses,
-        long lateRemoteForwardResponses
+        long lateRemoteForwardResponses,
+        long remoteForwardMigrationProtectedResponses
 ) {
     public static PlayerBusinessCommandGatewayHealthStats empty() {
-        return new PlayerBusinessCommandGatewayHealthStats(0, 0, 0, 0, 0, 0);
+        return new PlayerBusinessCommandGatewayHealthStats(0, 0, 0, 0, 0, 0, 0);
     }
 
     public static PlayerBusinessCommandGatewayHealthStats from(int gatewayCount, PlayerBusinessCommandGatewayStats stats) {
@@ -24,7 +25,8 @@ public record PlayerBusinessCommandGatewayHealthStats(
                 stats.remoteForwardSuccessResponses(),
                 stats.remoteForwardFailureResponses(),
                 stats.remoteForwardTimedOutResponses(),
-                stats.lateRemoteForwardResponses()
+                stats.lateRemoteForwardResponses(),
+                stats.remoteForwardMigrationProtectedResponses()
         );
     }
 }

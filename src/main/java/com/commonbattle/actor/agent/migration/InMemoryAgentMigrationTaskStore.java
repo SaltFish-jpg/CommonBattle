@@ -61,6 +61,11 @@ public final class InMemoryAgentMigrationTaskStore implements AgentMigrationTask
     }
 
     @Override
+    public List<AgentMigrationTask> tasks() {
+        return List.copyOf(tasks.values());
+    }
+
+    @Override
     public int purgeTerminalTasksBefore(Instant cutoff) {
         Objects.requireNonNull(cutoff, "cutoff");
         int before = tasks.size();

@@ -100,6 +100,8 @@ import com.commonbattle.game.player.ActivityProgressCommand;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
 import com.commonbattle.game.player.BuyShopItemCommand;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayStats;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessOperations;
 import com.commonbattle.game.player.PlayerBusinessResponse;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
@@ -754,6 +756,11 @@ class RuntimeHealthProbeTest {
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(new AgentMigrationRecoverySchedulerStats(1, 0, 1),
                 snapshot.agentMigrationRecoverySchedulers());
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "agentMigrationRecoverySchedulers",
+                "failed_runs",
+                1
+        )));
     }
 
     @Test
@@ -786,6 +793,15 @@ class RuntimeHealthProbeTest {
 
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(300_000, snapshot.agentMigrationTaskStores().oldestPendingAgeMillis());
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "agentMigrationTaskStores",
+                "pending_task_too_old",
+                300_000
+        )));
+        assertTrue(RuntimeHealthJsonFormatter.format(snapshot).contains(
+                "{\"status\":\"DEGRADED\",\"component\":\"agentMigrationTaskStores\","
+                        + "\"code\":\"pending_task_too_old\",\"value\":300000}"
+        ));
     }
 
     @Test
@@ -1203,6 +1219,44 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.commands().drainingDispatchers());
         assertTrue(json.contains("\"drainingDispatchers\":1"));
         assertTrue(metrics.contains("commonbattle_player_command_draining_dispatchers 1"));
+    }
+
+    @Test
+    void snapshotFormatsPlayerBusinessGatewayMigrationProtectionStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register((PlayerBusinessCommandGatewayView) () -> new PlayerBusinessCommandGatewayStats(
+                2,
+                1,
+                0,
+                0,
+                0,
+                1
+        ));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.businessCommandGateways().remoteForwardMigrationProtectedResponses());
+        assertTrue(json.contains("\"remoteForwardMigrationProtectedResponses\":1"));
+        assertTrue(metrics.contains(
+                "commonbattle_player_business_command_remote_migration_protected_responses_total 1"
+        ));
     }
 
     @Test
@@ -1855,8 +1909,13 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.actorEventSubscribers().receivedEvents());
         assertEquals(1, snapshot.actorEventSubscribers().enqueuedEvents());
         assertEquals(1, snapshot.actorEventSubscribers().failedEvents());
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "actorEventSubscribers", "failed_events", 1)));
         assertTrue(json.contains("\"actorEventSubscribers\":{\"subscriberCount\":1"));
+        assertTrue(json.contains("\"component\":\"actorEventSubscribers\",\"code\":\"failed_events\",\"value\":1"));
         assertTrue(metrics.contains("commonbattle_actor_event_failed_total 1"));
+        assertTrue(metrics.contains("commonbattle_runtime_health_issue{status=\"DEGRADED\","
+                + "component=\"actorEventSubscribers\",code=\"failed_events\"} 1"));
     }
 
     @Test
@@ -1965,8 +2024,16 @@ class RuntimeHealthProbeTest {
         assertEquals(5, snapshot.ownerEventRepairSchedulers().isolatedOwnersTotal());
         assertEquals(4, snapshot.ownerEventRepairSchedulers().isolationSkips());
         assertEquals(3, snapshot.ownerEventRepairSchedulers().releasedIsolatedOwners());
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "ownerEventRepairSchedulers", "failed_runs", 1)));
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "ownerEventRepairSchedulers", "backoff_active", 1)));
+        assertTrue(snapshot.issues().contains(RuntimeHealthIssue.degraded(
+                "ownerEventRepairSchedulers", "isolated_owners", 2)));
         assertTrue(json.contains("\"ownerEventRepairSchedulers\":{\"schedulerCount\":1,\"pendingOwners\":3,"
                 + "\"maxDefaultPriority\":6,\"highestPendingPriority\":9"));
+        assertTrue(json.contains("\"component\":\"ownerEventRepairSchedulers\",\"code\":\"isolated_owners\","
+                + "\"value\":2"));
         assertTrue(metrics.contains("commonbattle_owner_event_repair_pending_owners 3"));
         assertTrue(metrics.contains("commonbattle_owner_event_repair_max_default_priority 6"));
         assertTrue(metrics.contains("commonbattle_owner_event_repair_highest_pending_priority 9"));
@@ -1975,6 +2042,8 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_owner_event_repair_backoff_active 1"));
         assertTrue(metrics.contains("commonbattle_owner_event_repair_isolated_owners 2"));
         assertTrue(metrics.contains("commonbattle_owner_event_repair_isolation_skips_total 4"));
+        assertTrue(metrics.contains("commonbattle_runtime_health_issue{status=\"DEGRADED\","
+                + "component=\"ownerEventRepairSchedulers\",code=\"isolated_owners\"} 2"));
     }
 
     @Test

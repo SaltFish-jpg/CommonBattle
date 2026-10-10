@@ -193,7 +193,7 @@ public final class PlayerBusinessCommandGateway implements PlayerBusinessCommand
                             completeRemoteForward(
                                     completed,
                                     timeoutFuture,
-                                    metrics::remoteForwardSuccessResponse,
+                                    () -> recordRemoteForwardSuccessResponse(response),
                                     metrics::lateRemoteForwardResponse,
                                     () -> callback.completed(response)
                             );
@@ -282,6 +282,21 @@ public final class PlayerBusinessCommandGateway implements PlayerBusinessCommand
         if (future != null) {
             future.cancel(false);
         }
+    }
+
+    private void recordRemoteForwardSuccessResponse(PlayerBusinessResponse response) {
+        metrics.remoteForwardSuccessResponse();
+        if (migrationProtected(response)) {
+            metrics.remoteForwardMigrationProtectedResponse();
+        }
+    }
+
+    private static boolean migrationProtected(PlayerBusinessResponse response) {
+        if (response.status() != PlayerBusinessResponseStatus.FAILED) {
+            return false;
+        }
+        return PlayerCommandStatus.AGENT_MIGRATING.name().equals(response.code())
+                || PlayerCommandStatus.ROUTED_REMOTE.name().equals(response.code());
     }
 
     private static final class TimeoutThreadFactory implements ThreadFactory {

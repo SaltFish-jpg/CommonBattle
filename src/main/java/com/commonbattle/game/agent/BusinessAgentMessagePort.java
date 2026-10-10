@@ -37,4 +37,21 @@ public interface BusinessAgentMessagePort extends AgentMessagePort {
     void sendPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback);
 
     void sendLocalPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback);
+
+    <T> void requestPlayerCommand(
+            ActorRef requester,
+            PlayerCommand command,
+            Class<T> payloadType,
+            BusinessAgentCallOptions options,
+            LocalAskCallback<T> callback
+    );
+
+    default <T> void requestPlayerCommand(
+            ActorRef requester,
+            PlayerCommand command,
+            Class<T> payloadType,
+            LocalAskCallback<T> callback
+    ) {
+        requestPlayerCommand(requester, command, payloadType, BusinessAgentCallOptions.defaults(), callback);
+    }
 }

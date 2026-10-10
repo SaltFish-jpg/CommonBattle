@@ -5,6 +5,8 @@ import com.commonbattle.actor.ActorMailboxStats;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationAdmin;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationResult;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationStatus;
+import com.commonbattle.actor.agent.migration.AgentMigrationTask;
+import com.commonbattle.actor.agent.migration.AgentMigrationTaskStatus;
 import com.commonbattle.actor.backpressure.ActorHotspotOverride;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideAdmin;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideMode;
@@ -61,6 +63,8 @@ public final class OpsHttpServer implements AutoCloseable {
     private static final int DEFAULT_ACTOR_HOTSPOT_LIMIT = 128;
     private static final int MAX_ACTOR_HOTSPOT_OVERRIDE_ENTRIES = 256;
     private static final int DEFAULT_ACTOR_HOTSPOT_OVERRIDE_LIMIT = 128;
+    private static final int MAX_AGENT_MIGRATION_TASK_ENTRIES = 256;
+    private static final int DEFAULT_AGENT_MIGRATION_TASK_LIMIT = 128;
     private static final int MAX_PLAYER_COMMAND_AUDIT_ENTRIES = 256;
     private static final int DEFAULT_PLAYER_COMMAND_AUDIT_LIMIT = 128;
     private static final int MAX_EVENT_GATED_COMMAND_AUDIT_ENTRIES = 256;
@@ -395,6 +399,7 @@ public final class OpsHttpServer implements AutoCloseable {
         server.createContext("/actor-hotspot-overrides/set", this::setActorHotspotOverride);
         server.createContext("/actor-hotspot-overrides/clear", this::clearActorHotspotOverride);
         server.createContext("/actor-hotspot-migrations/submit", this::submitActorHotspotMigrations);
+        server.createContext("/agent-migration-tasks", this::agentMigrationTasks);
         server.createContext("/player-command-audit", this::playerCommandAudit);
         server.createContext("/event-gated-command-audit", this::eventGatedCommandAudit);
         server.createContext("/bag-change-audit", this::bagChangeAudit);
@@ -505,7 +510,9 @@ public final class OpsHttpServer implements AutoCloseable {
                 first = false;
                 json.append("{\"ownerKey\":\"").append(escape(owner.ownerKey())).append("\",")
                         .append("\"priority\":").append(owner.priority()).append(',')
-                        .append("\"remainingMillis\":").append(owner.remainingMillis()).append('}');
+                        .append("\"remainingMillis\":").append(owner.remainingMillis()).append(',')
+                        .append("\"failureCount\":").append(owner.failureCount()).append(',')
+                        .append("\"lastFailureMessage\":\"").append(escape(owner.lastFailureMessage())).append("\"}");
             }
         }
         json.append("]}");
@@ -1118,6 +1125,41 @@ public final class OpsHttpServer implements AutoCloseable {
         respondJson(exchange, 200, json.toString());
     }
 
+    private void agentMigrationTasks(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        AgentMigrationTaskQuery query;
+        try {
+            query = agentMigrationTaskQuery(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        Instant now = probe.snapshot().timestamp();
+        AgentMigrationTaskPage page = agentMigrationTaskPage(query);
+        StringBuilder json = new StringBuilder();
+        json.append("{\"entries\":[");
+        boolean first = true;
+        for (AgentMigrationTask entry : page.entries()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            appendAgentMigrationTask(json, entry, now);
+        }
+        json.append("],")
+                .append("\"matched\":").append(page.matched()).append(',')
+                .append("\"offset\":").append(query.offset()).append(',')
+                .append("\"limit\":").append(query.limit())
+                .append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
     private ActorIncidentPage actorIncidentPage(ActorIncidentQuery query) {
         List<ActorIncidentRecord> matched = actorIncidentViews.stream()
                 .flatMap(view -> view.recentActorIncidents().stream())
@@ -1183,6 +1225,19 @@ public final class OpsHttpServer implements AutoCloseable {
                         || query.group().equals(ActorMailboxDiagnostics.groupOfActorId(entry.actorId())))
                 .filter(entry -> query.actorIdPrefix() == null || entry.actorId().startsWith(query.actorIdPrefix()))
                 .toList();
+    }
+
+    private AgentMigrationTaskPage agentMigrationTaskPage(AgentMigrationTaskQuery query) {
+        List<AgentMigrationTask> matched = probe.agentMigrationTasks().stream()
+                .filter(task -> query.status() == null || query.status() == task.status())
+                .filter(task -> query.identityType() == null || query.identityType().equals(task.identity().type()))
+                .filter(task -> query.identityKey() == null || query.identityKey().equals(task.identity().key()))
+                .filter(task -> query.taskId() == null || query.taskId().equals(task.taskId()))
+                .filter(task -> !query.pendingOnly() || isPending(task))
+                .toList();
+        int from = Math.min(query.offset(), matched.size());
+        int to = Math.min(from + query.limit(), matched.size());
+        return new AgentMigrationTaskPage(matched.subList(from, to), matched.size(), query.offset(), query.limit());
     }
 
     private void appendOwnerRepairAuditEntry(StringBuilder json, OwnerRepairOpsAuditRecord entry) {
@@ -1264,7 +1319,21 @@ public final class OpsHttpServer implements AutoCloseable {
                 .append("\"queuedTasks\":").append(entry.queuedTasks()).append(',')
                 .append("\"recentSlowTasks\":").append(entry.recentSlowTasks()).append(',')
                 .append("\"maxSlowTaskMillis\":").append(entry.maxSlowTaskMillis()).append(',')
-                .append("\"action\":\"").append(entry.action().name()).append("\"}");
+                .append("\"action\":\"").append(entry.action().name()).append("\",")
+                .append("\"score\":").append(entry.score()).append(',')
+                .append("\"reasons\":[");
+        boolean first = true;
+        for (ActorHotspotReason reason : ActorHotspotReason.values()) {
+            if (!entry.reasons().contains(reason)) {
+                continue;
+            }
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append('"').append(reason.name()).append('"');
+        }
+        json.append("]}");
     }
 
     private void appendActorHotspotOverride(StringBuilder json, ActorHotspotOverride entry) {
@@ -1289,6 +1358,27 @@ public final class OpsHttpServer implements AutoCloseable {
                         .orElse(""))).append("\",")
                 .append("\"status\":\"").append(result.status().name()).append("\",")
                 .append("\"reason\":\"").append(escape(result.reason())).append("\"}");
+    }
+
+    private void appendAgentMigrationTask(StringBuilder json, AgentMigrationTask task, Instant now) {
+        json.append("{\"taskId\":\"").append(escape(task.taskId())).append("\",")
+                .append("\"identity\":\"").append(escape(task.identity().type() + ":" + task.identity().key()))
+                .append("\",")
+                .append("\"identityType\":\"").append(escape(task.identity().type())).append("\",")
+                .append("\"identityKey\":\"").append(escape(task.identity().key())).append("\",")
+                .append("\"sourceService\":\"").append(escape(task.source().serviceId().wireName())).append("\",")
+                .append("\"sourceActor\":\"").append(escape(task.source().actorRef().id())).append("\",")
+                .append("\"targetService\":\"").append(escape(task.target().serviceId().wireName())).append("\",")
+                .append("\"targetActor\":\"").append(escape(task.target().actorRef().id())).append("\",")
+                .append("\"snapshotType\":\"").append(escape(task.snapshot().stateType())).append("\",")
+                .append("\"status\":\"").append(task.status().name()).append("\",")
+                .append("\"reason\":\"").append(escape(task.reason())).append("\",")
+                .append("\"updatedAt\":\"").append(task.updatedAt()).append("\",")
+                .append("\"leaseOwner\":\"").append(escape(task.leaseOwner())).append("\",")
+                .append("\"leaseExpiresAt\":\"").append(task.leaseExpiresAt()).append("\",")
+                .append("\"leased\":").append(!task.leaseAvailable(now)).append(',')
+                .append("\"pendingAgeMillis\":").append(pendingAgeMillis(task, now))
+                .append('}');
     }
 
     private void appendCategoryMap(StringBuilder json, Map<ActorTaskCategory, Integer> values) {
@@ -1607,6 +1697,45 @@ public final class OpsHttpServer implements AutoCloseable {
         }
     }
 
+    private static AgentMigrationTaskQuery agentMigrationTaskQuery(String rawQuery) {
+        AgentMigrationTaskStatus status = null;
+        String rawStatus = blankToNull(queryParam(rawQuery, "status"));
+        if (rawStatus != null) {
+            try {
+                status = AgentMigrationTaskStatus.valueOf(rawStatus);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("invalid_status", e);
+            }
+        }
+        String identityType = blankToNull(queryParam(rawQuery, "identityType"));
+        String identityKey = blankToNull(queryParam(rawQuery, "identityKey"));
+        String taskId = blankToNull(queryParam(rawQuery, "taskId"));
+        boolean pendingOnly = booleanQueryParam(rawQuery, "pendingOnly", false);
+        int offset = intQueryParam(rawQuery, "offset", 0);
+        int limit = intQueryParam(rawQuery, "limit", DEFAULT_AGENT_MIGRATION_TASK_LIMIT);
+        if (offset < 0) {
+            throw new IllegalArgumentException("invalid_offset");
+        }
+        if (limit < 1 || limit > MAX_AGENT_MIGRATION_TASK_ENTRIES) {
+            throw new IllegalArgumentException("invalid_limit");
+        }
+        return new AgentMigrationTaskQuery(status, identityType, identityKey, taskId, pendingOnly, offset, limit);
+    }
+
+    private static boolean booleanQueryParam(String rawQuery, String name, boolean defaultValue) {
+        String value = blankToNull(queryParam(rawQuery, name));
+        if (value == null) {
+            return defaultValue;
+        }
+        if ("true".equals(value)) {
+            return true;
+        }
+        if ("false".equals(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException("invalid_" + name);
+    }
+
     private static Integer optionalIntQueryParam(String rawQuery, String name) {
         String value = blankToNull(queryParam(rawQuery, name));
         if (value == null) {
@@ -1667,6 +1796,37 @@ public final class OpsHttpServer implements AutoCloseable {
         byte[] left = provided.getBytes(StandardCharsets.UTF_8);
         byte[] right = expected.getBytes(StandardCharsets.UTF_8);
         return MessageDigest.isEqual(left, right);
+    }
+
+    private static boolean isPending(AgentMigrationTask task) {
+        return task.status() == AgentMigrationTaskStatus.PREPARED
+                || task.status() == AgentMigrationTaskStatus.MOVED;
+    }
+
+    private static long pendingAgeMillis(AgentMigrationTask task, Instant now) {
+        if (!isPending(task)) {
+            return 0;
+        }
+        return Math.max(0, Duration.between(task.updatedAt(), now).toMillis());
+    }
+
+    private record AgentMigrationTaskQuery(
+            AgentMigrationTaskStatus status,
+            String identityType,
+            String identityKey,
+            String taskId,
+            boolean pendingOnly,
+            int offset,
+            int limit
+    ) {
+    }
+
+    private record AgentMigrationTaskPage(
+            List<AgentMigrationTask> entries,
+            int matched,
+            int offset,
+            int limit
+    ) {
     }
 
     private record ActorHotspotOverrideQuery(

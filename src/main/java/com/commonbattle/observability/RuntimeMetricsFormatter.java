@@ -23,6 +23,7 @@ public final class RuntimeMetricsFormatter {
         Objects.requireNonNull(snapshot, "snapshot");
         StringBuilder metrics = new StringBuilder(2048);
         status(metrics, snapshot);
+        healthIssues(metrics, snapshot);
         actorSystem(metrics, snapshot);
         actorMailboxes(metrics, snapshot);
         actorMailboxPressures(metrics, snapshot);
@@ -84,6 +85,22 @@ public final class RuntimeMetricsFormatter {
         type(metrics, "commonbattle_runtime_status", "gauge");
         for (RuntimeHealthStatus status : RuntimeHealthStatus.values()) {
             gauge(metrics, "commonbattle_runtime_status", "status", status.name(), status == snapshot.status() ? 1 : 0);
+        }
+    }
+
+    private static void healthIssues(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        help(metrics, "commonbattle_runtime_health_issue", "Runtime health issues grouped by status, component and code.");
+        type(metrics, "commonbattle_runtime_health_issue", "gauge");
+        for (RuntimeHealthIssue issue : snapshot.issues()) {
+            gauge(metrics,
+                    "commonbattle_runtime_health_issue",
+                    "status",
+                    issue.status().name(),
+                    "component",
+                    issue.component(),
+                    "code",
+                    issue.code(),
+                    issue.value());
         }
     }
 
@@ -327,6 +344,8 @@ public final class RuntimeMetricsFormatter {
                 snapshot.businessCommandGateways().remoteForwardTimedOutResponses());
         gauge(metrics, "commonbattle_player_business_command_late_remote_responses_total",
                 snapshot.businessCommandGateways().lateRemoteForwardResponses());
+        gauge(metrics, "commonbattle_player_business_command_remote_migration_protected_responses_total",
+                snapshot.businessCommandGateways().remoteForwardMigrationProtectedResponses());
     }
 
     private static void businessCommandCatalogs(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -1042,6 +1061,35 @@ public final class RuntimeMetricsFormatter {
                 .append(secondLabel)
                 .append("=\"")
                 .append(escapeLabel(secondValue))
+                .append("\"} ")
+                .append(value)
+                .append('\n');
+    }
+
+    private static void gauge(
+            StringBuilder metrics,
+            String name,
+            String firstLabel,
+            String firstValue,
+            String secondLabel,
+            String secondValue,
+            String thirdLabel,
+            String thirdValue,
+            long value
+    ) {
+        metrics.append(name)
+                .append('{')
+                .append(firstLabel)
+                .append("=\"")
+                .append(escapeLabel(firstValue))
+                .append("\",")
+                .append(secondLabel)
+                .append("=\"")
+                .append(escapeLabel(secondValue))
+                .append("\",")
+                .append(thirdLabel)
+                .append("=\"")
+                .append(escapeLabel(thirdValue))
                 .append("\"} ")
                 .append(value)
                 .append('\n');

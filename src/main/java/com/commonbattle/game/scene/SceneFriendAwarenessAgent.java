@@ -11,6 +11,9 @@ import com.commonbattle.game.social.FriendOwnerKeyParser;
 import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.game.social.FriendSnapshot;
 import com.commonbattle.game.social.FriendSnapshotReader;
+import com.commonbattle.game.snapshot.SnapshotReadMetrics;
+import com.commonbattle.game.snapshot.SnapshotReadStats;
+import com.commonbattle.game.snapshot.SnapshotReadStatus;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -39,11 +42,7 @@ public final class SceneFriendAwarenessAgent {
     private long repairRequests;
     private long appliedSnapshots;
     private long ignoredSnapshots;
-    private long freshReadRequests;
-    private long freshReadLocalHits;
-    private long freshReadRefreshes;
-    private long freshReadRemoteStale;
-    private long freshReadRemoteMisses;
+    private final SnapshotReadMetrics freshReads = new SnapshotReadMetrics();
 
     public SceneFriendAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, OwnerEventInterestControl.noop());
@@ -181,11 +180,11 @@ public final class SceneFriendAwarenessAgent {
         if (minimumRevision < 0) {
             throw new IllegalArgumentException("minimumRevision must not be negative");
         }
-        freshReadRequests++;
+        freshReads.request();
         Optional<ScenePlayerFriendView> local = friendsOf(playerId)
                 .filter(view -> !view.stale() && view.revision() >= minimumRevision);
         if (local.isPresent()) {
-            freshReadLocalHits++;
+            freshReads.record(SnapshotReadStatus.LOCAL_HIT);
             return SceneFriendReadResult.of(local.orElseThrow(), SceneFriendReadStatus.LOCAL_HIT);
         }
         Optional<FriendSnapshot> snapshot = snapshotReader.find(playerId);
@@ -194,17 +193,17 @@ public final class SceneFriendAwarenessAgent {
             Optional<ScenePlayerFriendView> refreshed = friendsOf(playerId)
                     .filter(view -> !view.stale() && view.revision() >= minimumRevision);
             if (refreshed.isPresent()) {
-                freshReadRefreshes++;
+                freshReads.record(SnapshotReadStatus.REFRESHED);
                 return SceneFriendReadResult.of(refreshed.orElseThrow(), SceneFriendReadStatus.REFRESHED);
             }
-            freshReadRemoteStale++;
+            freshReads.record(SnapshotReadStatus.REMOTE_STALE);
             return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_STALE);
         }
         if (snapshot.isPresent()) {
-            freshReadRemoteStale++;
+            freshReads.record(SnapshotReadStatus.REMOTE_STALE);
             return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_STALE);
         } else {
-            freshReadRemoteMisses++;
+            freshReads.record(SnapshotReadStatus.REMOTE_MISS);
             return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_MISS);
         }
     }
@@ -224,6 +223,7 @@ public final class SceneFriendAwarenessAgent {
                 staleViews++;
             }
         }
+        SnapshotReadStats readStats = freshReads.snapshot();
         return new SceneProjectionStats(
                 receivedEvents,
                 appliedEvents,
@@ -233,11 +233,11 @@ public final class SceneFriendAwarenessAgent {
                 appliedSnapshots,
                 ignoredSnapshots,
                 staleViews,
-                freshReadRequests,
-                freshReadLocalHits,
-                freshReadRefreshes,
-                freshReadRemoteStale,
-                freshReadRemoteMisses
+                readStats.requests(),
+                readStats.localHits(),
+                readStats.refreshes(),
+                readStats.remoteStale(),
+                readStats.remoteMisses()
         );
     }
 

@@ -186,6 +186,26 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
         playerCommands.submitLocalOnly(command, callback);
     }
 
+    @Override
+    public <T> void requestPlayerCommand(
+            ActorRef requester,
+            PlayerCommand command,
+            Class<T> payloadType,
+            BusinessAgentCallOptions options,
+            LocalAskCallback<T> callback
+    ) {
+        Objects.requireNonNull(requester, "requester");
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(payloadType, "payloadType");
+        Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(callback, "callback");
+        playerCommands.submitDetailed(command, response -> recordCallbackDelivery(messages.tryTellLocal(
+                requester,
+                options.callbackCategory(),
+                context -> completePlayerCommandRequest(context, command, response, payloadType, callback)
+        )));
+    }
+
     public BusinessAgentMessageStats stats() {
         return metrics.snapshot();
     }
@@ -276,6 +296,25 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
         if (router == null || handlers == null) {
             throw new IllegalStateException("Business agent request routing is not configured");
         }
+    }
+
+    private static <T> void completePlayerCommandRequest(
+            com.commonbattle.actor.ActorContext context,
+            PlayerCommand command,
+            PlayerBusinessResponse response,
+            Class<T> payloadType,
+            LocalAskCallback<T> callback
+    ) {
+        if (!response.succeeded()) {
+            callback.failure(context, new PlayerBusinessCommandRequestException(command, response));
+            return;
+        }
+        Object payload = response.payload();
+        if (payload != null && !payloadType.isInstance(payload)) {
+            callback.failure(context, new PlayerBusinessCommandPayloadTypeException(command, payloadType, payload.getClass()));
+            return;
+        }
+        callback.success(context, payloadType.cast(payload));
     }
 
     @Override

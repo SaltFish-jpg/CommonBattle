@@ -1,5 +1,7 @@
 package com.commonbattle.game.profile;
 
+import com.commonbattle.game.snapshot.SnapshotReadStats;
+
 /**
  * 玩家基础资料运行时读取统计。
  */
@@ -15,6 +17,19 @@ public record ProfileRuntimeStats(
 ) {
     public static ProfileRuntimeStats empty() {
         return new ProfileRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    public static ProfileRuntimeStats from(SnapshotReadStats stats) {
+        return new ProfileRuntimeStats(
+                stats.requests(),
+                stats.localHits(),
+                stats.localStale(),
+                stats.localMisses(),
+                stats.refreshes(),
+                stats.remoteStale(),
+                stats.remoteMisses(),
+                stats.localFallbacks()
+        );
     }
 
     public ProfileRuntimeStats plus(ProfileRuntimeStats other) {

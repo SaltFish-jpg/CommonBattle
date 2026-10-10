@@ -10,6 +10,7 @@ import com.commonbattle.game.player.event.BagChangedEvent;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshot;
+import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotReader;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.player.PlayerBusinessOperations;
 import org.junit.jupiter.api.Test;
@@ -18,7 +19,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -166,6 +169,100 @@ class ScenePlayerDomainEventAgentTest {
     }
 
     @Test
+    void domainEventMailboxCallbackCanForceFreshSnapshotAfterRevisionGap() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        ScenePlayerDomainEventAgent scene = createScene(
+                executor,
+                interests,
+                playerId -> Optional.of(new PlayerDomainProjectionSnapshot(
+                        playerId,
+                        3,
+                        Map.of("forest-1", 2, "cave-1", 1),
+                        Map.of("gold", 90, "gem", 5)
+                ))
+        );
+        AtomicReference<ScenePlayerDomainReadResult> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onPlayerDomainEventAndReadFreshResult(event(10001L, 3, 1), callback::set);
+
+        assertTrue(callback.get() == null);
+
+        executor.runNext();
+
+        ScenePlayerDomainReadResult result = callback.get();
+        assertEquals(ScenePlayerDomainReadStatus.REFRESHED, result.status());
+        assertTrue(result.fresh());
+        ScenePlayerDomainView view = result.view().orElseThrow();
+        assertEquals(3, view.revision());
+        assertEquals(3, view.totalStageClears());
+        assertEquals(90, view.bagCount("gold").orElseThrow());
+        assertFalse(scene.stale(10001L));
+        assertEquals(List.of(PlayerDomainVersionedEvent.ownerKey(10001L)), interests.repairs);
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0,
+                1, 0, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void domainFreshReadResultDistinguishesRemoteStaleAndRemoteMiss() {
+        RecordingExecutor staleExecutor = new RecordingExecutor();
+        ScenePlayerDomainEventAgent staleScene = createScene(
+                staleExecutor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new PlayerDomainProjectionSnapshot(
+                        playerId,
+                        2,
+                        Map.of("forest-1", 1),
+                        Map.of("gold", 30)
+                ))
+        );
+        staleScene.enter(10001L);
+        staleExecutor.runNext();
+        AtomicReference<ScenePlayerDomainReadResult> stale = new AtomicReference<>();
+        staleScene.onPlayerDomainEventAndReadFreshResult(event(10001L, 3, 1), stale::set);
+        staleExecutor.runNext();
+
+        RecordingExecutor missExecutor = new RecordingExecutor();
+        ScenePlayerDomainEventAgent missScene = createScene(missExecutor);
+        missScene.enter(10001L);
+        missExecutor.runNext();
+        AtomicReference<ScenePlayerDomainReadResult> miss = new AtomicReference<>();
+        missScene.onPlayerDomainEventAndReadFreshResult(event(10001L, 3, 1), miss::set);
+        missExecutor.runNext();
+
+        assertEquals(ScenePlayerDomainReadStatus.REMOTE_STALE, stale.get().status());
+        assertFalse(stale.get().fresh());
+        assertTrue(stale.get().view().isEmpty());
+        assertTrue(staleScene.stale(10001L));
+        assertEquals(ScenePlayerDomainReadStatus.REMOTE_MISS, miss.get().status());
+        assertFalse(miss.get().fresh());
+        assertTrue(miss.get().view().isEmpty());
+    }
+
+    @Test
+    void directFreshDomainReadCannotRefreshOutsideSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ScenePlayerDomainEventAgent scene = createScene(
+                executor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new PlayerDomainProjectionSnapshot(
+                        playerId,
+                        1,
+                        Map.of("forest-1", 1),
+                        Map.of("gold", 30)
+                ))
+        );
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class, () -> scene.readFreshView(10001L, 1));
+        assertTrue(scene.stageClears(10001L).isEmpty());
+    }
+
+    @Test
     void enterAndLeaveDrivePlayerDomainOwnerInterestOnce() {
         RecordingExecutor executor = new RecordingExecutor();
         RecordingOwnerInterests interests = new RecordingOwnerInterests();
@@ -189,12 +286,21 @@ class ScenePlayerDomainEventAgentTest {
     }
 
     private static ScenePlayerDomainEventAgent createScene(Executor executor, OwnerEventInterestControl interests) {
+        return createScene(executor, interests, ignored -> Optional.empty());
+    }
+
+    private static ScenePlayerDomainEventAgent createScene(
+            Executor executor,
+            OwnerEventInterestControl interests,
+            PlayerDomainProjectionSnapshotReader snapshotReader
+    ) {
         ActorSystem actors = new ActorSystem(executor, 64);
         return new ScenePlayerDomainEventAgent(
                 new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
                 actors.actor("scene-domain-events"),
                 new PlayerDomainEventProcessor(),
-                interests
+                interests,
+                snapshotReader
         );
     }
 

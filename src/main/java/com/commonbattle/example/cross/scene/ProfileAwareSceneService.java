@@ -73,6 +73,9 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
         if (allianceEvents != null) {
             projection = projection.plus(allianceEvents.projectionStats());
         }
+        if (domainEvents != null) {
+            projection = projection.plus(domainEvents.projectionStats());
+        }
         return new SceneRuntimeStats(
                 delegateStats.activeScenes(),
                 delegateStats.activePlayers(),

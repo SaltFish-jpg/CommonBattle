@@ -17,6 +17,7 @@ import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryService;
 import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryScheduler;
 import com.commonbattle.actor.agent.migration.AgentMigrationRecoverySchedulerStats;
 import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryStats;
+import com.commonbattle.actor.agent.migration.AgentMigrationTask;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStore;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStoreStats;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionService;
@@ -107,7 +108,9 @@ import com.commonbattle.game.session.PlayerOutboundDeliveryView;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
@@ -602,6 +605,24 @@ public final class RuntimeHealthProbe {
         ChatRuntimeHealthStats chatRuntimeStats = chatRuntimeStats();
         SceneRuntimeHealthStats sceneRuntimeStats = sceneRuntimeStats();
         ShopRuntimeHealthStats shopRuntimeStats = shopRuntimeStats();
+        List<RuntimeHealthIssue> issues = healthIssues(
+                eventCenterStats,
+                eventSubscriptionStats,
+                actorEventSubscriberStats,
+                ownerActorEventSubscriptionStats,
+                ownerEventRepairSchedulerStats,
+                ownerEventRepairDispatcherStats,
+                profileInterestStats,
+                profileRuntimeStats,
+                sceneRuntimeStats,
+                migrationStats,
+                migrationExecutorStats,
+                migrationRecoveryStats,
+                migrationRecoverySchedulerStats,
+                migrationTaskRetentionStats,
+                migrationTaskStoreStats,
+                policy.maxMigrationPendingTaskAgeMillis()
+        );
         RuntimeHealthStatus status = status(
                 actorStats.queuedTasks(),
                 outboxStats.pendingEvents(),
@@ -644,7 +665,7 @@ public final class RuntimeHealthProbe {
                 ownerEventRepairDispatcherStats,
                 ownerRepairOpsAuditStats,
                 profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats,
-                eventGatedCommandAuditStats, bagChangeAuditStats, auditStats);
+                eventGatedCommandAuditStats, bagChangeAuditStats, auditStats, issues);
     }
 
     /**
@@ -653,6 +674,17 @@ public final class RuntimeHealthProbe {
      */
     public List<ActorMailboxStats> queuedMailboxStats() {
         return actors.queuedMailboxStats();
+    }
+
+    /**
+     * 返回迁移任务明细，供运维接口下钻定位卡住的 Agent。
+     */
+    public List<AgentMigrationTask> agentMigrationTasks() {
+        return migrationTaskStores.stream()
+                .flatMap(store -> store.tasks().stream())
+                .sorted(Comparator.comparing(AgentMigrationTask::updatedAt).reversed()
+                        .thenComparing(AgentMigrationTask::taskId))
+                .toList();
     }
 
     private ActorMailboxPressureHealthStats actorMailboxPressureStats() {
@@ -1711,6 +1743,84 @@ public final class RuntimeHealthProbe {
             return RuntimeHealthStatus.DEGRADED;
         }
         return RuntimeHealthStatus.UP;
+    }
+
+    private static List<RuntimeHealthIssue> healthIssues(
+            EventCenterHealthStats eventCenterStats,
+            EventSubscriptionHealthStats eventSubscriptionStats,
+            ActorEventSubscriberHealthStats actorEventSubscriberStats,
+            OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptionStats,
+            OwnerEventRepairSchedulerHealthStats ownerEventRepairSchedulerStats,
+            OwnerEventRepairDispatcherHealthStats ownerEventRepairDispatcherStats,
+            ProfileInterestHealthStats profileInterestStats,
+            ProfileRuntimeHealthStats profileRuntimeStats,
+            SceneRuntimeHealthStats sceneRuntimeStats,
+            AgentMigrationCoordinatorStats migrationStats,
+            AgentMigrationExecutorStats migrationExecutorStats,
+            AgentMigrationRecoveryStats migrationRecoveryStats,
+            AgentMigrationRecoverySchedulerStats migrationRecoverySchedulerStats,
+            AgentMigrationTaskRetentionStats migrationTaskRetentionStats,
+            AgentMigrationTaskStoreStats migrationTaskStoreStats,
+            long maxMigrationPendingTaskAgeMillis
+    ) {
+        ArrayList<RuntimeHealthIssue> issues = new ArrayList<>();
+        addIssue(issues, "eventCenters", "delivery_failures", eventCenterStats.deliveryFailures());
+        addIssue(issues, "eventSubscriptions", "subscribe_failures", eventSubscriptionStats.subscribeFailures());
+        addIssue(issues, "eventSubscriptions", "replay_failures", eventSubscriptionStats.replayFailures());
+        addIssue(issues, "eventSubscriptions", "replay_unavailable_owners",
+                eventSubscriptionStats.replayUnavailableOwners());
+        addIssue(issues, "eventSubscriptions", "replay_repair_failures",
+                eventSubscriptionStats.replayRepairFailures());
+        addIssue(issues, "eventSubscriptions", "cursor_failures", eventSubscriptionStats.cursorFailures());
+        addIssue(issues, "actorEventSubscribers", "rejected_events", actorEventSubscriberStats.rejectedEvents());
+        addIssue(issues, "actorEventSubscribers", "failed_events", actorEventSubscriberStats.failedEvents());
+        addIssue(issues, "ownerActorEventSubscriptions", "replay_failures",
+                ownerActorEventSubscriptionStats.replayFailures());
+        addIssue(issues, "ownerActorEventSubscriptions", "repair_failures",
+                ownerActorEventSubscriptionStats.repairFailures());
+        addIssue(issues, "ownerEventRepairSchedulers", "failed_runs", ownerEventRepairSchedulerStats.failedRuns());
+        addIssue(issues, "ownerEventRepairSchedulers", "backoff_active",
+                ownerEventRepairSchedulerStats.backoffActive() ? 1 : 0);
+        addIssue(issues, "ownerEventRepairSchedulers", "isolated_owners",
+                ownerEventRepairSchedulerStats.isolatedOwners());
+        addIssue(issues, "ownerEventRepairDispatchers", "failed_scheduler_runs",
+                ownerEventRepairDispatcherStats.failedSchedulerRuns());
+        addIssue(issues, "profileInterests", "replay_failures", profileInterestStats.replayFailures());
+        addIssue(issues, "profileInterests", "repair_failures", profileInterestStats.repairFailures());
+        addIssue(issues, "profileRuntimes", "remote_stale", profileRuntimeStats.remoteStale());
+        addIssue(issues, "profileRuntimes", "local_fallbacks", profileRuntimeStats.localFallbacks());
+        addIssue(issues, "sceneRuntimes", "projection_stale_views", sceneRuntimeStats.projectionStaleViews());
+        addIssue(issues, "sceneRuntimes", "projection_fresh_read_remote_stale",
+                sceneRuntimeStats.projectionFreshReadRemoteStale());
+        addIssue(issues, "sceneRuntimes", "projection_fresh_read_remote_misses",
+                sceneRuntimeStats.projectionFreshReadRemoteMisses());
+        addIssue(issues, "agentMigrations", "rollback_failed", migrationStats.rollbackFailed());
+        addIssue(issues, "agentMigrationExecutors", "rejected", migrationExecutorStats.rejected());
+        addIssue(issues, "agentMigrationExecutors", "failed", migrationExecutorStats.failed());
+        addIssue(issues, "agentMigrationRecoveries", "rollback_failed", migrationRecoveryStats.rollbackFailed());
+        addIssue(issues, "agentMigrationRecoveries", "executor_rejected",
+                migrationRecoveryStats.executorRejected());
+        addIssue(issues, "agentMigrationRecoverySchedulers", "failed_runs",
+                migrationRecoverySchedulerStats.failedRuns());
+        addIssue(issues, "agentMigrationTaskRetentions", "failed_runs",
+                migrationTaskRetentionStats.failedRuns());
+        if (maxMigrationPendingTaskAgeMillis > 0
+                && migrationTaskStoreStats.oldestPendingAgeMillis() > maxMigrationPendingTaskAgeMillis) {
+            addIssue(issues, "agentMigrationTaskStores", "pending_task_too_old",
+                    migrationTaskStoreStats.oldestPendingAgeMillis());
+        }
+        return List.copyOf(issues);
+    }
+
+    private static void addIssue(
+            Collection<RuntimeHealthIssue> issues,
+            String component,
+            String code,
+            long value
+    ) {
+        if (value > 0) {
+            issues.add(RuntimeHealthIssue.degraded(component, code, value));
+        }
     }
 
     private static boolean exceedsEnabledLimit(int value, int limit) {
