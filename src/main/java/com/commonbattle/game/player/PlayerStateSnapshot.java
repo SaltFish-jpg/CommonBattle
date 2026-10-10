@@ -5,6 +5,7 @@ import com.commonbattle.game.achievement.PlayerAchievementsSnapshot;
 import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.battle.PlayerBattleSnapshot;
 import com.commonbattle.game.growth.GrowthSnapshot;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.shop.PlayerShopSnapshot;
 import com.commonbattle.game.task.PlayerTasksSnapshot;
 
@@ -13,7 +14,7 @@ import java.util.Objects;
 
 /**
  * 玩家通用业务状态快照。
- * 只保存业务状态数据；服务实现、活动配置和物品配置由进程启动时重新注入。
+ * 保存玩家业务状态和入口幂等水位；服务实现、活动配置和物品配置由进程启动时重新注入。
  */
 public record PlayerStateSnapshot(
         long playerId,
@@ -25,6 +26,7 @@ public record PlayerStateSnapshot(
         PlayerBattleSnapshot battle,
         PlayerTasksSnapshot tasks,
         PlayerAchievementsSnapshot achievements,
+        PlayerCommandSequencerSnapshot commandSequencer,
         long eventRevision,
         long revision,
         Instant savedAt
@@ -104,6 +106,24 @@ public record PlayerStateSnapshot(
         this(playerId, createdAt, bag, activities, growth, shop, battle, tasks, achievements, 0, revision, savedAt);
     }
 
+    public PlayerStateSnapshot(
+            long playerId,
+            Instant createdAt,
+            BagSnapshot bag,
+            PlayerActivitiesSnapshot activities,
+            GrowthSnapshot growth,
+            PlayerShopSnapshot shop,
+            PlayerBattleSnapshot battle,
+            PlayerTasksSnapshot tasks,
+            PlayerAchievementsSnapshot achievements,
+            long eventRevision,
+            long revision,
+            Instant savedAt
+    ) {
+        this(playerId, createdAt, bag, activities, growth, shop, battle, tasks, achievements,
+                PlayerCommandSequencerSnapshot.empty(playerId), eventRevision, revision, savedAt);
+    }
+
     public PlayerStateSnapshot {
         Objects.requireNonNull(createdAt, "createdAt");
         Objects.requireNonNull(bag, "bag");
@@ -113,9 +133,13 @@ public record PlayerStateSnapshot(
         Objects.requireNonNull(battle, "battle");
         Objects.requireNonNull(tasks, "tasks");
         Objects.requireNonNull(achievements, "achievements");
+        Objects.requireNonNull(commandSequencer, "commandSequencer");
         Objects.requireNonNull(savedAt, "savedAt");
         if (playerId <= 0) {
             throw new IllegalArgumentException("playerId must be positive");
+        }
+        if (commandSequencer.playerId() != playerId) {
+            throw new IllegalArgumentException("commandSequencer playerId mismatch");
         }
         if (eventRevision < 0) {
             throw new IllegalArgumentException("eventRevision must not be negative");
@@ -123,5 +147,23 @@ public record PlayerStateSnapshot(
         if (revision < 0) {
             throw new IllegalArgumentException("revision must not be negative");
         }
+    }
+
+    public PlayerStateSnapshot withCommandSequencer(PlayerCommandSequencerSnapshot commandSequencer) {
+        return new PlayerStateSnapshot(
+                playerId,
+                createdAt,
+                bag,
+                activities,
+                growth,
+                shop,
+                battle,
+                tasks,
+                achievements,
+                commandSequencer,
+                eventRevision,
+                revision,
+                savedAt
+        );
     }
 }

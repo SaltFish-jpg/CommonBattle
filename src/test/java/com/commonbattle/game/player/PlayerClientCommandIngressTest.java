@@ -1,6 +1,7 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
@@ -59,7 +60,9 @@ class PlayerClientCommandIngressTest {
             return true;
         });
 
+        assertEquals(true, ActorContext.current().isEmpty());
         PlayerClientCommandAcceptResult result = ingress.accept(envelope);
+        assertEquals(true, ActorContext.current().isEmpty());
 
         assertEquals(true, result.accepted());
         assertEquals(0, fixture.handled.get());
@@ -285,6 +288,7 @@ class PlayerClientCommandIngressTest {
             PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
             AtomicInteger handled = new AtomicInteger();
             dispatcher.handle("test.echo", (context, command) -> {
+                assertEquals(player, ActorContext.requireCurrent(player).self());
                 handled.incrementAndGet();
                 responses.succeeded(command, PlayerBusinessAck.OK);
             });

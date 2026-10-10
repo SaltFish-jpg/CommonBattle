@@ -1,5 +1,6 @@
 package com.commonbattle.observability;
 
+import com.commonbattle.game.scene.SceneProjectionStats;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 
 /**
@@ -22,13 +23,30 @@ public record SceneRuntimeHealthStats(
         long projectionRepairRequests,
         long projectionAppliedSnapshots,
         long projectionIgnoredSnapshots,
-        int projectionStaleViews
+        int projectionStaleViews,
+        long projectionFreshReadRequests,
+        long projectionFreshReadLocalHits,
+        long projectionFreshReadRefreshes,
+        long projectionFreshReadRemoteStale,
+        long projectionFreshReadRemoteMisses,
+        SceneProjectionStats friendProjection,
+        SceneProjectionStats allianceProjection
 ) {
     public static SceneRuntimeHealthStats empty() {
-        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                SceneProjectionStats.empty(), SceneProjectionStats.empty());
     }
 
     public static SceneRuntimeHealthStats from(int runtimeCount, SceneRuntimeStats stats) {
+        return from(runtimeCount, stats, SceneProjectionStats.empty(), SceneProjectionStats.empty());
+    }
+
+    public static SceneRuntimeHealthStats from(
+            int runtimeCount,
+            SceneRuntimeStats stats,
+            SceneProjectionStats friendProjection,
+            SceneProjectionStats allianceProjection
+    ) {
         return new SceneRuntimeHealthStats(
                 runtimeCount,
                 stats.activeScenes(),
@@ -46,7 +64,14 @@ public record SceneRuntimeHealthStats(
                 stats.projectionRepairRequests(),
                 stats.projectionAppliedSnapshots(),
                 stats.projectionIgnoredSnapshots(),
-                stats.projectionStaleViews()
+                stats.projectionStaleViews(),
+                stats.projectionFreshReadRequests(),
+                stats.projectionFreshReadLocalHits(),
+                stats.projectionFreshReadRefreshes(),
+                stats.projectionFreshReadRemoteStale(),
+                stats.projectionFreshReadRemoteMisses(),
+                friendProjection,
+                allianceProjection
         );
     }
 }

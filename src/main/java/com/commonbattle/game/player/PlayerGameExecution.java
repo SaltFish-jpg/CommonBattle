@@ -1,10 +1,12 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.game.activity.ActivityAccessContext;
+import com.commonbattle.game.bag.BagResult;
 import com.commonbattle.game.battle.BattleStageDefinition;
 import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.battle.BattleStaminaNotEnoughException;
 import com.commonbattle.game.growth.GrowthRecoveryResult;
+import com.commonbattle.game.player.event.BagChangedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEvent;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 
@@ -49,6 +51,10 @@ public record PlayerGameExecution(
         externalEventPublisher.accept(event);
     }
 
+    public void publishBagChanged(String reason, boolean replayed, BagResult... results) {
+        BagChangedEvent.from(profile.playerId(), reason, replayed, results).ifPresent(this::publish);
+    }
+
     public void pushSelf(String topic, Object payload) {
         pushes.push(profile.playerId(), topic, payload);
     }
@@ -85,7 +91,6 @@ public record PlayerGameExecution(
     public void pushBattleSettlementSnapshots(BattleSettlementResult result) {
         pushBattleSnapshot();
         pushBagSnapshot();
-        pushActivitySnapshot();
         pushTaskSnapshot();
         pushAchievementSnapshot();
     }

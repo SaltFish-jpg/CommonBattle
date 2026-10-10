@@ -3,7 +3,10 @@ package com.commonbattle.game.chat;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcResponder;
 import com.commonbattle.cluster.rpc.RpcStructuredException;
+import com.commonbattle.game.event.EventGatedCommandAuditSink;
+import com.commonbattle.game.event.EventGatedCommandExecutor;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -13,9 +16,26 @@ import java.util.Objects;
  */
 public final class RoutedChatEndpoint {
     private final RoutedChatService chat;
+    private final EventGatedCommandExecutor eventGatedCommands;
 
     public RoutedChatEndpoint(RoutedChatService chat) {
+        this(chat, EventGatedCommandAuditSink.noop(), Clock.systemUTC());
+    }
+
+    public RoutedChatEndpoint(
+            RoutedChatService chat,
+            EventGatedCommandAuditSink eventGatedAudits,
+            Clock clock
+    ) {
+        this(chat, new EventGatedCommandExecutor(eventGatedAudits, clock));
+    }
+
+    public RoutedChatEndpoint(
+            RoutedChatService chat,
+            EventGatedCommandExecutor eventGatedCommands
+    ) {
         this.chat = Objects.requireNonNull(chat, "chat");
+        this.eventGatedCommands = Objects.requireNonNull(eventGatedCommands, "eventGatedCommands");
     }
 
     public void bind(ClusterRpcGateway gateway) {
@@ -34,6 +54,36 @@ public final class RoutedChatEndpoint {
                 chat.sendAlliance((AllianceChatSendRequest) request.payload(), result -> respond(responder, result)));
         gateway.handle(ChatOperations.SEND_DIRECT, (request, responder) ->
                 chat.sendDirect((DirectChatSendRequest) request.payload(), result -> respond(responder, result)));
+        gateway.handle(ChatOperations.JOIN_ALLIANCE_AFTER_EVENT, (request, responder) -> {
+            AllianceChatJoinAfterEventRequest payload = (AllianceChatJoinAfterEventRequest) request.payload();
+            eventGatedCommands.<AllianceChatJoinAfterEventRequest, ChatJoinResult>execute(
+                    ChatOperations.JOIN_ALLIANCE_AFTER_EVENT,
+                    payload,
+                    (command, callback) -> chat.joinAllianceAfterChanged(command.event(), command.command(), callback),
+                    result -> result.status().name(),
+                    result -> respond(responder, result)
+            );
+        });
+        gateway.handle(ChatOperations.SEND_ALLIANCE_AFTER_EVENT, (request, responder) -> {
+            AllianceChatSendAfterEventRequest payload = (AllianceChatSendAfterEventRequest) request.payload();
+            eventGatedCommands.<AllianceChatSendAfterEventRequest, ChatSendResult>execute(
+                    ChatOperations.SEND_ALLIANCE_AFTER_EVENT,
+                    payload,
+                    (command, callback) -> chat.sendAllianceAfterChanged(command.event(), command.command(), callback),
+                    result -> result.status().name(),
+                    result -> respond(responder, result)
+            );
+        });
+        gateway.handle(ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT, (request, responder) -> {
+            DirectChatSendAfterFriendEventRequest payload = (DirectChatSendAfterFriendEventRequest) request.payload();
+            eventGatedCommands.<DirectChatSendAfterFriendEventRequest, ChatSendResult>execute(
+                    ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT,
+                    payload,
+                    (command, callback) -> chat.sendDirectAfterFriendChanged(command.event(), command.command(), callback),
+                    result -> result.status().name(),
+                    result -> respond(responder, result)
+            );
+        });
     }
 
     private static void respond(RpcResponder responder, ChatJoinResult result) {

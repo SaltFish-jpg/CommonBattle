@@ -5,6 +5,7 @@ import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.migration.AgentMigrationSnapshot;
 import com.commonbattle.actor.agent.migration.AgentMigrationStatePacker;
+import com.commonbattle.game.session.PlayerCommandSequencer;
 
 import java.util.Objects;
 
@@ -17,13 +18,23 @@ public final class PlayerAgentMigrationStatePacker implements AgentMigrationStat
 
     private final PlayerGameAgentManager agents;
     private final PlayerStateSnapshotSerializer serializer;
+    private final PlayerCommandSequencer commandSequencer;
 
     public PlayerAgentMigrationStatePacker(
             PlayerGameAgentManager agents,
             PlayerStateSnapshotSerializer serializer
     ) {
+        this(agents, serializer, null);
+    }
+
+    public PlayerAgentMigrationStatePacker(
+            PlayerGameAgentManager agents,
+            PlayerStateSnapshotSerializer serializer,
+            PlayerCommandSequencer commandSequencer
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.commandSequencer = commandSequencer;
     }
 
     @Override
@@ -35,6 +46,9 @@ public final class PlayerAgentMigrationStatePacker implements AgentMigrationStat
         PlayerGameAgent agent = agents.get(playerId)
                 .orElseThrow(() -> new IllegalStateException("player agent not loaded: " + playerId));
         PlayerStateSnapshot snapshot = agent.exportForMigrationInCurrentMailbox();
+        if (commandSequencer != null) {
+            snapshot = snapshot.withCommandSequencer(commandSequencer.snapshotForPlayer(playerId));
+        }
         return new AgentMigrationSnapshot(STATE_TYPE, serializer.serialize(snapshot));
     }
 

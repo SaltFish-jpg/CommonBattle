@@ -112,7 +112,7 @@ public final class ScenePlayerInterestCoordinator implements SceneRuntimeView {
     @Override
     public synchronized SceneRuntimeStats stats() {
         ScenePlayerInterestStats stats = interestStats();
-        SceneProjectionStats projection = friends.projectionStats().plus(alliances.projectionStats());
+        SceneProjectionStats projection = friendProjectionStats().plus(allianceProjectionStats());
         return new SceneRuntimeStats(
                 0,
                 stats.players(),
@@ -129,8 +129,23 @@ public final class ScenePlayerInterestCoordinator implements SceneRuntimeView {
                 projection.repairRequests(),
                 projection.appliedSnapshots(),
                 projection.ignoredSnapshots(),
-                projection.staleViews()
+                projection.staleViews(),
+                projection.freshReadRequests(),
+                projection.freshReadLocalHits(),
+                projection.freshReadRefreshes(),
+                projection.freshReadRemoteStale(),
+                projection.freshReadRemoteMisses()
         );
+    }
+
+    @Override
+    public synchronized SceneProjectionStats friendProjectionStats() {
+        return friends.projectionStats();
+    }
+
+    @Override
+    public synchronized SceneProjectionStats allianceProjectionStats() {
+        return alliances.projectionStats();
     }
 
     private void switchAlliance(ScenePlayerInterest interest, long previousAlliance) {

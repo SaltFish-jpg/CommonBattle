@@ -9,6 +9,8 @@ import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivityType;
 import com.commonbattle.game.achievement.AchievementClaimResult;
+import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
+import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
 import com.commonbattle.game.bag.Reward;
@@ -23,6 +25,9 @@ import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
+import com.commonbattle.game.player.event.BagChangedEvent;
+import com.commonbattle.game.player.event.BagChangeAuditEventHandler;
+import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.session.PlayerOutboundDeliveryResult;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
@@ -34,6 +39,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -124,6 +130,51 @@ class PlayerGameAgentConfigRuntimeTest {
     }
 
     @Test
+    void consumeBagItemPublishesBagChangedEventWithAttributes() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(config(1, 60));
+        List<VersionedEvent> published = new ArrayList<>();
+        PlayerGameAgent agent = createAgent(executor, registry, published::add, 0, 0);
+        agent.profile().bag().restore(new BagSnapshot(Map.of("exp_potion", 3)));
+
+        agent.consumeBagItem("exp_potion", 2, ignored -> {
+        });
+        executor.runNext();
+
+        PlayerDomainVersionedEvent event = (PlayerDomainVersionedEvent) published.getFirst();
+        assertEquals(BagChangedEvent.TYPE, event.eventType());
+        assertEquals(PlayerBusinessOperations.BAG_CONSUME_ITEM, event.subject());
+        assertEquals(2, event.delta());
+        assertEquals("exp_potion", event.attributes().get("change.0.itemId"));
+        assertEquals("3", event.attributes().get("change.0.before"));
+        assertEquals("1", event.attributes().get("change.0.after"));
+    }
+
+    @Test
+    void consumeBagItemEventCanBeWrittenToBagChangeAudit() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(config(1, 60));
+        List<VersionedEvent> published = new ArrayList<>();
+        PlayerGameAgent agent = createAgent(executor, registry, published::add, 0, 0);
+        agent.profile().bag().restore(new BagSnapshot(Map.of("exp_potion", 3)));
+        InMemoryBagChangeAuditLog audits = new InMemoryBagChangeAuditLog();
+        PlayerDomainEventProcessor processor = new PlayerDomainEventProcessor();
+        processor.on(BagChangedEvent.TYPE, new BagChangeAuditEventHandler(audits));
+
+        agent.consumeBagItem("exp_potion", 2, ignored -> {
+        });
+        executor.runNext();
+        processor.apply((PlayerDomainVersionedEvent) published.getFirst());
+
+        assertEquals(1, audits.stats().recorded());
+        assertEquals("exp_potion", audits.records().getFirst().itemId());
+        assertEquals(3, audits.records().getFirst().before());
+        assertEquals(1, audits.records().getFirst().after());
+    }
+
+    @Test
     void battleEventProgressesActivityTaskAndAchievementInsideConfigRuntime() {
         RecordingExecutor executor = new RecordingExecutor();
         GameConfigRegistry registry = registry();
@@ -163,9 +214,9 @@ class PlayerGameAgentConfigRuntimeTest {
 
         assertEquals(List.of(
                 PlayerOutboundTopicPolicies.GROWTH_SNAPSHOT,
+                PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS,
                 PlayerOutboundTopicPolicies.BATTLE_SNAPSHOT,
                 PlayerOutboundTopicPolicies.BAG_SNAPSHOT,
-                PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS,
                 PlayerOutboundTopicPolicies.TASK_PROGRESS,
                 PlayerOutboundTopicPolicies.ACHIEVEMENT_PROGRESS
         ), pushes.messages.stream().map(PushedMessage::topic).toList());
@@ -197,7 +248,12 @@ class PlayerGameAgentConfigRuntimeTest {
         publisher.replayPending();
 
         assertTrue(outbox.pending().isEmpty());
-        PlayerDomainVersionedEvent event = (PlayerDomainVersionedEvent) published.getFirst();
+        PlayerDomainVersionedEvent event = published.stream()
+                .filter(PlayerDomainVersionedEvent.class::isInstance)
+                .map(PlayerDomainVersionedEvent.class::cast)
+                .filter(candidate -> "battle.stage.cleared".equals(candidate.eventType()))
+                .findFirst()
+                .orElseThrow();
         assertEquals(10001L, event.playerId());
         assertEquals("battle.stage.cleared", event.eventType());
         assertEquals("forest-1", event.subject());

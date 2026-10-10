@@ -4,10 +4,14 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.ClusterEnvelope;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.example.cross.CombatDamageRequest;
+import com.commonbattle.example.cross.CombatDamageResult;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneResult;
+import com.commonbattle.example.cross.MoveSceneRequest;
+import com.commonbattle.example.cross.MoveSceneResult;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.game.player.ActivityProgressCommand;
 import com.commonbattle.game.player.PlayerBusinessAck;
@@ -33,7 +37,7 @@ class ProtoClusterCodecTest {
                 ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
                 ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
                 SceneOperations.ENTER,
-                new EnterSceneRequest(10001L, "room-1")
+                new EnterSceneRequest(10001L, "room-1", 12, -4)
         );
 
         ClusterEnvelope decoded = codec.decode(codec.encode(envelope));
@@ -45,6 +49,8 @@ class ProtoClusterCodecTest {
         EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, decoded.payload());
         assertEquals(10001L, payload.playerId());
         assertEquals("room-1", payload.sceneId());
+        assertEquals(12, payload.chunkX());
+        assertEquals(-4, payload.chunkY());
     }
 
     @Test
@@ -115,6 +121,77 @@ class ProtoClusterCodecTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals("room-1", requestPayload.sceneId());
         assertEquals(true, responsePayload.left());
+    }
+
+    @Test
+    void encodesMoveScenePayloads() {
+        ProtoClusterCodec codec = new ProtoClusterCodec(CrossPayloadCodecs.create());
+        ClusterEnvelope request = new ClusterEnvelope(
+                13,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                SceneOperations.MOVE,
+                new MoveSceneRequest(10001L, "world-1", 12, -4)
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                13,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                "$rpc.success",
+                new MoveSceneResult(10001L, "world-1", 12, -4, 2, 5, true,
+                        java.util.List.of(20002L),
+                        java.util.List.of(30003L),
+                        java.util.List.of(20002L),
+                        java.util.List.of(30003L))
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        MoveSceneRequest requestPayload = assertInstanceOf(MoveSceneRequest.class, decodedRequest.payload());
+        MoveSceneResult responsePayload = assertInstanceOf(MoveSceneResult.class, decodedResponse.payload());
+        assertEquals(10001L, requestPayload.playerId());
+        assertEquals("world-1", requestPayload.sceneId());
+        assertEquals(12, requestPayload.chunkX());
+        assertEquals(-4, requestPayload.chunkY());
+        assertEquals(2, responsePayload.previousShardIndex());
+        assertEquals(5, responsePayload.shardIndex());
+        assertEquals(true, responsePayload.moved());
+        assertEquals(java.util.List.of(20002L), responsePayload.visibleEnter());
+        assertEquals(java.util.List.of(30003L), responsePayload.visibleLeave());
+        assertEquals(java.util.List.of(20002L), responsePayload.observerEnter());
+        assertEquals(java.util.List.of(30003L), responsePayload.observerLeave());
+    }
+
+    @Test
+    void encodesCombatDamagePayloads() {
+        ProtoClusterCodec codec = new ProtoClusterCodec(CrossPayloadCodecs.create());
+        ClusterEnvelope request = new ClusterEnvelope(
+                14,
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                SceneOperations.COMBAT_DAMAGE,
+                new CombatDamageRequest("world-1", 10001L, 20002L, 35)
+        );
+        ClusterEnvelope response = new ClusterEnvelope(
+                14,
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                "$rpc.success",
+                new CombatDamageResult("world-1", 10001L, 20002L, 3, 35, 80, 45, true)
+        );
+
+        ClusterEnvelope decodedRequest = codec.decode(codec.encode(request));
+        ClusterEnvelope decodedResponse = codec.decode(codec.encode(response));
+
+        CombatDamageRequest requestPayload = assertInstanceOf(CombatDamageRequest.class, decodedRequest.payload());
+        CombatDamageResult responsePayload = assertInstanceOf(CombatDamageResult.class, decodedResponse.payload());
+        assertEquals("world-1", requestPayload.sceneId());
+        assertEquals(10001L, requestPayload.attackerId());
+        assertEquals(20002L, requestPayload.targetId());
+        assertEquals(35, requestPayload.damage());
+        assertEquals(true, responsePayload.applied());
+        assertEquals(45, responsePayload.hpAfter());
     }
 
     @Test

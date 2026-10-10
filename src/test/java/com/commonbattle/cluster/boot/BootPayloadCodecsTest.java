@@ -3,6 +3,7 @@ package com.commonbattle.cluster.boot;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.protocol.PayloadEncoding;
 import com.commonbattle.game.player.PlayerPushPayloads;
+import com.commonbattle.game.player.PlayerBusinessCommandProtocolValidator;
 import com.commonbattle.game.session.PlayerClientEnvelope;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.session.ProtoPlayerClientCodec;
@@ -32,5 +33,6 @@ class BootPayloadCodecsTest {
                 assertInstanceOf(PlayerPushPayloads.BagSnapshotPayload.class, decoded.payload());
         assertEquals(100, payload.itemCounts.get("gold"));
         assertEquals(PayloadEncoding.PROTOSTUFF, registry.encode(payload).codecName());
+        PlayerBusinessCommandProtocolValidator.validate(registry);
     }
 }

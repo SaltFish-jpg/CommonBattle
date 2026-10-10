@@ -199,7 +199,13 @@ class ClusterEventPayloadCodecsTest {
                 "forest-1",
                 1,
                 9,
-                Instant.parse("2026-09-01T00:00:00Z")
+                Instant.parse("2026-09-01T00:00:00Z"),
+                Map.of(
+                        "reason", "battle.clearStage",
+                        "change.0.itemId", "gold",
+                        "change.0.before", "0",
+                        "change.0.after", "30"
+                )
         );
         ClusterEnvelope envelope = new ClusterEnvelope(
                 21,
@@ -218,6 +224,9 @@ class ClusterEventPayloadCodecsTest {
         assertEquals(BattleStageClearedEvent.TYPE, decodedEvent.eventType());
         assertEquals("forest-1", decodedEvent.subject());
         assertEquals(9, decodedEvent.revision());
+        assertEquals("battle.clearStage", decodedEvent.attributes().get("reason"));
+        assertEquals("gold", decodedEvent.attributes().get("change.0.itemId"));
+        assertEquals("30", decodedEvent.attributes().get("change.0.after"));
     }
 
     @Test
@@ -454,7 +463,8 @@ class ClusterEventPayloadCodecsTest {
                 PlayerDomainProjectionSnapshotResponse.found(new PlayerDomainProjectionSnapshot(
                         10001L,
                         7,
-                        Map.of("forest-1", 2, "cave-1", 1)
+                        Map.of("forest-1", 2, "cave-1", 1),
+                        Map.of("gold", 90, "gem", 5)
                 ))
         );
 
@@ -468,6 +478,8 @@ class ClusterEventPayloadCodecsTest {
         assertEquals(10001L, requestPayload.playerId());
         assertEquals(7, responsePayload.snapshot().eventRevision());
         assertEquals(3, responsePayload.snapshot().totalStageClears());
+        assertEquals(90, responsePayload.snapshot().bagItemCounts().get("gold"));
+        assertEquals(5, responsePayload.snapshot().bagItemCounts().get("gem"));
     }
 
     private static GameConfigPackage config(long version, int expPerItem) {

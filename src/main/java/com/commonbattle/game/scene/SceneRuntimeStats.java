@@ -20,11 +20,16 @@ public record SceneRuntimeStats(
         long projectionRepairRequests,
         long projectionAppliedSnapshots,
         long projectionIgnoredSnapshots,
-        int projectionStaleViews
+        int projectionStaleViews,
+        long projectionFreshReadRequests,
+        long projectionFreshReadLocalHits,
+        long projectionFreshReadRefreshes,
+        long projectionFreshReadRemoteStale,
+        long projectionFreshReadRemoteMisses
 ) {
     public SceneRuntimeStats(int activeScenes, int activePlayers, int shardCount, int maxShardPlayers) {
         this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0);
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats(
@@ -38,7 +43,31 @@ public record SceneRuntimeStats(
             long missingLeaves
     ) {
         this(activeScenes, activePlayers, shardCount, maxShardPlayers, playerInterests, allianceReferences,
-                duplicateEnters, missingLeaves, 0, 0, 0, 0, 0, 0, 0, 0);
+                duplicateEnters, missingLeaves, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    public SceneRuntimeStats(
+            int activeScenes,
+            int activePlayers,
+            int shardCount,
+            int maxShardPlayers,
+            int playerInterests,
+            int allianceReferences,
+            long duplicateEnters,
+            long missingLeaves,
+            long projectionReceivedEvents,
+            long projectionAppliedEvents,
+            long projectionDuplicateEvents,
+            long projectionGapEvents,
+            long projectionRepairRequests,
+            long projectionAppliedSnapshots,
+            long projectionIgnoredSnapshots,
+            int projectionStaleViews
+    ) {
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, playerInterests, allianceReferences,
+                duplicateEnters, missingLeaves, projectionReceivedEvents, projectionAppliedEvents,
+                projectionDuplicateEvents, projectionGapEvents, projectionRepairRequests, projectionAppliedSnapshots,
+                projectionIgnoredSnapshots, projectionStaleViews, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats {
@@ -46,13 +75,15 @@ public record SceneRuntimeStats(
                 || playerInterests < 0 || allianceReferences < 0 || duplicateEnters < 0 || missingLeaves < 0
                 || projectionReceivedEvents < 0 || projectionAppliedEvents < 0 || projectionDuplicateEvents < 0
                 || projectionGapEvents < 0 || projectionRepairRequests < 0 || projectionAppliedSnapshots < 0
-                || projectionIgnoredSnapshots < 0 || projectionStaleViews < 0) {
+                || projectionIgnoredSnapshots < 0 || projectionStaleViews < 0 || projectionFreshReadRequests < 0
+                || projectionFreshReadLocalHits < 0 || projectionFreshReadRefreshes < 0
+                || projectionFreshReadRemoteStale < 0 || projectionFreshReadRemoteMisses < 0) {
             throw new IllegalArgumentException("scene runtime stats must not be negative");
         }
     }
 
     public static SceneRuntimeStats empty() {
-        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats plus(SceneRuntimeStats other) {
@@ -72,7 +103,12 @@ public record SceneRuntimeStats(
                 projectionRepairRequests + other.projectionRepairRequests,
                 projectionAppliedSnapshots + other.projectionAppliedSnapshots,
                 projectionIgnoredSnapshots + other.projectionIgnoredSnapshots,
-                projectionStaleViews + other.projectionStaleViews
+                projectionStaleViews + other.projectionStaleViews,
+                projectionFreshReadRequests + other.projectionFreshReadRequests,
+                projectionFreshReadLocalHits + other.projectionFreshReadLocalHits,
+                projectionFreshReadRefreshes + other.projectionFreshReadRefreshes,
+                projectionFreshReadRemoteStale + other.projectionFreshReadRemoteStale,
+                projectionFreshReadRemoteMisses + other.projectionFreshReadRemoteMisses
         );
     }
 }

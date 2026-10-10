@@ -7,7 +7,7 @@ import java.util.Objects;
 
 /**
  * 把玩家业务事件转换为活动进度。
- * 当前示例先消费战斗结算事件，后续任务、商店、养成都可以通过同一模式扩展。
+ * 事件规则可覆盖战斗、商店、养成等业务，进度变化后在当前玩家 mailbox 内推送活动快照。
  */
 public final class ActivityProgressEventHandler implements PlayerEventHandler {
     private final ActivityService activityService;
@@ -23,6 +23,7 @@ public final class ActivityProgressEventHandler implements PlayerEventHandler {
                 execution.activityAccess(),
                 event
         );
+        boolean progressed = matched > 0;
         if (event instanceof BattleStageClearedEvent battle
                 && !battle.activityId().isBlank()
                 && battle.delta() > 0
@@ -34,6 +35,10 @@ public final class ActivityProgressEventHandler implements PlayerEventHandler {
                     battle.activityId(),
                     battle.delta()
             );
+            progressed = true;
+        }
+        if (progressed) {
+            execution.pushActivitySnapshot();
         }
     }
 }

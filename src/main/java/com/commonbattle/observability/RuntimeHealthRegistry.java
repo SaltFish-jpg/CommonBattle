@@ -28,10 +28,13 @@ import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.cluster.rpc.RpcRoutePolicyView;
 import com.commonbattle.game.agent.BusinessAgentMessageView;
 import com.commonbattle.game.agent.BusinessAgentRpcEndpointView;
+import com.commonbattle.game.bag.BagChangeAuditView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.event.ActorEventSubscriberView;
+import com.commonbattle.game.event.EventGatedCommandAuditView;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
+import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
 import com.commonbattle.game.event.OwnerEventRepairDispatcherView;
 import com.commonbattle.game.event.OwnerEventRepairSchedulerView;
 import com.commonbattle.game.event.VersionedEventOutbox;
@@ -41,6 +44,8 @@ import com.commonbattle.game.chat.ChatRuntimeView;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.PlayerBusinessCommandCatalogView;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessResponseView;
 import com.commonbattle.game.player.PlayerGatewayView;
 import com.commonbattle.game.player.PlayerGameAgentManager;
@@ -91,6 +96,9 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<LocalGameConfigCache> configCaches = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<GameConfigAutoRecovery> configRecoveries = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandAuditView> commandAudits = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<EventGatedCommandAuditView> eventGatedCommandAudits =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<BagChangeAuditView> bagChangeAudits = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterEventCenter> eventCenters = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ClusterEventSubscriptionManager> eventSubscriptions = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorEventSubscriberView> actorEventSubscribers = new CopyOnWriteArrayList<>();
@@ -102,6 +110,8 @@ public final class RuntimeHealthRegistry {
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins =
             new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<OwnerEventRepairRequestAdmin> ownerEventRepairRequestAdmins =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<OwnerRepairOpsAuditView> ownerRepairOpsAudits =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ProfileInterestView> profileInterests = new CopyOnWriteArrayList<>();
@@ -112,6 +122,10 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<PlayerGameAgentManager> playerAgentManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAutoSaveScheduler> playerAutoSaves = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAgentDrainService> playerAgentDrains = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerBusinessCommandCatalogView> playerBusinessCommandCatalogs =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerBusinessCommandGatewayView> playerBusinessCommandGateways =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerBusinessResponseView> playerBusinessResponses = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerOutboundDeliveryView> playerOutboundDeliveries = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerGatewayView> playerGateways = new CopyOnWriteArrayList<>();
@@ -161,6 +175,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, LocalGameConfigCache.class, configCaches);
         addIf(component, GameConfigAutoRecovery.class, configRecoveries);
         addIf(component, PlayerCommandAuditView.class, commandAudits);
+        addIf(component, EventGatedCommandAuditView.class, eventGatedCommandAudits);
+        addIf(component, BagChangeAuditView.class, bagChangeAudits);
         addIf(component, ClusterEventCenter.class, eventCenters);
         addIf(component, ClusterEventSubscriptionManager.class, eventSubscriptions);
         addIf(component, ActorEventSubscriberView.class, actorEventSubscribers);
@@ -168,6 +184,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, OwnerEventRepairSchedulerView.class, ownerEventRepairSchedulers);
         addIf(component, OwnerEventRepairDispatcherView.class, ownerEventRepairDispatchers);
         addIf(component, OwnerEventRepairIsolationAdmin.class, ownerEventRepairIsolationAdmins);
+        addIf(component, OwnerEventRepairRequestAdmin.class, ownerEventRepairRequestAdmins);
         addIf(component, OwnerRepairOpsAuditView.class, ownerRepairOpsAudits);
         addIf(component, ProfileInterestView.class, profileInterests);
         addIf(component, ProfileRuntimeView.class, profileRuntimes);
@@ -177,6 +194,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, PlayerGameAgentManager.class, playerAgentManagers);
         addIf(component, PlayerAutoSaveScheduler.class, playerAutoSaves);
         addIf(component, PlayerAgentDrainService.class, playerAgentDrains);
+        addIf(component, PlayerBusinessCommandCatalogView.class, playerBusinessCommandCatalogs);
+        addIf(component, PlayerBusinessCommandGatewayView.class, playerBusinessCommandGateways);
         addIf(component, PlayerBusinessResponseView.class, playerBusinessResponses);
         addIf(component, PlayerOutboundDeliveryView.class, playerOutboundDeliveries);
         addIf(component, PlayerGatewayView.class, playerGateways);
@@ -297,6 +316,14 @@ public final class RuntimeHealthRegistry {
         return List.copyOf(commandAudits);
     }
 
+    public List<EventGatedCommandAuditView> eventGatedCommandAudits() {
+        return List.copyOf(eventGatedCommandAudits);
+    }
+
+    public List<BagChangeAuditView> bagChangeAudits() {
+        return List.copyOf(bagChangeAudits);
+    }
+
     public List<ClusterEventCenter> eventCenters() {
         return List.copyOf(eventCenters);
     }
@@ -323,6 +350,10 @@ public final class RuntimeHealthRegistry {
 
     public List<OwnerEventRepairIsolationAdmin> ownerEventRepairIsolationAdmins() {
         return List.copyOf(ownerEventRepairIsolationAdmins);
+    }
+
+    public List<OwnerEventRepairRequestAdmin> ownerEventRepairRequestAdmins() {
+        return List.copyOf(ownerEventRepairRequestAdmins);
     }
 
     public List<OwnerRepairOpsAuditView> ownerRepairOpsAudits() {
@@ -359,6 +390,14 @@ public final class RuntimeHealthRegistry {
 
     public List<PlayerAgentDrainService> playerAgentDrains() {
         return List.copyOf(playerAgentDrains);
+    }
+
+    public List<PlayerBusinessCommandCatalogView> playerBusinessCommandCatalogs() {
+        return List.copyOf(playerBusinessCommandCatalogs);
+    }
+
+    public List<PlayerBusinessCommandGatewayView> playerBusinessCommandGateways() {
+        return List.copyOf(playerBusinessCommandGateways);
     }
 
     public List<PlayerBusinessResponseView> playerBusinessResponses() {

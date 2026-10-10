@@ -60,6 +60,41 @@ public final class PlayerCommandSequencer {
         return Optional.ofNullable(committedStatuses.get(CommandKey.from(command)));
     }
 
+    public synchronized PlayerCommandSequencerSnapshot snapshotForPlayer(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        return new PlayerCommandSequencerSnapshot(
+                playerId,
+                lastSequences.entrySet().stream()
+                        .filter(entry -> entry.getKey().playerId() == playerId)
+                        .map(entry -> new PlayerCommandSequencerSnapshot.Watermark(
+                                entry.getKey().playerId(),
+                                entry.getKey().sessionId(),
+                                entry.getKey().epoch(),
+                                entry.getValue()
+                        ))
+                        .toList()
+        );
+    }
+
+    public synchronized void restore(PlayerCommandSequencerSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        for (PlayerCommandSequencerSnapshot.Watermark watermark : snapshot.watermarks()) {
+            Key key = new Key(watermark.playerId(), watermark.sessionId(), watermark.sessionEpoch());
+            lastSequences.merge(key, watermark.lastSequence(), Math::max);
+        }
+    }
+
+    public synchronized void forgetPlayer(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        lastSequences.keySet().removeIf(key -> key.playerId() == playerId);
+        committedStatuses.keySet().removeIf(key -> key.playerId() == playerId);
+        committedOrder.removeIf(key -> key.playerId() == playerId);
+    }
+
     private void remember(PlayerCommand command, PlayerCommandStatus status) {
         CommandKey key = CommandKey.from(command);
         if (!committedStatuses.containsKey(key)) {

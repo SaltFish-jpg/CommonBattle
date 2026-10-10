@@ -37,6 +37,8 @@ public final class RuntimeMetricsFormatter {
         businessAgentMessages(metrics, snapshot);
         businessAgentRpcEndpoints(metrics, snapshot);
         commands(metrics, snapshot);
+        businessCommandCatalogs(metrics, snapshot);
+        businessCommandGateways(metrics, snapshot);
         businessResponses(metrics, snapshot);
         playerOutboundDeliveries(metrics, snapshot);
         playerGateways(metrics, snapshot);
@@ -71,6 +73,8 @@ public final class RuntimeMetricsFormatter {
         chatRuntimes(metrics, snapshot);
         sceneRuntimes(metrics, snapshot);
         shopRuntimes(metrics, snapshot);
+        eventGatedCommandAudits(metrics, snapshot);
+        bagChangeAudits(metrics, snapshot);
         commandAudits(metrics, snapshot);
         return metrics.toString();
     }
@@ -311,6 +315,35 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_player_command_draining_dispatchers", snapshot.commands().drainingDispatchers());
     }
 
+    private static void businessCommandGateways(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_player_business_command_gateways", snapshot.businessCommandGateways().gatewayCount());
+        gauge(metrics, "commonbattle_player_business_command_remote_forwards_total",
+                snapshot.businessCommandGateways().remoteForwards());
+        gauge(metrics, "commonbattle_player_business_command_remote_success_responses_total",
+                snapshot.businessCommandGateways().remoteForwardSuccessResponses());
+        gauge(metrics, "commonbattle_player_business_command_remote_failure_responses_total",
+                snapshot.businessCommandGateways().remoteForwardFailureResponses());
+        gauge(metrics, "commonbattle_player_business_command_remote_timed_out_responses_total",
+                snapshot.businessCommandGateways().remoteForwardTimedOutResponses());
+        gauge(metrics, "commonbattle_player_business_command_late_remote_responses_total",
+                snapshot.businessCommandGateways().lateRemoteForwardResponses());
+    }
+
+    private static void businessCommandCatalogs(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_player_business_command_catalog_views",
+                snapshot.businessCommandCatalogs().viewCount());
+        gauge(metrics, "commonbattle_player_business_command_catalog_descriptors",
+                snapshot.businessCommandCatalogs().descriptorCount());
+        gauge(metrics, "commonbattle_player_business_command_catalog_operations",
+                snapshot.businessCommandCatalogs().operationCount());
+        gauge(metrics, "commonbattle_player_business_command_catalog_command_types",
+                snapshot.businessCommandCatalogs().commandTypeCount());
+        for (Map.Entry<String, Integer> entry : snapshot.businessCommandCatalogs().descriptorsByDomain().entrySet()) {
+            gauge(metrics, "commonbattle_player_business_command_catalog_descriptors_by_domain",
+                    "domain", entry.getKey(), entry.getValue());
+        }
+    }
+
     private static void businessResponses(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
         gauge(metrics, "commonbattle_player_business_response_hubs", snapshot.businessResponses().hubCount());
         gauge(metrics, "commonbattle_player_business_response_pending", snapshot.businessResponses().pendingResponses());
@@ -413,6 +446,8 @@ public final class RuntimeMetricsFormatter {
                 snapshot.asyncShopPurchases().immediatePurchases());
         gauge(metrics, "commonbattle_async_shop_purchase_stock_reservations_total",
                 snapshot.asyncShopPurchases().stockReservations());
+        gauge(metrics, "commonbattle_async_shop_purchase_current_pending",
+                snapshot.asyncShopPurchases().currentPendingCommands());
         gauge(metrics, "commonbattle_async_shop_purchase_reserved_callbacks_total",
                 snapshot.asyncShopPurchases().reservedCallbacks());
         gauge(metrics, "commonbattle_async_shop_purchase_out_of_stock_callbacks_total",
@@ -425,10 +460,16 @@ public final class RuntimeMetricsFormatter {
                 snapshot.asyncShopPurchases().completedPurchases());
         gauge(metrics, "commonbattle_async_shop_purchase_rejected_total",
                 snapshot.asyncShopPurchases().rejectedPurchases());
+        gauge(metrics, "commonbattle_async_shop_purchase_abandoned_pending_commands_total",
+                snapshot.asyncShopPurchases().abandonedPendingCommands());
         gauge(metrics, "commonbattle_async_shop_purchase_released_reservations_total",
                 snapshot.asyncShopPurchases().releasedReservations());
         gauge(metrics, "commonbattle_async_shop_purchase_release_failures_total",
                 snapshot.asyncShopPurchases().releaseFailures());
+        gauge(metrics, "commonbattle_async_shop_purchase_stock_reservation_callback_gap",
+                snapshot.asyncShopPurchases().stockReservationCallbackGap());
+        gauge(metrics, "commonbattle_async_shop_purchase_compensation_attempts_total",
+                snapshot.asyncShopPurchases().compensationAttempts());
     }
 
     private static void agents(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -848,6 +889,45 @@ public final class RuntimeMetricsFormatter {
         gauge(metrics, "commonbattle_scene_projection_applied_snapshots_total", snapshot.sceneRuntimes().projectionAppliedSnapshots());
         gauge(metrics, "commonbattle_scene_projection_ignored_snapshots_total", snapshot.sceneRuntimes().projectionIgnoredSnapshots());
         gauge(metrics, "commonbattle_scene_projection_stale_views", snapshot.sceneRuntimes().projectionStaleViews());
+        gauge(metrics, "commonbattle_scene_projection_fresh_read_requests_total", snapshot.sceneRuntimes().projectionFreshReadRequests());
+        gauge(metrics, "commonbattle_scene_projection_fresh_read_local_hits_total", snapshot.sceneRuntimes().projectionFreshReadLocalHits());
+        gauge(metrics, "commonbattle_scene_projection_fresh_read_refreshes_total", snapshot.sceneRuntimes().projectionFreshReadRefreshes());
+        gauge(metrics, "commonbattle_scene_projection_fresh_read_remote_stale_total", snapshot.sceneRuntimes().projectionFreshReadRemoteStale());
+        gauge(metrics, "commonbattle_scene_projection_fresh_read_remote_misses_total", snapshot.sceneRuntimes().projectionFreshReadRemoteMisses());
+        sceneProjection(metrics, "friend", snapshot.sceneRuntimes().friendProjection());
+        sceneProjection(metrics, "alliance", snapshot.sceneRuntimes().allianceProjection());
+    }
+
+    private static void sceneProjection(
+            StringBuilder metrics,
+            String source,
+            com.commonbattle.game.scene.SceneProjectionStats stats
+    ) {
+        gauge(metrics, "commonbattle_scene_projection_source_received_events_total", "source", source,
+                stats.receivedEvents());
+        gauge(metrics, "commonbattle_scene_projection_source_applied_events_total", "source", source,
+                stats.appliedEvents());
+        gauge(metrics, "commonbattle_scene_projection_source_duplicate_events_total", "source", source,
+                stats.duplicateEvents());
+        gauge(metrics, "commonbattle_scene_projection_source_gap_events_total", "source", source,
+                stats.gapEvents());
+        gauge(metrics, "commonbattle_scene_projection_source_repair_requests_total", "source", source,
+                stats.repairRequests());
+        gauge(metrics, "commonbattle_scene_projection_source_applied_snapshots_total", "source", source,
+                stats.appliedSnapshots());
+        gauge(metrics, "commonbattle_scene_projection_source_ignored_snapshots_total", "source", source,
+                stats.ignoredSnapshots());
+        gauge(metrics, "commonbattle_scene_projection_source_stale_views", "source", source, stats.staleViews());
+        gauge(metrics, "commonbattle_scene_projection_source_fresh_read_requests_total", "source", source,
+                stats.freshReadRequests());
+        gauge(metrics, "commonbattle_scene_projection_source_fresh_read_local_hits_total", "source", source,
+                stats.freshReadLocalHits());
+        gauge(metrics, "commonbattle_scene_projection_source_fresh_read_refreshes_total", "source", source,
+                stats.freshReadRefreshes());
+        gauge(metrics, "commonbattle_scene_projection_source_fresh_read_remote_stale_total", "source", source,
+                stats.freshReadRemoteStale());
+        gauge(metrics, "commonbattle_scene_projection_source_fresh_read_remote_misses_total", "source", source,
+                stats.freshReadRemoteMisses());
     }
 
     private static void shopRuntimes(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
@@ -886,6 +966,26 @@ public final class RuntimeMetricsFormatter {
         for (Map.Entry<String, Long> entry : snapshot.commandAudits().resultCodeCounts().entrySet()) {
             gauge(metrics, "commonbattle_command_audit_result_code_total", "code", entry.getKey(), entry.getValue());
         }
+    }
+
+    private static void eventGatedCommandAudits(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_event_gated_command_audits", snapshot.eventGatedCommandAudits().auditCount());
+        gauge(metrics, "commonbattle_event_gated_command_audit_retained", snapshot.eventGatedCommandAudits().retained());
+        gauge(metrics, "commonbattle_event_gated_command_audit_recorded_total", snapshot.eventGatedCommandAudits().recorded());
+        gauge(metrics, "commonbattle_event_gated_command_audit_submitted_total", snapshot.eventGatedCommandAudits().submitted());
+        gauge(metrics, "commonbattle_event_gated_command_audit_completed_total", snapshot.eventGatedCommandAudits().completed());
+        gauge(metrics, "commonbattle_event_gated_command_audit_failed_total", snapshot.eventGatedCommandAudits().failed());
+        gauge(metrics, "commonbattle_event_gated_command_audit_dropped_total", snapshot.eventGatedCommandAudits().dropped());
+    }
+
+    private static void bagChangeAudits(StringBuilder metrics, RuntimeHealthSnapshot snapshot) {
+        gauge(metrics, "commonbattle_bag_change_audits", snapshot.bagChangeAudits().auditCount());
+        gauge(metrics, "commonbattle_bag_change_audit_retained", snapshot.bagChangeAudits().retained());
+        gauge(metrics, "commonbattle_bag_change_audit_recorded_total", snapshot.bagChangeAudits().recorded());
+        gauge(metrics, "commonbattle_bag_change_audit_increased_total", snapshot.bagChangeAudits().increased());
+        gauge(metrics, "commonbattle_bag_change_audit_decreased_total", snapshot.bagChangeAudits().decreased());
+        gauge(metrics, "commonbattle_bag_change_audit_unchanged_total", snapshot.bagChangeAudits().unchanged());
+        gauge(metrics, "commonbattle_bag_change_audit_dropped_total", snapshot.bagChangeAudits().dropped());
     }
 
     private static <E extends Enum<E>> void labeledEnum(

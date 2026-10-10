@@ -236,7 +236,7 @@ public final class GameServerMain {
                 client,
                 executor,
                 clock,
-                new PlayerAgentMigrationSourceHook(playerRuntime.agents(), serializer)
+                new PlayerAgentMigrationSourceHook(playerRuntime.agents(), serializer, playerRuntime.commandSequencer())
         );
         runtime.observe("agentMigrationCoordinator", coordinator);
         BootAgentMigrationTasks.configureRecovery(
@@ -255,7 +255,11 @@ public final class GameServerMain {
         );
         new AgentMigrationTargetEndpoint(
                 playerRuntime.lifecycles(),
-                new PlayerAgentMigrationRestoreHandler(playerRuntime.agents(), serializer),
+                new PlayerAgentMigrationRestoreHandler(
+                        playerRuntime.agents(),
+                        serializer,
+                        playerRuntime.commandSequencer()
+                ),
                 BootAgentMigrationTargetReceipts.configure(runtime, config, clock)
         ).bind(gateway);
         ActorHotspotMigrationPlanner planner = new ActorHotspotMigrationPlanner(
@@ -266,7 +270,11 @@ public final class GameServerMain {
         );
         runtime.observe("playerHotspotMigrations", new ActorHotspotMigrationSubmitService(
                 planner,
-                new PlayerAgentMigrationStatePacker(playerRuntime.agents(), serializer)
+                new PlayerAgentMigrationStatePacker(
+                        playerRuntime.agents(),
+                        serializer,
+                        playerRuntime.commandSequencer()
+                )
         ));
     }
 }

@@ -74,6 +74,10 @@ public final class GrowthService {
         return new GrowthResult(beforeLevel, profile.level(), beforeExp, profile.exp());
     }
 
+    public String expItemId() {
+        return expItemId;
+    }
+
     public GrowthRecoveryResult recoverStamina(GrowthProfile profile, Instant now) {
         Objects.requireNonNull(profile, "profile");
         Objects.requireNonNull(now, "now");

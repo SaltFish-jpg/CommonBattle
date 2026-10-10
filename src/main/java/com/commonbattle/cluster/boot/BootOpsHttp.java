@@ -191,13 +191,24 @@ final class BootOpsHttp {
                 config.drainConfig(),
                 registry.ownerEventRepairIsolationAdmins(),
                 ownerRepairOpsAudit,
+                ownerRepairOpsAudit,
                 config.opsHttpSecurityConfig(),
                 registry.actorIncidents(),
                 registry.actorSlowTasks(),
                 config.actorHotspotPolicy(),
                 registry.actorHotspotOverrideAdmins(),
-                registry.actorHotspotMigrationAdmins()
+                registry.actorHotspotMigrationAdmins(),
+                registry.ownerEventRepairRequestAdmins()
         );
+        for (var audit : registry.eventGatedCommandAudits()) {
+            server.attachEventGatedCommandAuditView(audit);
+        }
+        for (var audit : registry.commandAudits()) {
+            server.attachPlayerCommandAuditView(audit);
+        }
+        for (var audit : registry.bagChangeAudits()) {
+            server.attachBagChangeAuditView(audit);
+        }
         server.start();
         return server;
     }

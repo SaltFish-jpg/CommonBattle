@@ -20,9 +20,20 @@ import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.bag.BagChangeAuditRecord;
+import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
+import com.commonbattle.game.event.EventGatedCommandAuditRecord;
+import com.commonbattle.game.event.EventGatedCommandBoundary;
+import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.OwnerEventRepairIsolatedOwner;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
+import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
+import com.commonbattle.game.player.PlayerBusinessOperations;
+import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
+import com.commonbattle.game.session.PlayerCommandAuditRecord;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
@@ -35,6 +46,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -230,6 +242,59 @@ class OpsHttpServerTest {
             assertEquals(200, releaseAll.statusCode());
             assertEquals("{\"released\":2}", releaseAll.body());
             assertEquals("{\"owners\":[]}", listAfterRelease.body());
+        }
+    }
+
+    @Test
+    void ownerRepairRequestRoutesToSelectedTargetAndIsAudited() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        RecordingRepairRequestAdmin profile = new RecordingRepairRequestAdmin(
+                "profileEventRepairs",
+                "profile.changed"
+        );
+        RecordingRepairRequestAdmin friend = new RecordingRepairRequestAdmin(
+                "friendEventRepairs",
+                "friend.changed"
+        );
+        InMemoryOwnerRepairOpsAuditLog auditLog = new InMemoryOwnerRepairOpsAuditLog();
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors, auditLog),
+                null,
+                DrainConfig.defaults(),
+                List.of(),
+                auditLog,
+                auditLog,
+                OpsHttpSecurityConfig.disabled(),
+                List.of(),
+                List.of(),
+                ActorHotspotPolicy.defaults(),
+                List.of(),
+                List.of(),
+                List.of(profile, friend)
+        )) {
+            server.start();
+
+            HttpResult missingTarget = post(server, "/owner-repair/request?ownerKey=profile%3A10001");
+            HttpResult request = post(server,
+                    "/owner-repair/request?target=profileEventRepairs&ownerKey=profile%3A10001&priority=9");
+            HttpResult audit = get(server, "/owner-repair/audit?action=request");
+            HttpResult health = get(server, "/health");
+
+            assertEquals(400, missingTarget.statusCode());
+            assertEquals("{\"requested\":0,\"error\":\"missing_target\"}", missingTarget.body());
+            assertEquals(200, request.statusCode());
+            assertEquals("{\"requested\":1,\"target\":\"profileEventRepairs\","
+                    + "\"ownerKey\":\"profile:10001\",\"priority\":9}", request.body());
+            assertEquals(List.of(List.of("profile:10001")), profile.requests);
+            assertEquals(List.of(9), profile.priorities);
+            assertEquals(List.of(), friend.requests);
+            assertEquals(200, audit.statusCode());
+            assertTrue(audit.body().contains("\"action\":\"request\""));
+            assertTrue(audit.body().contains("\"ownerKey\":\"profile:10001\""));
+            assertTrue(health.body().contains("\"ownerRepairOps\":{\"auditCount\":1,\"retainedEntries\":1,"
+                    + "\"recordedEntries\":1,\"releaseOps\":0,\"releaseAllOps\":0,\"releasedOwners\":0,"
+                    + "\"notFoundReleaseOps\":0,\"droppedEntries\":0}"));
         }
     }
 
@@ -886,6 +951,133 @@ class OpsHttpServerTest {
     }
 
     @Test
+    void bagChangeAuditCanBeQueried() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        InMemoryBagChangeAuditLog audits = new InMemoryBagChangeAuditLog();
+        audits.record(new BagChangeAuditRecord(10001L, 1, PlayerBusinessOperations.SHOP_BUY,
+                "gold", 100, 50, CLOCK.instant()));
+        audits.record(new BagChangeAuditRecord(10001L, 2, PlayerBusinessOperations.BAG_CONSUME_ITEM,
+                "exp_potion", 3, 1, CLOCK.instant()));
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors)
+        )) {
+            server.attachBagChangeAuditView(audits);
+            server.start();
+
+            HttpResult result = get(server, "/bag-change-audit?playerId=10001&itemId=exp_potion");
+            HttpResult invalidLimit = get(server, "/bag-change-audit?limit=0");
+
+            assertEquals(200, result.statusCode());
+            assertTrue(result.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
+            assertTrue(result.body().contains("\"reason\":\"bag.consumeItem\""));
+            assertTrue(result.body().contains("\"delta\":-2"));
+            assertEquals(400, invalidLimit.statusCode());
+            assertEquals("{\"error\":\"invalid_limit\"}", invalidLimit.body());
+        }
+    }
+
+    @Test
+    void eventGatedCommandAuditCanBeQueried() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        InMemoryEventGatedCommandAuditLog audits = new InMemoryEventGatedCommandAuditLog();
+        audits.record(new EventGatedCommandAuditRecord(
+                "chat.direct.send.afterFriendChanged",
+                "com.commonbattle.game.chat.DirectChatSendAfterFriendEventRequest",
+                new EventGatedCommandBoundary("friend.changed", "friend:10001", 3),
+                "submitted",
+                "",
+                CLOCK.instant()
+        ));
+        audits.record(new EventGatedCommandAuditRecord(
+                "chat.direct.send.afterFriendChanged",
+                "com.commonbattle.game.chat.DirectChatSendAfterFriendEventRequest",
+                new EventGatedCommandBoundary("friend.changed", "friend:10001", 3),
+                "completed",
+                "SENT",
+                CLOCK.instant()
+        ));
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors)
+        )) {
+            server.attachEventGatedCommandAuditView(audits);
+            server.start();
+
+            HttpResult result = get(server,
+                    "/event-gated-command-audit?topic=friend.changed&ownerKey=friend%3A10001&outcome=completed");
+            HttpResult invalidLimit = get(server, "/event-gated-command-audit?limit=0");
+
+            assertEquals(200, result.statusCode());
+            assertTrue(result.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
+            assertTrue(result.body().contains("\"operation\":\"chat.direct.send.afterFriendChanged\""));
+            assertTrue(result.body().contains("\"topic\":\"friend.changed\""));
+            assertTrue(result.body().contains("\"ownerKey\":\"friend:10001\""));
+            assertTrue(result.body().contains("\"revision\":3"));
+            assertTrue(result.body().contains("\"result\":\"SENT\""));
+            assertEquals(400, invalidLimit.statusCode());
+            assertEquals("{\"error\":\"invalid_limit\"}", invalidLimit.body());
+        }
+    }
+
+    @Test
+    void playerCommandAuditCanBeQueried() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        InMemoryPlayerCommandAuditLog audits = new InMemoryPlayerCommandAuditLog();
+        audits.record(new PlayerCommandAuditRecord(
+                10001L,
+                "session-1",
+                1,
+                7,
+                PlayerBusinessOperations.BAG_CONSUME_ITEM,
+                PlayerCommandStatus.BACKPRESSURED,
+                PlayerCommandAuditOutcome.REJECTED,
+                12,
+                Duration.ofMillis(3),
+                CLOCK.instant(),
+                "actor_hotspot:throttle"
+        ));
+        audits.record(new PlayerCommandAuditRecord(
+                10002L,
+                "session-2",
+                1,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                PlayerCommandStatus.ACCEPTED,
+                PlayerCommandAuditOutcome.EXECUTED,
+                13,
+                Duration.ofMillis(8),
+                CLOCK.instant(),
+                "SUCCESS",
+                ""
+        ));
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors)
+        )) {
+            server.attachPlayerCommandAuditView(audits);
+            server.start();
+
+            HttpResult result = get(server,
+                    "/player-command-audit?playerId=10001&operation=bag.consumeItem&status=BACKPRESSURED");
+            HttpResult invalidStatus = get(server, "/player-command-audit?status=BAD");
+            HttpResult invalidLimit = get(server, "/player-command-audit?limit=0");
+
+            assertEquals(200, result.statusCode());
+            assertTrue(result.body().contains("\"matched\":1,\"offset\":0,\"limit\":128"));
+            assertTrue(result.body().contains("\"operation\":\"bag.consumeItem\""));
+            assertTrue(result.body().contains("\"dispatchStatus\":\"BACKPRESSURED\""));
+            assertTrue(result.body().contains("\"outcome\":\"REJECTED\""));
+            assertTrue(result.body().contains("\"configVersion\":12"));
+            assertTrue(result.body().contains("\"reason\":\"actor_hotspot:throttle\""));
+            assertEquals(400, invalidStatus.statusCode());
+            assertEquals("{\"error\":\"invalid_status\"}", invalidStatus.body());
+            assertEquals(400, invalidLimit.statusCode());
+            assertEquals("{\"error\":\"invalid_limit\"}", invalidLimit.body());
+        }
+    }
+
+    @Test
     void adminTokenProtectsActorIncidentQuery() throws Exception {
         ActorSystem actors = new ActorSystem(Runnable::run, 64);
         InMemoryActorIncidentLog incidents = new InMemoryActorIncidentLog(8, CLOCK);
@@ -1067,6 +1259,40 @@ class OpsHttpServerTest {
             int size = owners.size();
             owners.clear();
             return size;
+        }
+    }
+
+    private static final class RecordingRepairRequestAdmin implements OwnerEventRepairRequestAdmin {
+        private final String target;
+        private final String topic;
+        private final List<List<String>> requests = new ArrayList<>();
+        private final List<Integer> priorities = new ArrayList<>();
+
+        private RecordingRepairRequestAdmin(String target, String topic) {
+            this.target = target;
+            this.topic = topic;
+        }
+
+        @Override
+        public String target() {
+            return target;
+        }
+
+        @Override
+        public String topic() {
+            return topic;
+        }
+
+        @Override
+        public void requestRepairOwners(Collection<String> ownerKeys) {
+            requests.add(List.copyOf(ownerKeys));
+            priorities.add(null);
+        }
+
+        @Override
+        public void requestRepairOwners(Collection<String> ownerKeys, int priority) {
+            requests.add(List.copyOf(ownerKeys));
+            priorities.add(priority);
         }
     }
 }

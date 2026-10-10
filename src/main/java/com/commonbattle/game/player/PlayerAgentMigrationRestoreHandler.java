@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.migration.AgentMigrationAcceptRequest;
 import com.commonbattle.actor.agent.migration.AgentMigrationRestoreHandler;
+import com.commonbattle.game.session.PlayerCommandSequencer;
 
 import java.util.Objects;
 
@@ -14,13 +15,23 @@ import java.util.Objects;
 public final class PlayerAgentMigrationRestoreHandler implements AgentMigrationRestoreHandler {
     private final PlayerGameAgentManager agents;
     private final PlayerStateSnapshotSerializer serializer;
+    private final PlayerCommandSequencer commandSequencer;
 
     public PlayerAgentMigrationRestoreHandler(
             PlayerGameAgentManager agents,
             PlayerStateSnapshotSerializer serializer
     ) {
+        this(agents, serializer, null);
+    }
+
+    public PlayerAgentMigrationRestoreHandler(
+            PlayerGameAgentManager agents,
+            PlayerStateSnapshotSerializer serializer,
+            PlayerCommandSequencer commandSequencer
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.commandSequencer = commandSequencer;
     }
 
     @Override
@@ -39,6 +50,9 @@ public final class PlayerAgentMigrationRestoreHandler implements AgentMigrationR
             throw new IllegalArgumentException("player migration snapshot identity mismatch");
         }
         agents.restoreMigrated(snapshot, context.self());
+        if (commandSequencer != null) {
+            commandSequencer.restore(snapshot.commandSequencer());
+        }
     }
 
     private static long parsePlayerId(AgentIdentity identity) {

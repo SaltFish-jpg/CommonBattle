@@ -83,18 +83,20 @@ class AllianceAwareChatChannelAccessPolicyTest {
         fixture.channels.join(new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L), ignored -> {
         });
         fixture.executor.runAll();
-        fixture.allianceAwareness.handleAllianceChanged(new AllianceMemberChangedEvent(
+        fixture.allianceAwareness.onAllianceChanged(new AllianceMemberChangedEvent(
                 900L,
                 10001L,
                 AllianceMemberAction.JOIN,
                 3
         ));
+        fixture.executor.runAll();
         AtomicReference<ChatSendResult> stale = new AtomicReference<>();
         AtomicReference<ChatSendResult> repaired = new AtomicReference<>();
 
         fixture.channels.send(new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "stale", 0), stale::set);
         fixture.executor.runAll();
-        fixture.allianceAwareness.handleSnapshot(new AllianceSnapshot(900L, 3, Set.of(10001L)));
+        fixture.allianceAwareness.refresh(new AllianceSnapshot(900L, 3, Set.of(10001L)));
+        fixture.executor.runAll();
         fixture.channels.send(new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "repaired", 0), repaired::set);
         fixture.executor.runAll();
 
@@ -113,7 +115,8 @@ class AllianceAwareChatChannelAccessPolicyTest {
         fixture.channels.join(new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L), ignored -> {
         });
         fixture.executor.runAll();
-        fixture.allianceAwareness.handleSnapshot(new AllianceSnapshot(900L, 2, Set.of()));
+        fixture.allianceAwareness.refresh(new AllianceSnapshot(900L, 2, Set.of()));
+        fixture.executor.runAll();
         AtomicReference<ChatSendResult> sent = new AtomicReference<>();
 
         fixture.channels.send(new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "after leave", 0), sent::set);
@@ -132,7 +135,7 @@ class AllianceAwareChatChannelAccessPolicyTest {
         });
         fixture.executor.runAll();
 
-        fixture.allianceAwareness.handleAllianceChanged(new AllianceMemberChangedEvent(
+        fixture.allianceAwareness.onAllianceChanged(new AllianceMemberChangedEvent(
                 900L,
                 10001L,
                 AllianceMemberAction.LEAVE,
@@ -157,7 +160,7 @@ class AllianceAwareChatChannelAccessPolicyTest {
         });
         fixture.executor.runAll();
 
-        fixture.allianceAwareness.handleSnapshot(new AllianceSnapshot(900L, 2, Set.of(10002L)));
+        fixture.allianceAwareness.refresh(new AllianceSnapshot(900L, 2, Set.of(10002L)));
         fixture.executor.runAll();
 
         assertEquals(Set.of(10002L), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
@@ -190,18 +193,141 @@ class AllianceAwareChatChannelAccessPolicyTest {
         assertEquals(ChatJoinStatus.JOINED, policy.inspectJoin(request));
     }
 
+    @Test
+    void allianceEventStrictJoinPolicyRefreshesSnapshotBeforeReturningDecision() {
+        Fixture fixture = Fixture.create(allianceId -> java.util.Optional.of(
+                new AllianceSnapshot(allianceId, 3, Set.of(10001L, 20002L))
+        ));
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AllianceAwareChatChannelAccessPolicy policy = new AllianceAwareChatChannelAccessPolicy(fixture.allianceAwareness);
+        AtomicReference<ChatJoinStatus> status = new AtomicReference<>();
+
+        policy.inspectJoinAfterAllianceChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L),
+                status::set
+        );
+
+        assertEquals(null, status.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatJoinStatus.JOINED, status.get());
+        assertEquals(new com.commonbattle.game.scene.SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0,
+                1, 0, 1, 0, 0), fixture.allianceAwareness.projectionStats());
+    }
+
+    @Test
+    void allianceEventStrictSendPolicyRejectsAfterFreshLeaveSnapshot() {
+        Fixture fixture = Fixture.create(allianceId -> java.util.Optional.of(
+                new AllianceSnapshot(allianceId, 3, Set.of())
+        ));
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AllianceAwareChatChannelAccessPolicy policy = new AllianceAwareChatChannelAccessPolicy(fixture.allianceAwareness);
+        AtomicReference<ChatSendStatus> status = new AtomicReference<>();
+
+        policy.inspectSendAfterAllianceChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.LEAVE, 3),
+                new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "alliance", 0),
+                status::set
+        );
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.NOT_ALLIANCE_MEMBER, status.get());
+        assertEquals(1, fixture.allianceAwareness.projectionStats().freshReadRefreshes());
+    }
+
+    @Test
+    void allianceEventStrictPolicyReportsStaleWhenRemoteSnapshotIsNotFreshEnough() {
+        Fixture fixture = Fixture.create(allianceId -> java.util.Optional.of(
+                new AllianceSnapshot(allianceId, 2, Set.of(10001L))
+        ));
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AllianceAwareChatChannelAccessPolicy policy = new AllianceAwareChatChannelAccessPolicy(fixture.allianceAwareness);
+        AtomicReference<ChatSendStatus> status = new AtomicReference<>();
+
+        policy.inspectSendAfterAllianceChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "alliance", 0),
+                status::set
+        );
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.STALE_ALLIANCE, status.get());
+        assertEquals(1, fixture.allianceAwareness.projectionStats().freshReadRemoteStale());
+    }
+
+    @Test
+    void channelManagerJoinsAfterAllianceEventFreshReadInsideChannelActor() {
+        Fixture fixture = Fixture.create(allianceId -> java.util.Optional.of(
+                new AllianceSnapshot(allianceId, 3, Set.of(10001L, 20002L))
+        ));
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+
+        fixture.channels.joinAfterAllianceChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L),
+                joined::set
+        );
+
+        assertEquals(null, joined.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatJoinStatus.JOINED, joined.get().status());
+        assertEquals(Set.of(10001L), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+    }
+
+    @Test
+    void channelManagerSeesFreshAllianceLeaveBeforeFinalSend() {
+        Fixture fixture = Fixture.create(allianceId -> java.util.Optional.of(
+                new AllianceSnapshot(allianceId, 3, Set.of())
+        ));
+        fixture.refreshAlliance(900L, 1, Set.of(10001L));
+        fixture.channels.join(new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L), ignored -> {
+        });
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.channels.sendAfterAllianceChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.LEAVE, 3),
+                new ChatSendRequest(ChatChannelIds.alliance(900L), 10001L, "after leave", 0),
+                sent::set
+        );
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.NOT_IN_CHANNEL, sent.get().status());
+        assertEquals(Set.of(), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+        assertEquals(List.of(), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().history());
+    }
+
     private record Fixture(
             RecordingExecutor executor,
             SceneAllianceAwarenessAgent allianceAwareness,
             ChatChannelManager channels
     ) {
         private static Fixture create() {
+            return create(allianceId -> java.util.Optional.empty());
+        }
+
+        private static Fixture create(com.commonbattle.game.social.AllianceSnapshotReader snapshotReader) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
             SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
                     messages,
-                    actors.actor("chat-alliance-awareness")
+                    actors.actor("chat-alliance-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    snapshotReader
             );
             ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
                     new SceneProfileAwarenessAgent(messages, actors.actor("chat-profile-awareness"), ProfileInterestControl.noop()),
@@ -235,7 +361,8 @@ class AllianceAwareChatChannelAccessPolicyTest {
             executor.runAll();
             members.forEach(allianceAwareness::enter);
             executor.runAll();
-            allianceAwareness.handleSnapshot(new AllianceSnapshot(allianceId, revision, members));
+            allianceAwareness.refresh(new AllianceSnapshot(allianceId, revision, members));
+            executor.runAll();
         }
     }
 

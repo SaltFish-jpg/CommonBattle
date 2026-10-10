@@ -1,6 +1,7 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.game.event.OwnerEventInterestControl;
+import com.commonbattle.game.event.NamedOwnerEventRepairRequestAdmin;
 import com.commonbattle.game.event.OwnerEventRepairDispatcher;
 import com.commonbattle.game.event.OwnerEventRepairScheduler;
 
@@ -31,6 +32,7 @@ final class BootOwnerEventRepairs {
                 config.eventRepairBackoffPolicy(topic),
                 config.eventRepairIsolationPolicy(topic)
         ));
+        runtime.observe(name + "RequestAdmin", new NamedOwnerEventRepairRequestAdmin(name, topic, scheduler));
         if (dispatcher == null) {
             scheduler.start();
         } else {

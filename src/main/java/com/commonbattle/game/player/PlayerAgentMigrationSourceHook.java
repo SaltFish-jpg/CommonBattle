@@ -3,6 +3,7 @@ package com.commonbattle.game.player;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.migration.AgentMigrationSourceHook;
 import com.commonbattle.actor.agent.migration.AgentMigrationTask;
+import com.commonbattle.game.session.PlayerCommandSequencer;
 
 import java.util.Objects;
 
@@ -13,13 +14,23 @@ import java.util.Objects;
 public final class PlayerAgentMigrationSourceHook implements AgentMigrationSourceHook {
     private final PlayerGameAgentManager agents;
     private final PlayerStateSnapshotSerializer serializer;
+    private final PlayerCommandSequencer commandSequencer;
 
     public PlayerAgentMigrationSourceHook(
             PlayerGameAgentManager agents,
             PlayerStateSnapshotSerializer serializer
     ) {
+        this(agents, serializer, null);
+    }
+
+    public PlayerAgentMigrationSourceHook(
+            PlayerGameAgentManager agents,
+            PlayerStateSnapshotSerializer serializer,
+            PlayerCommandSequencer commandSequencer
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.commandSequencer = commandSequencer;
     }
 
     @Override
@@ -27,7 +38,11 @@ public final class PlayerAgentMigrationSourceHook implements AgentMigrationSourc
         if (!AgentIdentity.PLAYER.equals(task.identity().type())) {
             return;
         }
-        agents.removeMigrated(parsePlayerId(task));
+        long playerId = parsePlayerId(task);
+        agents.removeMigrated(playerId);
+        if (commandSequencer != null) {
+            commandSequencer.forgetPlayer(playerId);
+        }
     }
 
     @Override
@@ -48,6 +63,9 @@ public final class PlayerAgentMigrationSourceHook implements AgentMigrationSourc
             throw new IllegalArgumentException("player migration snapshot identity mismatch");
         }
         agents.restoreMigrated(snapshot, task.source().actorRef());
+        if (commandSequencer != null) {
+            commandSequencer.restore(snapshot.commandSequencer());
+        }
     }
 
     private static long parsePlayerId(AgentMigrationTask task) {

@@ -6,6 +6,8 @@ package com.commonbattle.example.cross;
 public final class SceneOperations {
     public static final String ENTER = "scene.enter";
     public static final String LEAVE = "scene.leave";
+    public static final String MOVE = "scene.move";
+    public static final String COMBAT_DAMAGE = "scene.combat.damage";
     public static final String MESSAGE = "scene.message";
 
     private SceneOperations() {

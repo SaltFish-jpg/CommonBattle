@@ -21,15 +21,20 @@ class ActorTimerServiceTest {
         AtomicInteger runs = new AtomicInteger();
 
         try (ActorTimerService timers = new ActorTimerService(system)) {
-            timers.scheduleOnce(player, Duration.ofMillis(1), ignored -> runs.incrementAndGet());
+            timers.scheduleOnce(player, Duration.ofMillis(1), ignored -> {
+                ActorContext.requireCurrent(player);
+                runs.incrementAndGet();
+            });
 
             assertTrue(awaitQueued(executor, 1));
             assertEquals(0, runs.get());
+            assertTrue(ActorContext.current().isEmpty());
             assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.TIMER));
 
             executor.runNext();
 
             assertEquals(1, runs.get());
+            assertTrue(ActorContext.current().isEmpty());
         }
     }
 
@@ -58,8 +63,14 @@ class ActorTimerServiceTest {
         List<String> result = new ArrayList<>();
 
         try (ActorTimerService timers = new ActorTimerService(system)) {
-            system.send(player, ignored -> result.add("normal"));
-            timers.scheduleOnce(player, Duration.ofMillis(1), ignored -> result.add("timer"));
+            system.send(player, ignored -> {
+                ActorContext.requireCurrent(player);
+                result.add("normal");
+            });
+            timers.scheduleOnce(player, Duration.ofMillis(1), ignored -> {
+                ActorContext.requireCurrent(player);
+                result.add("timer");
+            });
 
             assertTrue(awaitQueuedTasks(system, 2));
             assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.DEFAULT));

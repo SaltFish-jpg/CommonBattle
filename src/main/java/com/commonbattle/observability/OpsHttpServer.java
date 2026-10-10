@@ -8,8 +8,23 @@ import com.commonbattle.actor.agent.migration.ActorHotspotMigrationStatus;
 import com.commonbattle.actor.backpressure.ActorHotspotOverride;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideAdmin;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideMode;
+import com.commonbattle.game.bag.BagChangeAuditPage;
+import com.commonbattle.game.bag.BagChangeAuditQuery;
+import com.commonbattle.game.bag.BagChangeAuditRecord;
+import com.commonbattle.game.bag.BagChangeAuditView;
+import com.commonbattle.game.event.EventGatedCommandAuditPage;
+import com.commonbattle.game.event.EventGatedCommandAuditQuery;
+import com.commonbattle.game.event.EventGatedCommandAuditRecord;
+import com.commonbattle.game.event.EventGatedCommandAuditView;
 import com.commonbattle.game.event.OwnerEventRepairIsolatedOwner;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
+import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
+import com.commonbattle.game.session.PlayerCommandAuditPage;
+import com.commonbattle.game.session.PlayerCommandAuditQuery;
+import com.commonbattle.game.session.PlayerCommandAuditRecord;
+import com.commonbattle.game.session.PlayerCommandAuditView;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -46,6 +61,12 @@ public final class OpsHttpServer implements AutoCloseable {
     private static final int DEFAULT_ACTOR_HOTSPOT_LIMIT = 128;
     private static final int MAX_ACTOR_HOTSPOT_OVERRIDE_ENTRIES = 256;
     private static final int DEFAULT_ACTOR_HOTSPOT_OVERRIDE_LIMIT = 128;
+    private static final int MAX_PLAYER_COMMAND_AUDIT_ENTRIES = 256;
+    private static final int DEFAULT_PLAYER_COMMAND_AUDIT_LIMIT = 128;
+    private static final int MAX_EVENT_GATED_COMMAND_AUDIT_ENTRIES = 256;
+    private static final int DEFAULT_EVENT_GATED_COMMAND_AUDIT_LIMIT = 128;
+    private static final int MAX_BAG_CHANGE_AUDIT_ENTRIES = 256;
+    private static final int DEFAULT_BAG_CHANGE_AUDIT_LIMIT = 128;
     private static final long DEFAULT_ACTOR_HOTSPOT_OVERRIDE_TTL_MILLIS = 300_000;
     private static final int DEFAULT_ACTOR_HOTSPOT_MIGRATION_SUBMISSIONS = 16;
     private static final int MAX_ACTOR_HOTSPOT_MIGRATION_SUBMISSIONS = 128;
@@ -54,6 +75,7 @@ public final class OpsHttpServer implements AutoCloseable {
     private final ServerDrainController drainController;
     private final DrainConfig drainConfig;
     private final Collection<OwnerEventRepairIsolationAdmin> repairIsolationAdmins;
+    private final Collection<OwnerEventRepairRequestAdmin> repairRequestAdmins;
     private final OwnerRepairOpsAuditSink ownerRepairOpsAuditSink;
     private final OwnerRepairOpsAuditView ownerRepairOpsAuditView;
     private final Collection<ActorIncidentView> actorIncidentViews;
@@ -62,6 +84,9 @@ public final class OpsHttpServer implements AutoCloseable {
     private final Collection<ActorHotspotMigrationAdmin> actorHotspotMigrationAdmins;
     private final ActorHotspotPolicy actorHotspotPolicy;
     private final OpsHttpSecurityConfig securityConfig;
+    private List<PlayerCommandAuditView> playerCommandAuditViews = List.of();
+    private List<EventGatedCommandAuditView> eventGatedCommandAuditViews = List.of();
+    private List<BagChangeAuditView> bagChangeAuditViews = List.of();
     private final AtomicBoolean draining = new AtomicBoolean();
     private final HttpServer server;
 
@@ -310,11 +335,33 @@ public final class OpsHttpServer implements AutoCloseable {
             Collection<ActorHotspotOverrideAdmin> actorHotspotOverrideAdmins,
             Collection<ActorHotspotMigrationAdmin> actorHotspotMigrationAdmins
     ) {
+        this(address, probe, drainController, drainConfig, repairIsolationAdmins, ownerRepairOpsAuditSink,
+                ownerRepairOpsAuditView, securityConfig, actorIncidentViews, actorSlowTaskViews,
+                actorHotspotPolicy, actorHotspotOverrideAdmins, actorHotspotMigrationAdmins, List.of());
+    }
+
+    public OpsHttpServer(
+            InetSocketAddress address,
+            RuntimeHealthProbe probe,
+            ServerDrainController drainController,
+            DrainConfig drainConfig,
+            Collection<OwnerEventRepairIsolationAdmin> repairIsolationAdmins,
+            OwnerRepairOpsAuditSink ownerRepairOpsAuditSink,
+            OwnerRepairOpsAuditView ownerRepairOpsAuditView,
+            OpsHttpSecurityConfig securityConfig,
+            Collection<ActorIncidentView> actorIncidentViews,
+            Collection<ActorSlowTaskView> actorSlowTaskViews,
+            ActorHotspotPolicy actorHotspotPolicy,
+            Collection<ActorHotspotOverrideAdmin> actorHotspotOverrideAdmins,
+            Collection<ActorHotspotMigrationAdmin> actorHotspotMigrationAdmins,
+            Collection<OwnerEventRepairRequestAdmin> repairRequestAdmins
+    ) {
         this.probe = Objects.requireNonNull(probe, "probe");
         this.drainController = drainController;
         this.drainConfig = Objects.requireNonNull(drainConfig, "drainConfig");
         this.repairIsolationAdmins = List.copyOf(Objects.requireNonNull(repairIsolationAdmins,
                 "repairIsolationAdmins"));
+        this.repairRequestAdmins = List.copyOf(Objects.requireNonNull(repairRequestAdmins, "repairRequestAdmins"));
         this.ownerRepairOpsAuditSink = Objects.requireNonNull(ownerRepairOpsAuditSink, "ownerRepairOpsAuditSink");
         this.ownerRepairOpsAuditView = Objects.requireNonNull(ownerRepairOpsAuditView, "ownerRepairOpsAuditView");
         this.actorIncidentViews = List.copyOf(Objects.requireNonNull(actorIncidentViews, "actorIncidentViews"));
@@ -336,6 +383,7 @@ public final class OpsHttpServer implements AutoCloseable {
         server.createContext("/metrics", this::metrics);
         server.createContext("/drain", this::drain);
         server.createContext("/owner-repair/isolated", this::repairIsolatedOwners);
+        server.createContext("/owner-repair/request", this::requestRepairOwner);
         server.createContext("/owner-repair/release", this::releaseRepairOwner);
         server.createContext("/owner-repair/release-all", this::releaseAllRepairOwners);
         server.createContext("/owner-repair/audit", this::ownerRepairAudit);
@@ -347,10 +395,40 @@ public final class OpsHttpServer implements AutoCloseable {
         server.createContext("/actor-hotspot-overrides/set", this::setActorHotspotOverride);
         server.createContext("/actor-hotspot-overrides/clear", this::clearActorHotspotOverride);
         server.createContext("/actor-hotspot-migrations/submit", this::submitActorHotspotMigrations);
+        server.createContext("/player-command-audit", this::playerCommandAudit);
+        server.createContext("/event-gated-command-audit", this::eventGatedCommandAudit);
+        server.createContext("/bag-change-audit", this::bagChangeAudit);
     }
 
     public void start() {
         server.start();
+    }
+
+    public void attachPlayerCommandAuditView(PlayerCommandAuditView view) {
+        Objects.requireNonNull(view, "view");
+        if (!playerCommandAuditViews.contains(view)) {
+            List<PlayerCommandAuditView> views = new java.util.ArrayList<>(playerCommandAuditViews);
+            views.add(view);
+            playerCommandAuditViews = List.copyOf(views);
+        }
+    }
+
+    public void attachEventGatedCommandAuditView(EventGatedCommandAuditView view) {
+        Objects.requireNonNull(view, "view");
+        if (!eventGatedCommandAuditViews.contains(view)) {
+            List<EventGatedCommandAuditView> views = new java.util.ArrayList<>(eventGatedCommandAuditViews);
+            views.add(view);
+            eventGatedCommandAuditViews = List.copyOf(views);
+        }
+    }
+
+    public void attachBagChangeAuditView(BagChangeAuditView view) {
+        Objects.requireNonNull(view, "view");
+        if (!bagChangeAuditViews.contains(view)) {
+            List<BagChangeAuditView> views = new java.util.ArrayList<>(bagChangeAuditViews);
+            views.add(view);
+            bagChangeAuditViews = List.copyOf(views);
+        }
     }
 
     public int port() {
@@ -434,6 +512,59 @@ public final class OpsHttpServer implements AutoCloseable {
         respondJson(exchange, 200, json.toString());
     }
 
+    private void requestRepairOwner(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String ownerKey = queryParam(rawQuery, "ownerKey");
+        if (ownerKey == null || ownerKey.isBlank()) {
+            respondJson(exchange, 400, "{\"requested\":0,\"error\":\"missing_owner_key\"}");
+            return;
+        }
+        List<OwnerEventRepairRequestAdmin> targets;
+        try {
+            targets = repairRequestTargets(rawQuery);
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"requested\":0,\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        if (targets.isEmpty()) {
+            respondJson(exchange, repairRequestAdmins.isEmpty() ? 503 : 404,
+                    "{\"requested\":0,\"error\":\"repair_request_target_not_found\"}");
+            return;
+        }
+        Integer priority;
+        try {
+            priority = optionalIntQueryParam(rawQuery, "priority");
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"requested\":0,\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        if (priority != null && priority < 0) {
+            respondJson(exchange, 400, "{\"requested\":0,\"error\":\"invalid_priority\"}");
+            return;
+        }
+        for (OwnerEventRepairRequestAdmin target : targets) {
+            if (priority == null) {
+                target.requestRepairOwner(ownerKey);
+            } else {
+                target.requestRepairOwner(ownerKey, priority);
+            }
+        }
+        recordOwnerRepairAudit("request", ownerKey, 0, exchange);
+        String targetName = targets.size() == 1 ? targets.getFirst().target() : "*";
+        respondJson(exchange, 200, "{\"requested\":" + targets.size()
+                + ",\"target\":\"" + escape(targetName) + "\""
+                + ",\"ownerKey\":\"" + escape(ownerKey) + "\""
+                + (priority == null ? "" : ",\"priority\":" + priority)
+                + "}");
+    }
+
     private void releaseRepairOwner(HttpExchange exchange) throws IOException {
         if (!authorizeAdmin(exchange)) {
             return;
@@ -507,8 +638,184 @@ public final class OpsHttpServer implements AutoCloseable {
         respondJson(exchange, 200, json.toString());
     }
 
+    private List<OwnerEventRepairRequestAdmin> repairRequestTargets(String rawQuery) {
+        if (repairRequestAdmins.isEmpty()) {
+            return List.of();
+        }
+        String target = blankToNull(queryParam(rawQuery, "target"));
+        if (target == null) {
+            if (repairRequestAdmins.size() == 1) {
+                return List.copyOf(repairRequestAdmins);
+            }
+            throw new IllegalArgumentException("missing_target");
+        }
+        return repairRequestAdmins.stream()
+                .filter(admin -> target.equals(admin.target()) || target.equals(admin.topic()))
+                .toList();
+    }
+
     private OwnerRepairOpsAuditPage ownerRepairAuditPage(OwnerRepairOpsAuditQuery query) {
         return ownerRepairOpsAuditView.query(query);
+    }
+
+    private void playerCommandAudit(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        PlayerCommandAuditQuery query;
+        try {
+            query = playerCommandAuditQuery(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        PlayerCommandAuditPage page = playerCommandAuditPage(query);
+        StringBuilder json = new StringBuilder();
+        json.append("{\"entries\":[");
+        boolean first = true;
+        for (PlayerCommandAuditRecord entry : page.entries()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            appendPlayerCommandAuditEntry(json, entry);
+        }
+        json.append("],")
+                .append("\"matched\":").append(page.matched()).append(',')
+                .append("\"offset\":").append(query.offset()).append(',')
+                .append("\"limit\":").append(query.limit())
+                .append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private PlayerCommandAuditPage playerCommandAuditPage(PlayerCommandAuditQuery query) {
+        if (playerCommandAuditViews.isEmpty()) {
+            return new PlayerCommandAuditPage(List.of(), 0, query.offset(), query.limit());
+        }
+        List<PlayerCommandAuditRecord> matched = new java.util.ArrayList<>();
+        PlayerCommandAuditQuery all = new PlayerCommandAuditQuery(
+                query.playerId(),
+                query.operation(),
+                query.dispatchStatus(),
+                query.outcome(),
+                0,
+                MAX_PLAYER_COMMAND_AUDIT_ENTRIES
+        );
+        for (PlayerCommandAuditView view : playerCommandAuditViews) {
+            matched.addAll(view.query(all).entries());
+        }
+        int from = Math.min(query.offset(), matched.size());
+        int to = Math.min(from + query.limit(), matched.size());
+        return new PlayerCommandAuditPage(matched.subList(from, to), matched.size(), query.offset(), query.limit());
+    }
+
+    private void eventGatedCommandAudit(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        EventGatedCommandAuditQuery query;
+        try {
+            query = eventGatedCommandAuditQuery(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        EventGatedCommandAuditPage page = eventGatedCommandAuditPage(query);
+        StringBuilder json = new StringBuilder();
+        json.append("{\"entries\":[");
+        boolean first = true;
+        for (EventGatedCommandAuditRecord entry : page.entries()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            appendEventGatedCommandAuditEntry(json, entry);
+        }
+        json.append("],")
+                .append("\"matched\":").append(page.matched()).append(',')
+                .append("\"offset\":").append(query.offset()).append(',')
+                .append("\"limit\":").append(query.limit())
+                .append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private EventGatedCommandAuditPage eventGatedCommandAuditPage(EventGatedCommandAuditQuery query) {
+        if (eventGatedCommandAuditViews.isEmpty()) {
+            return new EventGatedCommandAuditPage(List.of(), 0, query.offset(), query.limit());
+        }
+        List<EventGatedCommandAuditRecord> matched = new java.util.ArrayList<>();
+        EventGatedCommandAuditQuery all = new EventGatedCommandAuditQuery(
+                query.operation(),
+                query.topic(),
+                query.ownerKey(),
+                query.outcome(),
+                query.revision(),
+                0,
+                MAX_EVENT_GATED_COMMAND_AUDIT_ENTRIES
+        );
+        for (EventGatedCommandAuditView view : eventGatedCommandAuditViews) {
+            matched.addAll(view.query(all).entries());
+        }
+        int from = Math.min(query.offset(), matched.size());
+        int to = Math.min(from + query.limit(), matched.size());
+        return new EventGatedCommandAuditPage(matched.subList(from, to), matched.size(), query.offset(), query.limit());
+    }
+
+    private void bagChangeAudit(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        BagChangeAuditQuery query;
+        try {
+            query = bagChangeAuditQuery(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        BagChangeAuditPage page = bagChangeAuditPage(query);
+        StringBuilder json = new StringBuilder();
+        json.append("{\"entries\":[");
+        boolean first = true;
+        for (BagChangeAuditRecord entry : page.entries()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            appendBagChangeAuditEntry(json, entry);
+        }
+        json.append("],")
+                .append("\"matched\":").append(page.matched()).append(',')
+                .append("\"offset\":").append(query.offset()).append(',')
+                .append("\"limit\":").append(query.limit())
+                .append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private BagChangeAuditPage bagChangeAuditPage(BagChangeAuditQuery query) {
+        if (bagChangeAuditViews.isEmpty()) {
+            return new BagChangeAuditPage(List.of(), 0, query.offset(), query.limit());
+        }
+        List<BagChangeAuditRecord> matched = new java.util.ArrayList<>();
+        BagChangeAuditQuery all = new BagChangeAuditQuery(query.playerId(), query.itemId(), query.reason(),
+                0, MAX_BAG_CHANGE_AUDIT_ENTRIES);
+        for (BagChangeAuditView view : bagChangeAuditViews) {
+            matched.addAll(view.query(all).entries());
+        }
+        int from = Math.min(query.offset(), matched.size());
+        int to = Math.min(from + query.limit(), matched.size());
+        return new BagChangeAuditPage(matched.subList(from, to), matched.size(), query.offset(), query.limit());
     }
 
     private void actorIncidents(HttpExchange exchange) throws IOException {
@@ -887,6 +1194,43 @@ public final class OpsHttpServer implements AutoCloseable {
                 .append("\"operator\":\"").append(escape(entry.operator())).append("\"}");
     }
 
+    private void appendEventGatedCommandAuditEntry(StringBuilder json, EventGatedCommandAuditRecord entry) {
+        json.append("{\"operation\":\"").append(escape(entry.operation())).append("\",")
+                .append("\"commandType\":\"").append(escape(entry.commandType())).append("\",")
+                .append("\"topic\":\"").append(escape(entry.boundary().topic())).append("\",")
+                .append("\"ownerKey\":\"").append(escape(entry.boundary().ownerKey())).append("\",")
+                .append("\"revision\":").append(entry.boundary().revision()).append(',')
+                .append("\"outcome\":\"").append(escape(entry.outcome())).append("\",")
+                .append("\"result\":\"").append(escape(entry.result())).append("\",")
+                .append("\"at\":\"").append(entry.at()).append("\"}");
+    }
+
+    private void appendPlayerCommandAuditEntry(StringBuilder json, PlayerCommandAuditRecord entry) {
+        json.append("{\"playerId\":").append(entry.playerId()).append(',')
+                .append("\"sessionId\":\"").append(escape(entry.sessionId())).append("\",")
+                .append("\"sessionEpoch\":").append(entry.sessionEpoch()).append(',')
+                .append("\"sequence\":").append(entry.sequence()).append(',')
+                .append("\"operation\":\"").append(escape(entry.operation())).append("\",")
+                .append("\"dispatchStatus\":\"").append(entry.dispatchStatus().name()).append("\",")
+                .append("\"outcome\":\"").append(entry.outcome().name()).append("\",")
+                .append("\"configVersion\":").append(entry.configVersion()).append(',')
+                .append("\"elapsedMillis\":").append(entry.elapsed().toMillis()).append(',')
+                .append("\"resultCode\":\"").append(escape(entry.resultCode())).append("\",")
+                .append("\"reason\":\"").append(escape(entry.reason())).append("\",")
+                .append("\"recordedAt\":\"").append(entry.recordedAt()).append("\"}");
+    }
+
+    private void appendBagChangeAuditEntry(StringBuilder json, BagChangeAuditRecord entry) {
+        json.append("{\"playerId\":").append(entry.playerId()).append(',')
+                .append("\"eventRevision\":").append(entry.eventRevision()).append(',')
+                .append("\"reason\":\"").append(escape(entry.reason())).append("\",")
+                .append("\"itemId\":\"").append(escape(entry.itemId())).append("\",")
+                .append("\"before\":").append(entry.before()).append(',')
+                .append("\"after\":").append(entry.after()).append(',')
+                .append("\"delta\":").append(entry.delta()).append(',')
+                .append("\"occurredAt\":\"").append(entry.occurredAt()).append("\"}");
+    }
+
     private void appendActorIncident(StringBuilder json, ActorIncidentRecord entry) {
         json.append("{\"kind\":\"").append(entry.kind().name()).append("\",")
                 .append("\"actorId\":\"").append(escape(entry.actorId())).append("\",")
@@ -1019,7 +1363,8 @@ public final class OpsHttpServer implements AutoCloseable {
 
     private static OwnerRepairOpsAuditQuery ownerRepairAuditQuery(String rawQuery) {
         String action = blankToNull(queryParam(rawQuery, "action"));
-        if (action != null && !"release".equals(action) && !"release-all".equals(action)) {
+        if (action != null && !"release".equals(action) && !"release-all".equals(action)
+                && !"request".equals(action)) {
             throw new IllegalArgumentException("invalid_action");
         }
         String ownerKey = blankToNull(queryParam(rawQuery, "ownerKey"));
@@ -1032,6 +1377,79 @@ public final class OpsHttpServer implements AutoCloseable {
             throw new IllegalArgumentException("invalid_limit");
         }
         return new OwnerRepairOpsAuditQuery(action, ownerKey, offset, limit);
+    }
+
+    private static BagChangeAuditQuery bagChangeAuditQuery(String rawQuery) {
+        Long playerId = longQueryParam(rawQuery, "playerId");
+        String itemId = blankToNull(queryParam(rawQuery, "itemId"));
+        String reason = blankToNull(queryParam(rawQuery, "reason"));
+        int offset = intQueryParam(rawQuery, "offset", 0);
+        int limit = intQueryParam(rawQuery, "limit", DEFAULT_BAG_CHANGE_AUDIT_LIMIT);
+        if (playerId != null && playerId <= 0) {
+            throw new IllegalArgumentException("invalid_playerId");
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("invalid_offset");
+        }
+        if (limit < 1 || limit > MAX_BAG_CHANGE_AUDIT_ENTRIES) {
+            throw new IllegalArgumentException("invalid_limit");
+        }
+        return new BagChangeAuditQuery(playerId, itemId, reason, offset, limit);
+    }
+
+    private static PlayerCommandAuditQuery playerCommandAuditQuery(String rawQuery) {
+        Long playerId = longQueryParam(rawQuery, "playerId");
+        String operation = blankToNull(queryParam(rawQuery, "operation"));
+        PlayerCommandStatus status = null;
+        String rawStatus = blankToNull(queryParam(rawQuery, "status"));
+        if (rawStatus != null) {
+            try {
+                status = PlayerCommandStatus.valueOf(rawStatus);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("invalid_status", e);
+            }
+        }
+        PlayerCommandAuditOutcome outcome = null;
+        String rawOutcome = blankToNull(queryParam(rawQuery, "outcome"));
+        if (rawOutcome != null) {
+            try {
+                outcome = PlayerCommandAuditOutcome.valueOf(rawOutcome);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("invalid_outcome", e);
+            }
+        }
+        int offset = intQueryParam(rawQuery, "offset", 0);
+        int limit = intQueryParam(rawQuery, "limit", DEFAULT_PLAYER_COMMAND_AUDIT_LIMIT);
+        if (playerId != null && playerId <= 0) {
+            throw new IllegalArgumentException("invalid_playerId");
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("invalid_offset");
+        }
+        if (limit < 1 || limit > MAX_PLAYER_COMMAND_AUDIT_ENTRIES) {
+            throw new IllegalArgumentException("invalid_limit");
+        }
+        return new PlayerCommandAuditQuery(playerId, operation, status, outcome, offset, limit);
+    }
+
+    private static EventGatedCommandAuditQuery eventGatedCommandAuditQuery(String rawQuery) {
+        String operation = blankToNull(queryParam(rawQuery, "operation"));
+        String topic = blankToNull(queryParam(rawQuery, "topic"));
+        String ownerKey = blankToNull(queryParam(rawQuery, "ownerKey"));
+        String outcome = blankToNull(queryParam(rawQuery, "outcome"));
+        long revision = longQueryParam(rawQuery, "revision", 0);
+        int offset = intQueryParam(rawQuery, "offset", 0);
+        int limit = intQueryParam(rawQuery, "limit", DEFAULT_EVENT_GATED_COMMAND_AUDIT_LIMIT);
+        if (revision < 0) {
+            throw new IllegalArgumentException("invalid_revision");
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("invalid_offset");
+        }
+        if (limit < 1 || limit > MAX_EVENT_GATED_COMMAND_AUDIT_ENTRIES) {
+            throw new IllegalArgumentException("invalid_limit");
+        }
+        return new EventGatedCommandAuditQuery(operation, topic, ownerKey, outcome, revision, offset, limit);
     }
 
     private static ActorIncidentQuery actorIncidentQuery(String rawQuery) {
@@ -1189,10 +1607,34 @@ public final class OpsHttpServer implements AutoCloseable {
         }
     }
 
+    private static Integer optionalIntQueryParam(String rawQuery, String name) {
+        String value = blankToNull(queryParam(rawQuery, name));
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid_" + name, e);
+        }
+    }
+
     private static long longQueryParam(String rawQuery, String name, long defaultValue) {
         String value = blankToNull(queryParam(rawQuery, name));
         if (value == null) {
             return defaultValue;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid_" + name, e);
+        }
+    }
+
+    private static Long longQueryParam(String rawQuery, String name) {
+        String value = blankToNull(queryParam(rawQuery, name));
+        if (value == null) {
+            return null;
         }
         try {
             return Long.parseLong(value);

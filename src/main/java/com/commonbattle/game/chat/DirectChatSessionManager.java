@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
 import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.AgentMessagePort;
+import com.commonbattle.game.social.FriendChangedEvent;
 
 import java.time.Clock;
 import java.util.Objects;
@@ -106,6 +107,30 @@ public final class DirectChatSessionManager implements ChatRuntimeView {
             return;
         }
         session(request.senderId(), request.receiverId()).send(request, callback);
+    }
+
+    public void sendAfterFriendChanged(
+            FriendChangedEvent event,
+            DirectChatSendRequest request,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        sendRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.directIdentity(request.senderId(), request.receiverId()),
+                ChatOperations.SEND_DIRECT);
+        if (!admission.accepted()) {
+            callback.accept(ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED));
+            return;
+        }
+        DirectChatSessionAgent session = session(request.senderId(), request.receiverId());
+        if (!(accessPolicy instanceof EventAwareDirectChatAccessPolicy eventAware)) {
+            session.sendAfterAccessStatus(request, ChatSendStatus.STALE_FRIENDS, callback);
+            return;
+        }
+        eventAware.inspectAfterFriendChanged(event, request,
+                status -> session.sendAfterAccessStatus(request, status, callback));
     }
 
     public long activeSessions() {

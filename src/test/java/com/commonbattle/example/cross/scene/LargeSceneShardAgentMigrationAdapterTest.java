@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,11 +32,13 @@ class LargeSceneShardAgentMigrationAdapterTest {
         LargeSceneShardAgentMigrationStatePacker packer =
                 new LargeSceneShardAgentMigrationStatePacker(fixture.scenes, serializer);
 
-        AgentMigrationSnapshot migration = packer.pack(
-                AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", 0).wireName()),
+        AgentIdentity identity = AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", 0).wireName());
+        AgentMigrationSnapshot migration = packInShardMailbox(
+                fixture,
+                packer,
+                identity,
                 new AgentLocation(ServiceId.of(ServiceKind.SCENE, "r1", "scene-2"),
-                        new ActorRef("scene:scene-2:world-1:shard-0")),
-                null
+                        new ActorRef("scene:scene-2:world-1:shard-0"))
         );
         LargeSceneShardAgentSnapshot snapshot = serializer.deserialize(migration.stateBytes());
 
@@ -53,11 +56,12 @@ class LargeSceneShardAgentMigrationAdapterTest {
         LargeSceneShardAgentMigrationStatePacker packer =
                 new LargeSceneShardAgentMigrationStatePacker(fixture.scenes, serializer);
         AgentIdentity identity = AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", 0).wireName());
-        AgentMigrationSnapshot snapshot = packer.pack(
+        AgentMigrationSnapshot snapshot = packInShardMailbox(
+                fixture,
+                packer,
                 identity,
                 new AgentLocation(ServiceId.of(ServiceKind.SCENE, "r1", "scene-2"),
-                        new ActorRef("scene:scene-2:world-1:shard-0")),
-                null
+                        new ActorRef("scene:scene-2:world-1:shard-0"))
         );
         AgentMigrationTask task = new AgentMigrationTask(
                 "migration-large-shard-1",
@@ -99,5 +103,18 @@ class LargeSceneShardAgentMigrationAdapterTest {
                     4
             );
         }
+    }
+
+    private static AgentMigrationSnapshot packInShardMailbox(
+            Fixture fixture,
+            LargeSceneShardAgentMigrationStatePacker packer,
+            AgentIdentity identity,
+            AgentLocation target
+    ) {
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(identity.key());
+        AtomicReference<AgentMigrationSnapshot> snapshot = new AtomicReference<>();
+        fixture.actors.send(new ActorRef(fixture.scenes.actorId(key.shardIndex())),
+                context -> snapshot.set(packer.pack(identity, target, context)));
+        return snapshot.get();
     }
 }

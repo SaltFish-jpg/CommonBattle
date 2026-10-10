@@ -2,6 +2,7 @@ package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.InMemoryAgentDirectory;
@@ -40,6 +41,7 @@ import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.session.PlayerCommandStatus;
 import org.junit.jupiter.api.Test;
 
@@ -125,6 +127,56 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(1, fixture.responses.stats().completedResponses());
         assertEquals(1, fixture.responses.stats().replayedResponses());
         assertEquals(1, fixture.responses.stats().cachedResponses());
+    }
+
+    @Test
+    void duplicateKnownOnlyFromRestoredWatermarkFailsFastWithoutWaitingForCachedResponse() {
+        Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        RecordingCallback callback = new RecordingCallback();
+        fixture.sequencer.restore(new PlayerCommandSequencerSnapshot(10001L, List.of(
+                new PlayerCommandSequencerSnapshot.Watermark(10001L, "session-1", 1, 1)
+        )));
+
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals("DUPLICATE", callback.response.get().code());
+        assertEquals("duplicate:WATERMARK_ONLY", callback.response.get().message());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(0, fixture.executor.queued());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.DUPLICATE));
+    }
+
+    @Test
+    void queuedPlayerCommandsExposeHotPlayerMailboxBeforeExecution() {
+        Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback second = new RecordingCallback();
+        RecordingCallback third = new RecordingCallback();
+
+        fixture.commands.submit(command(1), first);
+        fixture.commands.submit(command(2), second);
+        fixture.commands.submit(command(3), third);
+
+        assertNull(first.response.get());
+        assertNull(second.response.get());
+        assertNull(third.response.get());
+        assertEquals(1, fixture.executor.queued());
+        assertEquals(3, fixture.responses.pendingResponses());
+        assertEquals(3, fixture.actors.stats().queuedTasks());
+        assertEquals("player-10001", fixture.actors.stats().largestMailboxActorId());
+        var hotMailbox = fixture.actors.queuedMailboxStats().getFirst();
+        assertEquals("player-10001", hotMailbox.actor().id());
+        assertEquals(3, hotMailbox.queuedTasks());
+        assertEquals(3, hotMailbox.queuedTasksByCategory().get(ActorTaskCategory.PLAYER_COMMAND));
+
+        fixture.executor.runAll();
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, second.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, third.response.get().status());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(0, fixture.actors.stats().queuedTasks());
     }
 
     @Test
@@ -224,6 +276,38 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void remoteForwardWithoutRpcCallbackTimesOutAndIgnoresLateResponse() throws Exception {
+        HangingRpcGateway rpc = new HangingRpcGateway();
+        Duration timeout = Duration.ofMillis(10);
+        Fixture fixture = Fixture.createRemoteOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
+                rpc,
+                timeout
+        );
+        try {
+            RecordingCallback callback = new RecordingCallback();
+            PlayerCommand command = command(1);
+
+            fixture.commands.submit(command, callback);
+
+            assertTrue(await(() -> callback.response.get() != null));
+            assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+            assertEquals(0, fixture.responses.pendingResponses());
+            assertEquals(1, fixture.commands.commandGatewayStats().remoteForwards());
+            assertEquals(1, fixture.commands.commandGatewayStats().remoteForwardTimedOutResponses());
+
+            rpc.succeed(PlayerBusinessResponse.success(command, PlayerBusinessAck.OK));
+
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+            assertEquals(1, fixture.commands.commandGatewayStats().lateRemoteForwardResponses());
+        } finally {
+            fixture.commands.close();
+        }
+    }
+
+    @Test
     void rejectedLocalCommandReturnsFailureEnvelopeAndClearsWaiter() {
         Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
         RecordingCallback callback = new RecordingCallback();
@@ -240,6 +324,49 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
         assertEquals("STALE_SESSION", callback.response.get().code());
         assertEquals(0, fixture.responses.pendingResponses());
+    }
+
+    @Test
+    void commandDuringLocalOwnerMigrationReturnsRetryableFailureWithoutEnteringOldMailbox() {
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        ServiceId remote = ServiceId.of(ServiceKind.GAME, "r1", "game-2");
+        Fixture fixture = Fixture.create(local, new NoopRpcGateway());
+        RecordingCallback callback = new RecordingCallback();
+
+        fixture.lifecycles.migrate(
+                AgentIdentity.player(10001L),
+                new AgentLocation(remote, new ActorRef("player-10001")),
+                ignored -> {
+                }
+        );
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals("AGENT_MIGRATING", callback.response.get().code());
+        assertEquals(100, callback.response.get().retryAfterMillis());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(1, fixture.executor.queued());
+        assertEquals(0, fixture.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.AGENT_MIGRATING));
+    }
+
+    @Test
+    void commandDuringLocalOwnerPassivationReturnsRetryableFailureWithoutEnteringOldMailbox() {
+        Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        RecordingCallback callback = new RecordingCallback();
+
+        fixture.lifecycles.passivate(AgentIdentity.player(10001L), ignored -> {
+        });
+        fixture.commands.submit(command(1), callback);
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+        assertEquals("AGENT_MIGRATING", callback.response.get().code());
+        assertEquals("agent_passivating", callback.response.get().message());
+        assertEquals(100, callback.response.get().retryAfterMillis());
+        assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(1, fixture.executor.queued());
+        assertEquals(0, fixture.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.AGENT_MIGRATING));
     }
 
     @Test
@@ -289,7 +416,10 @@ class PlayerBusinessCommandGatewayTest {
 
     private record Fixture(
             RecordingExecutor executor,
+            ActorSystem actors,
+            AgentLifecycleManager lifecycles,
             PlayerBusinessResponseHub responses,
+            PlayerCommandSequencer sequencer,
             PlayerCommandDispatcher dispatcher,
             PlayerBusinessCommandGateway commands
     ) {
@@ -317,9 +447,10 @@ class PlayerBusinessCommandGatewayTest {
             );
             InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
             sessions.bind(10001L, "session-1");
+            PlayerCommandSequencer sequencer = new PlayerCommandSequencer();
             PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                     sessions,
-                    new PlayerCommandSequencer(),
+                    sequencer,
                     new AdmissionControlledAgentRouter(
                             (target, operation) -> AdmissionDecision.accept(),
                             new LifecycleAwareAgentRouter(lifecycles, messages)
@@ -333,11 +464,20 @@ class PlayerBusinessCommandGatewayTest {
                     dispatcher,
                     new PlayerBusinessCommandHandler(playerId -> agent, responses)
             );
-            return new Fixture(executor, responses, dispatcher,
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher,
                     new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
 
         private static Fixture createRemoteOwner(ServiceId local, ServiceId remote, RpcGateway rpc) {
+            return createRemoteOwner(local, remote, rpc, PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT);
+        }
+
+        private static Fixture createRemoteOwner(
+                ServiceId local,
+                ServiceId remote,
+                RpcGateway rpc,
+                Duration timeout
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef remoteRef = actors.actor("remote-player-10001");
@@ -347,9 +487,10 @@ class PlayerBusinessCommandGatewayTest {
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, rpc);
             InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
             sessions.bind(10001L, "session-1");
+            PlayerCommandSequencer sequencer = new PlayerCommandSequencer();
             PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                     sessions,
-                    new PlayerCommandSequencer(),
+                    sequencer,
                     new AdmissionControlledAgentRouter(
                             (target, operation) -> AdmissionDecision.accept(),
                             new LifecycleAwareAgentRouter(lifecycles, messages)
@@ -361,9 +502,8 @@ class PlayerBusinessCommandGatewayTest {
             dispatcher.handle(PlayerBusinessOperations.ACTIVITY_PROGRESS, (context, command) -> {
             });
             PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
-            return new Fixture(executor, responses, dispatcher,
-                    new PlayerBusinessCommandGateway(dispatcher, rpc, responses,
-                            PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT));
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher,
+                    new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
     }
 
@@ -445,6 +585,20 @@ class PlayerBusinessCommandGatewayTest {
     @FunctionalInterface
     private interface FailureFactory {
         Throwable create(RpcRequest<?> request);
+    }
+
+    private static final class HangingRpcGateway implements RpcGateway {
+        private RpcCallback<PlayerBusinessResponse> callback;
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            this.callback = (RpcCallback<PlayerBusinessResponse>) callback;
+        }
+
+        void succeed(PlayerBusinessResponse response) {
+            callback.success(response);
+        }
     }
 
     private static boolean await(BooleanSupplier condition) throws InterruptedException {

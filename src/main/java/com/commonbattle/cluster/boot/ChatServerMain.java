@@ -34,6 +34,7 @@ import com.commonbattle.game.chat.ProfileAwareChatMessagePolicy;
 import com.commonbattle.game.chat.RoutedChatEndpoint;
 import com.commonbattle.game.chat.RoutedChatService;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
+import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.event.OwnerActorEventSubscription;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionRecoveryScheduler;
 import com.commonbattle.game.event.OwnerEventInterestControl;
@@ -129,6 +130,10 @@ public final class ChatServerMain {
             ProfileOwnerEventInterests profileInterests = new ProfileOwnerEventInterests();
             runtime.observe("profileInterests", profileInterests);
             RemoteProfileSnapshotReader profileSnapshotReader = new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1));
+            RemoteAllianceSnapshotReader allianceSnapshotReader =
+                    new RemoteAllianceSnapshotReader(gateway, Duration.ofSeconds(1));
+            RemoteFriendSnapshotReader friendSnapshotReader =
+                    new RemoteFriendSnapshotReader(gateway, Duration.ofSeconds(1));
             ProfileRuntime profiles = new ProfileRuntime(profileCache, profileInterests, profileSnapshotReader);
             runtime.observe("profileRuntime", profiles);
             SceneProfileAwarenessAgent profileAwareness = new SceneProfileAwarenessAgent(
@@ -138,7 +143,9 @@ public final class ChatServerMain {
             );
             SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
                     messages,
-                    actors.actor("chat-friend-awareness")
+                    actors.actor("chat-friend-awareness"),
+                    OwnerEventInterestControl.noop(),
+                    friendSnapshotReader
             );
             ScenePlayerDomainEventAgent domainAwareness = new ScenePlayerDomainEventAgent(
                     messages,
@@ -147,7 +154,9 @@ public final class ChatServerMain {
             );
             SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
                     messages,
-                    actors.actor("chat-alliance-awareness")
+                    actors.actor("chat-alliance-awareness"),
+                    OwnerEventInterestControl.noop(),
+                    allianceSnapshotReader
             );
             ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
                     profileAwareness,
@@ -262,7 +271,7 @@ public final class ChatServerMain {
                             new EventReplaySnapshotRepairer().register(
                                     AllianceMemberChangedEvent.TOPIC,
                                     new AllianceSnapshotRepairer(
-                                            new RemoteAllianceSnapshotReader(gateway, Duration.ofSeconds(1)),
+                                            allianceSnapshotReader,
                                             allianceAwareness
                                     )
                             ),
@@ -303,7 +312,7 @@ public final class ChatServerMain {
                             new EventReplaySnapshotRepairer().register(
                                     FriendChangedEvent.TOPIC,
                                     new FriendSnapshotRepairer(
-                                            new RemoteFriendSnapshotReader(gateway, Duration.ofSeconds(1)),
+                                            friendSnapshotReader,
                                             friendAwareness
                                     )
                             ),
@@ -371,8 +380,10 @@ public final class ChatServerMain {
                     chatAdmissions
             );
             RoutedChatService routedChat = new RoutedChatService(channels, directSessions, config.chatRouteConfig(), accessControl);
+            InMemoryEventGatedCommandAuditLog eventGatedCommandAudits = new InMemoryEventGatedCommandAuditLog();
             new ChatChannelEndpoint(channels).bind(gateway);
-            new RoutedChatEndpoint(routedChat).bind(gateway);
+            new RoutedChatEndpoint(routedChat, eventGatedCommandAudits, clock).bind(gateway);
+            runtime.observe("eventGatedCommandAudits", eventGatedCommandAudits);
             runtime.observe("chat", routedChat);
             node.start(
                     List.of(ServiceKind.GAME, ServiceKind.SCENE, ServiceKind.PROXY, ServiceKind.REGION),

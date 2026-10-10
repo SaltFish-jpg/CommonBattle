@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorScheduleKey;
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorTimerHandle;
+import com.commonbattle.actor.ActorContext;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -123,7 +124,7 @@ public final class PlayerAutoSaveScheduler implements AutoCloseable {
                     schedulerActor,
                     initialDelay,
                     interval,
-                    ignored -> runOnceSafely()
+                    ignored -> runOnceSafelyFromSchedulerActor()
             );
             return;
         }
@@ -169,6 +170,11 @@ public final class PlayerAutoSaveScheduler implements AutoCloseable {
             runOnce();
         } catch (RuntimeException ignored) {
         }
+    }
+
+    private void runOnceSafelyFromSchedulerActor() {
+        ActorContext.requireCurrent(schedulerActor);
+        runOnceSafely();
     }
 
     @Override

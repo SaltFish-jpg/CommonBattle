@@ -10,6 +10,7 @@ import com.commonbattle.game.social.FriendChangedEvent;
 import com.commonbattle.game.social.FriendOwnerKeyParser;
 import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.game.social.FriendSnapshot;
+import com.commonbattle.game.social.FriendSnapshotReader;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneFriendAwarenessAgentTest {
@@ -39,6 +41,33 @@ class SceneFriendAwarenessAgentTest {
 
         assertTrue(scene.friendsOf(10001L).orElseThrow().contains(20002L));
         assertTrue(scene.friendsOf(30003L).isEmpty());
+    }
+
+    @Test
+    void directFriendEventHandlingCannotBypassSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class, () -> scene.handleFriendChanged(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1)
+        ));
+        assertTrue(scene.friendsOf(10001L).isEmpty());
+    }
+
+    @Test
+    void directFriendSnapshotRefreshCannotBypassSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class,
+                () -> scene.handleSnapshot(new FriendSnapshot(10001L, 1, Set.of(20002L))));
+        assertTrue(scene.friendsOf(10001L).isEmpty());
     }
 
     @Test
@@ -181,6 +210,137 @@ class SceneFriendAwarenessAgentTest {
     }
 
     @Test
+    void friendEventMailboxCallbackCanForceFreshSnapshotAfterRevisionGap() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingOwnerInterests interests = new RecordingOwnerInterests();
+        SceneFriendAwarenessAgent scene = createScene(
+                executor,
+                interests,
+                playerId -> Optional.of(new FriendSnapshot(playerId, 3, Set.of(20002L, 30003L)))
+        );
+        AtomicReference<Optional<ScenePlayerFriendView>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChangedAndReadFreshView(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                callback::set
+        );
+
+        assertNull(callback.get());
+
+        executor.runNext();
+
+        ScenePlayerFriendView view = callback.get().orElseThrow();
+        assertFalse(view.stale());
+        assertEquals(3, view.revision());
+        assertEquals(Set.of(20002L, 30003L), view.friends());
+        assertEquals(List.of(FriendOwnerKeyParser.ownerKey(10001L)), interests.repairs);
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0,
+                1, 0, 1, 0, 0), scene.projectionStats());
+    }
+
+    @Test
+    void friendFreshReadResultExposesRefreshStatus() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(
+                executor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new FriendSnapshot(playerId, 3, Set.of(20002L, 30003L)))
+        );
+        AtomicReference<SceneFriendReadResult> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChangedAndReadFreshResult(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                callback::set
+        );
+        executor.runNext();
+
+        assertEquals(SceneFriendReadStatus.REFRESHED, callback.get().status());
+        assertTrue(callback.get().fresh());
+        assertEquals(Set.of(20002L, 30003L), callback.get().view().orElseThrow().friends());
+    }
+
+    @Test
+    void friendFreshReadResultDistinguishesRemoteStaleAndRemoteMiss() {
+        RecordingExecutor staleExecutor = new RecordingExecutor();
+        SceneFriendAwarenessAgent staleScene = createScene(
+                staleExecutor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new FriendSnapshot(playerId, 2, Set.of(20002L)))
+        );
+        staleScene.enter(10001L);
+        staleExecutor.runNext();
+        AtomicReference<SceneFriendReadResult> stale = new AtomicReference<>();
+        staleScene.onFriendChangedAndReadFreshResult(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                stale::set
+        );
+        staleExecutor.runNext();
+
+        RecordingExecutor missExecutor = new RecordingExecutor();
+        SceneFriendAwarenessAgent missScene = createScene(missExecutor);
+        missScene.enter(10001L);
+        missExecutor.runNext();
+        AtomicReference<SceneFriendReadResult> miss = new AtomicReference<>();
+        missScene.onFriendChangedAndReadFreshResult(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                miss::set
+        );
+        missExecutor.runNext();
+
+        assertEquals(SceneFriendReadStatus.REMOTE_STALE, stale.get().status());
+        assertFalse(stale.get().fresh());
+        assertTrue(stale.get().view().isEmpty());
+        assertEquals(SceneFriendReadStatus.REMOTE_MISS, miss.get().status());
+        assertFalse(miss.get().fresh());
+        assertTrue(miss.get().view().isEmpty());
+    }
+
+    @Test
+    void directFreshFriendReadCannotRefreshOutsideSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(
+                executor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new FriendSnapshot(playerId, 1, Set.of(20002L)))
+        );
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class, () -> scene.readFreshFriendsOf(10001L, 1));
+        assertTrue(scene.friendsOf(10001L).isEmpty());
+    }
+
+    @Test
+    void friendFreshReadReturnsEmptyWhenRemoteSnapshotIsOlderThanEvent() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneFriendAwarenessAgent scene = createScene(
+                executor,
+                OwnerEventInterestControl.noop(),
+                playerId -> Optional.of(new FriendSnapshot(playerId, 2, Set.of(20002L)))
+        );
+        AtomicReference<Optional<ScenePlayerFriendView>> callback = new AtomicReference<>();
+
+        scene.enter(10001L);
+        executor.runNext();
+        scene.onFriendChangedAndReadFreshView(
+                new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 3),
+                callback::set
+        );
+        executor.runNext();
+
+        assertTrue(callback.get().isEmpty());
+        assertTrue(scene.friendsOf(10001L).orElseThrow().stale());
+        assertEquals(3, scene.friendsOf(10001L).orElseThrow().revision());
+        assertEquals(new SceneProjectionStats(1, 1, 0, 1, 1, 0, 0, 1,
+                1, 0, 0, 1, 0), scene.projectionStats());
+    }
+
+    @Test
     void ignoredSnapshotOfflineEventAndDuplicateEventAreCounted() {
         RecordingExecutor executor = new RecordingExecutor();
         SceneFriendAwarenessAgent scene = createScene(executor);
@@ -206,11 +366,20 @@ class SceneFriendAwarenessAgentTest {
     }
 
     private static SceneFriendAwarenessAgent createScene(Executor executor, OwnerEventInterestControl interests) {
+        return createScene(executor, interests, ignored -> Optional.empty());
+    }
+
+    private static SceneFriendAwarenessAgent createScene(
+            Executor executor,
+            OwnerEventInterestControl interests,
+            FriendSnapshotReader snapshotReader
+    ) {
         ActorSystem actors = new ActorSystem(executor, 64);
         return new SceneFriendAwarenessAgent(
                 new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
                 actors.actor("scene-friend"),
-                interests
+                interests,
+                snapshotReader
         );
     }
 

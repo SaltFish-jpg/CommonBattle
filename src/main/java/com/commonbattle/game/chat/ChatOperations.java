@@ -14,6 +14,9 @@ public final class ChatOperations {
     public static final String LEAVE_ALLIANCE = "chat.alliance.leave";
     public static final String SEND_ALLIANCE = "chat.alliance.send";
     public static final String SEND_DIRECT = "chat.direct.send";
+    public static final String JOIN_ALLIANCE_AFTER_EVENT = "chat.alliance.join.after_event";
+    public static final String SEND_ALLIANCE_AFTER_EVENT = "chat.alliance.send.after_event";
+    public static final String SEND_DIRECT_AFTER_FRIEND_EVENT = "chat.direct.send.after_friend_event";
 
     private ChatOperations() {
     }

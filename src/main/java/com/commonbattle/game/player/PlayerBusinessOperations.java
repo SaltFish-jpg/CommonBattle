@@ -5,6 +5,7 @@ package com.commonbattle.game.player;
  * 网关层使用这些稳定字符串注册 PlayerCommandDispatcher 的处理器。
  */
 public final class PlayerBusinessOperations {
+    public static final String BAG_CONSUME_ITEM = "bag.consumeItem";
     public static final String ACTIVITY_PROGRESS = "activity.progress";
     public static final String ACTIVITY_CLAIM = "activity.claim";
     public static final String GROWTH_USE_EXP_ITEMS = "growth.useExpItems";

@@ -25,14 +25,19 @@ import com.commonbattle.cluster.registry.ServiceDescriptorPublisher;
 import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcStructuredException;
+import com.commonbattle.example.cross.CombatDamageRequest;
+import com.commonbattle.example.cross.CombatDamageResult;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.EnterSceneResult;
 import com.commonbattle.example.cross.LeaveSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneResult;
+import com.commonbattle.example.cross.MoveSceneRequest;
+import com.commonbattle.example.cross.MoveSceneResult;
 import com.commonbattle.example.cross.SceneOperations;
 import com.commonbattle.example.cross.scene.LargeSceneShardService;
 import com.commonbattle.example.cross.scene.MultiSmallSceneService;
 import com.commonbattle.example.cross.scene.ProfileAwareSceneService;
+import com.commonbattle.example.cross.scene.SceneCombatDamageOutcome;
 import com.commonbattle.example.cross.scene.SceneHostingMode;
 import com.commonbattle.example.cross.scene.SceneMailboxPressureGate;
 import com.commonbattle.example.cross.scene.ScenePlacement;
@@ -138,6 +143,10 @@ public final class SceneServerMain {
             ));
             OwnerEventRepairDispatcher repairDispatcher = BootOwnerEventRepairs.repairDispatcher(config);
             ProfileSnapshotReader profileSnapshotReader = new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1));
+            RemoteAllianceSnapshotReader allianceSnapshotReader =
+                    new RemoteAllianceSnapshotReader(gateway, Duration.ofSeconds(1));
+            RemoteFriendSnapshotReader friendSnapshotReader =
+                    new RemoteFriendSnapshotReader(gateway, Duration.ofSeconds(1));
             ProfileOwnerEventInterests profileInterests = new ProfileOwnerEventInterests();
             runtime.observe("profileInterests", profileInterests);
             ProfileRuntime profileRuntime = new ProfileRuntime(sceneProfileCache, profileInterests, profileSnapshotReader);
@@ -166,11 +175,15 @@ public final class SceneServerMain {
             );
             SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
                     profileMessagePort,
-                    allianceEventActor
+                    allianceEventActor,
+                    OwnerEventInterestControl.noop(),
+                    allianceSnapshotReader
             );
             SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
                     profileMessagePort,
-                    friendEventActor
+                    friendEventActor,
+                    OwnerEventInterestControl.noop(),
+                    friendSnapshotReader
             );
             ActorMailboxEventSubscriber profileEventSubscriber = new ActorMailboxEventSubscriber(
                     profileMessagePort,
@@ -269,7 +282,7 @@ public final class SceneServerMain {
                             new EventReplaySnapshotRepairer().register(
                                     AllianceMemberChangedEvent.TOPIC,
                                     new AllianceSnapshotRepairer(
-                                            new RemoteAllianceSnapshotReader(gateway, Duration.ofSeconds(1)),
+                                            allianceSnapshotReader,
                                             allianceAwareness
                                     )
                             ),
@@ -310,7 +323,7 @@ public final class SceneServerMain {
                             new EventReplaySnapshotRepairer().register(
                                     FriendChangedEvent.TOPIC,
                                     new FriendSnapshotRepairer(
-                                            new RemoteFriendSnapshotReader(gateway, Duration.ofSeconds(1)),
+                                            friendSnapshotReader,
                                             friendAwareness
                                     )
                             ),
@@ -360,7 +373,11 @@ public final class SceneServerMain {
             startLargeSceneShardTicks(config, sceneService, actorSchedules);
             gateway.handle(SceneOperations.ENTER, (request, responder) -> {
                 EnterSceneRequest payload = (EnterSceneRequest) request.payload();
-                SceneMailboxPressureGate.SceneAdmission admission = scenePressureGate.admitEnter(payload.sceneId(), 0, 0);
+                SceneMailboxPressureGate.SceneAdmission admission = scenePressureGate.admitEnter(
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
                 if (!admission.accepted()) {
                     responder.failure(new RpcStructuredException(
                             admission.decision().reason(),
@@ -369,13 +386,101 @@ public final class SceneServerMain {
                     ));
                     return;
                 }
-                ScenePlacement placement = activeSceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
-                responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), 0));
+                activeSceneService.enterAsync(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY(),
+                        placement -> responder.success(new EnterSceneResult(
+                                payload.playerId(),
+                                placement.sceneId(),
+                                placement.shardIndex()
+                        )),
+                        responder::failure
+                );
             });
             gateway.handle(SceneOperations.LEAVE, (request, responder) -> {
                 LeaveSceneRequest payload = (LeaveSceneRequest) request.payload();
-                boolean left = activeSceneService.leave(payload.playerId(), payload.sceneId());
-                responder.success(new LeaveSceneResult(payload.playerId(), payload.sceneId(), left));
+                activeSceneService.leaveAsync(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        left -> responder.success(new LeaveSceneResult(payload.playerId(), payload.sceneId(), left)),
+                        responder::failure
+                );
+            });
+            gateway.handle(SceneOperations.MOVE, (request, responder) -> {
+                MoveSceneRequest payload = (MoveSceneRequest) request.payload();
+                SceneMailboxPressureGate.SceneAdmission admission = scenePressureGate.admitMove(
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                if (!admission.accepted()) {
+                    responder.failure(new RpcStructuredException(
+                            admission.decision().reason(),
+                            admission.decision().reason(),
+                            admission.decision().retryAfter()
+                    ));
+                    return;
+                }
+                activeSceneService.moveAsync(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY(),
+                        outcome -> responder.success(new MoveSceneResult(
+                                payload.playerId(),
+                                outcome.sceneId(),
+                                outcome.chunkX(),
+                                outcome.chunkY(),
+                                outcome.previousShardIndex(),
+                                outcome.shardIndex(),
+                                outcome.moved(),
+                                outcome.aoi().visibleEnter(),
+                                outcome.aoi().visibleLeave(),
+                                outcome.aoi().observerEnter(),
+                                outcome.aoi().observerLeave()
+                        )),
+                        responder::failure
+                );
+            });
+            gateway.handle(SceneOperations.COMBAT_DAMAGE, (request, responder) -> {
+                CombatDamageRequest payload = (CombatDamageRequest) request.payload();
+                if (sceneService instanceof LargeSceneShardService largeScene
+                        && largeScene.sceneId().equals(payload.sceneId())) {
+                    largeScene.applyDamageAsync(
+                            payload.attackerId(),
+                            payload.targetId(),
+                            payload.damage(),
+                            outcome -> responder.success(new CombatDamageResult(
+                                    outcome.sceneId(),
+                                    outcome.attackerId(),
+                                    outcome.targetId(),
+                                    outcome.shardIndex(),
+                                    outcome.damage(),
+                                    outcome.hpBefore(),
+                                    outcome.hpAfter(),
+                                    outcome.applied()
+                            )),
+                            responder::failure
+                    );
+                    return;
+                }
+                SceneCombatDamageOutcome outcome = SceneCombatDamageOutcome.rejected(
+                        payload.sceneId(),
+                        payload.attackerId(),
+                        payload.targetId()
+                );
+                responder.success(new CombatDamageResult(
+                        outcome.sceneId(),
+                        outcome.attackerId(),
+                        outcome.targetId(),
+                        outcome.shardIndex(),
+                        outcome.damage(),
+                        outcome.hpBefore(),
+                        outcome.hpAfter(),
+                        outcome.applied()
+                ));
             });
             node.start(
                     List.of(ServiceKind.GAME, ServiceKind.CHAT, ServiceKind.PROXY, ServiceKind.REGION),
@@ -437,7 +542,9 @@ public final class SceneServerMain {
                     config.node(),
                     config.endpoint(),
                     config.sceneId(),
-                    config.sceneShards()
+                    config.sceneShards(),
+                    config.sceneShardChunkSize(),
+                    Clock.systemUTC()
             );
         }
         return MultiSmallSceneService.create(

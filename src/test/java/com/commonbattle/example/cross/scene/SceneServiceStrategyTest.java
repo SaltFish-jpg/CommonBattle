@@ -7,6 +7,7 @@ import com.commonbattle.battle.command.Command;
 import com.commonbattle.battle.event.Event;
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorSystemClosedException;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
@@ -41,8 +42,10 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -151,6 +154,121 @@ class SceneServiceStrategyTest {
             assertEquals(1, service.descriptor().protocolVersion());
             assertEquals("0", service.descriptor().metadata(ServiceMetadata.LOAD_USED));
             assertEquals("8", service.descriptor().metadata(ServiceMetadata.LOAD_CAPACITY));
+            assertEquals("1", service.descriptor().metadata("scene.shard.chunk.size"));
+        }
+    }
+
+    @Test
+    void smallSceneAsyncEnterMutatesOnlyAfterSceneMailboxRuns() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            MultiSmallSceneService service = MultiSmallSceneService.create(
+                    actors,
+                    "r1",
+                    "scene-small-1",
+                    new ServiceEndpoint("127.0.0.1", 9100),
+                    200
+            );
+            AtomicReference<ScenePlacement> placement = new AtomicReference<>();
+
+            service.enterAsync(10001L, "room-1", 0, 0, placement::set, error -> {
+                throw new AssertionError(error);
+            });
+
+            assertEquals(new SceneRuntimeStats(0, 0, 0, 0), service.stats());
+            assertEquals(null, placement.get());
+
+            executor.runAll();
+
+            assertEquals("room-1", placement.get().sceneId());
+            assertEquals(new SceneRuntimeStats(1, 1, 0, 1), service.stats());
+        }
+    }
+
+    @Test
+    void smallSceneMigrationExportRequiresSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            MultiSmallSceneService service = MultiSmallSceneService.create(
+                    actors,
+                    "r1",
+                    "scene-small-1",
+                    new ServiceEndpoint("127.0.0.1", 9100),
+                    200
+            );
+            ScenePlacement placement = service.enter(10001L, "room-1", 0, 0);
+            AtomicReference<SmallSceneAgentSnapshot> snapshot = new AtomicReference<>();
+
+            assertThrows(IllegalStateException.class,
+                    () -> service.exportForMigrationInCurrentMailbox("room-1"));
+
+            actors.send(placement.actor(),
+                    ignored -> snapshot.set(service.exportForMigrationInCurrentMailbox("room-1")));
+            executor.runAll();
+
+            assertEquals(Set.of(10001L), snapshot.get().players());
+        }
+    }
+
+    @Test
+    void smallSceneAsyncEnterReportsMailboxDeliveryFailureByCallback() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        MultiSmallSceneService service = MultiSmallSceneService.create(
+                actors,
+                "r1",
+                "scene-small-1",
+                new ServiceEndpoint("127.0.0.1", 9100),
+                200
+        );
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<ScenePlacement> placement = new AtomicReference<>();
+
+        actors.close();
+        service.enterAsync(10001L, "room-1", 0, 0, placement::set, failure::set);
+
+        assertEquals(null, placement.get());
+        assertEquals(ActorSystemClosedException.class, failure.get().getClass());
+        assertEquals(new SceneRuntimeStats(0, 0, 0, 0), service.stats());
+    }
+
+    @Test
+    void largeSceneShardPlannerGroupsChunksIntoStableCells() {
+        LargeSceneShardPlanner planner = new LargeSceneShardPlanner("world-1", 8, 4);
+
+        LargeSceneShardRoute origin = planner.route("world-1", 0, 0);
+        LargeSceneShardRoute sameCell = planner.route("world-1", 3, 3);
+        LargeSceneShardRoute nextCell = planner.route("world-1", 4, 0);
+        LargeSceneShardRoute negativeCell = planner.route("world-1", -1, -1);
+
+        assertEquals(origin.shardIndex(), sameCell.shardIndex());
+        assertNotEquals(origin.shardIndex(), nextCell.shardIndex());
+        assertEquals(-1, negativeCell.cellX());
+        assertEquals(-1, negativeCell.cellY());
+        assertEquals(new LargeSceneShardAgentKey("world-1", origin.shardIndex()), origin.agentKey());
+    }
+
+    @Test
+    void largeSceneServiceCanUseConfiguredShardPlanner() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+
+            ScenePlacement first = service.enter(10001L, "world-1", 0, 0);
+            ScenePlacement sameCell = service.enter(10002L, "world-1", 3, 3);
+
+            assertEquals(first.actor(), sameCell.actor());
+            assertEquals(4, service.planner().chunkSize());
+            assertEquals("4", service.descriptor().metadata("scene.shard.chunk.size"));
+            assertEquals(2, service.shardPlayers(first.shardIndex()).size());
         }
     }
 
@@ -178,6 +296,348 @@ class SceneServiceStrategyTest {
             assertEquals(true, service.leave(10001L, "world-1"));
 
             assertEquals(new SceneRuntimeStats(1, 2, 8, 1), service.stats());
+        }
+    }
+
+    @Test
+    void largeSceneAsyncEnterAndMoveMutateOnlyAfterShardMailboxRuns() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> moved = new AtomicReference<>();
+
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+
+            assertEquals(new SceneRuntimeStats(0, 0, 8, 0), service.stats());
+            assertEquals(null, entered.get());
+
+            executor.runAll();
+
+            assertEquals("world-1", entered.get().sceneId());
+            assertEquals(new SceneRuntimeStats(1, 1, 8, 1), service.stats());
+
+            service.moveAsync(10001L, "world-1", 4, 0, moved::set, error -> {
+                throw new AssertionError(error);
+            });
+
+            assertEquals(null, moved.get());
+            executor.runAll();
+
+            assertEquals(true, moved.get().moved());
+            assertEquals(entered.get().shardIndex(), moved.get().previousShardIndex());
+            assertNotEquals(entered.get().shardIndex(), moved.get().shardIndex());
+        }
+    }
+
+    @Test
+    void largeSceneMigrationExportRequiresShardMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            ScenePlacement placement = service.enter(10001L, "world-1", 0, 0);
+            AtomicReference<LargeSceneShardAgentSnapshot> snapshot = new AtomicReference<>();
+
+            assertThrows(IllegalStateException.class,
+                    () -> service.exportShardForMigrationInCurrentMailbox(placement.shardIndex()));
+
+            actors.send(placement.actor(),
+                    ignored -> snapshot.set(service.exportShardForMigrationInCurrentMailbox(placement.shardIndex())));
+            executor.runAll();
+
+            assertEquals(Set.of(10001L), snapshot.get().players());
+        }
+    }
+
+    @Test
+    void largeSceneMoveKeepsPlayerInSameShardWhenChunkStaysInSameCell() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            ScenePlacement placement = service.enter(10001L, "world-1", 0, 0);
+
+            SceneMoveOutcome moved = service.move(10001L, "world-1", 3, 3);
+
+            assertEquals(true, moved.moved());
+            assertEquals(placement.shardIndex(), moved.previousShardIndex());
+            assertEquals(placement.shardIndex(), moved.shardIndex());
+            assertEquals(Set.of(10001L), service.shardPlayers(placement.shardIndex()));
+            assertEquals(new SceneRuntimeStats(1, 1, 8, 1), service.stats());
+        }
+    }
+
+    @Test
+    void largeSceneEnterBuildsShardAoiLinksForNearbyPlayers() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 1, 0);
+
+            assertEquals(List.of(20002L), service.visiblePlayers(10001L));
+            assertEquals(List.of(10001L), service.visiblePlayers(20002L));
+        }
+    }
+
+    @Test
+    void largeSceneMoveReportsAoiDeltaInsideShard() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 1, 0);
+
+            SceneMoveOutcome moved = service.move(20002L, "world-1", 8, 0);
+
+            assertEquals(true, moved.moved());
+            assertEquals(List.of(10001L), moved.aoi().visibleLeave());
+            assertEquals(List.of(10001L), moved.aoi().observerLeave());
+            assertEquals(List.of(), service.visiblePlayers(10001L));
+            assertEquals(List.of(), service.visiblePlayers(20002L));
+        }
+    }
+
+    @Test
+    void largeScenePublishesBroadcastsFromAoiChangesInsideShardMailbox() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 1, 0);
+            service.move(20002L, "world-1", 2, 0);
+            service.move(20002L, "world-1", 8, 0);
+
+            List<SceneBroadcastEnvelope> envelopes = broadcasts.envelopes();
+            assertEquals(3, envelopes.size());
+            assertEquals(Set.of(10001L), envelopes.get(0).recipients());
+            assertEquals(SceneBroadcastEventType.ENTER_VIEW, envelopes.get(0).event().type());
+            assertEquals(20002L, envelopes.get(0).event().subjectPlayerId());
+            assertEquals(Set.of(10001L), envelopes.get(1).recipients());
+            assertEquals(SceneBroadcastEventType.PLAYER_MOVED, envelopes.get(1).event().type());
+            assertEquals(2, envelopes.get(1).event().chunkX());
+            assertEquals(Set.of(10001L), envelopes.get(2).recipients());
+            assertEquals(SceneBroadcastEventType.LEAVE_VIEW, envelopes.get(2).event().type());
+        }
+    }
+
+    @Test
+    void largeSceneLeavePublishesLeaveViewBroadcast() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 1, 0);
+
+            service.leave(20002L, "world-1");
+
+            SceneBroadcastEnvelope envelope = broadcasts.envelopes().getLast();
+            assertEquals(Set.of(10001L), envelope.recipients());
+            assertEquals(SceneBroadcastEventType.LEAVE_VIEW, envelope.event().type());
+            assertEquals(20002L, envelope.event().subjectPlayerId());
+        }
+    }
+
+    @Test
+    void largeSceneDamageBroadcastsToParticipantsAndVisiblePlayers() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 1, 0);
+            service.enter(30003L, "world-1", 2, 0);
+            service.registerCombatant(10001L, 100);
+            service.registerCombatant(20002L, 80);
+
+            SceneCombatDamageOutcome outcome = service.applyDamage(10001L, 20002L, 35);
+
+            assertEquals(true, outcome.applied());
+            assertEquals(80, outcome.hpBefore());
+            assertEquals(45, outcome.hpAfter());
+            assertEquals(45, service.hitPoints(20002L).orElseThrow());
+            SceneBroadcastEnvelope damage = broadcasts.envelopes().getLast();
+            assertEquals(Set.of(10001L, 20002L, 30003L), damage.recipients());
+            assertEquals(SceneBroadcastEventType.COMBAT_DAMAGE, damage.event().type());
+            assertEquals(10001L, damage.event().sourcePlayerId());
+            assertEquals(20002L, damage.event().subjectPlayerId());
+            assertEquals(35, damage.event().value());
+            assertEquals(45, damage.event().hpAfter());
+        }
+    }
+
+    @Test
+    void largeSceneDamageRejectsTargetsOutsideCurrentShard() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 4, 0);
+            service.registerCombatant(10001L, 100);
+            service.registerCombatant(20002L, 80);
+            int beforeBroadcasts = broadcasts.envelopes().size();
+
+            SceneCombatDamageOutcome outcome = service.applyDamage(10001L, 20002L, 35);
+
+            assertEquals(false, outcome.applied());
+            assertEquals(80, service.hitPoints(20002L).orElseThrow());
+            assertEquals(beforeBroadcasts, broadcasts.envelopes().size());
+        }
+    }
+
+    @Test
+    void largeSceneMoveTransfersPlayerBetweenShardActors() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            ScenePlacement previous = service.enter(10001L, "world-1", 0, 0);
+            ScenePlacement next = service.place("world-1", 4, 0);
+
+            SceneMoveOutcome moved = service.move(10001L, "world-1", 4, 0);
+
+            assertEquals(true, moved.moved());
+            assertEquals(previous.shardIndex(), moved.previousShardIndex());
+            assertEquals(next.shardIndex(), moved.shardIndex());
+            assertEquals(Set.of(), service.shardPlayers(previous.shardIndex()));
+            assertEquals(Set.of(10001L), service.shardPlayers(next.shardIndex()));
+            assertEquals(List.of(), moved.aoi().visibleEnter());
+            assertEquals(List.of(), moved.aoi().visibleLeave());
+            assertEquals(new SceneRuntimeStats(1, 1, 8, 1), service.stats());
+        }
+    }
+
+    @Test
+    void largeSceneMoveRejectsPlayerThatHasNotEntered() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8
+            );
+
+            SceneMoveOutcome moved = service.move(10001L, "world-1", 4, 0);
+
+            assertEquals(false, moved.moved());
+            assertEquals(-1, moved.previousShardIndex());
+            assertEquals(-1, moved.shardIndex());
+            assertEquals(new SceneRuntimeStats(0, 0, 8, 0), service.stats());
+        }
+    }
+
+    @Test
+    void smallSceneMoveRequiresExistingPlayerAndDoesNotChangeActor() {
+        try (ActorSystem actors = new ActorSystem(1)) {
+            MultiSmallSceneService service = MultiSmallSceneService.create(
+                    actors,
+                    "r1",
+                    "scene-small-1",
+                    new ServiceEndpoint("127.0.0.1", 9100),
+                    200
+            );
+            service.enter(10001L, "room-1", 0, 0);
+
+            SceneMoveOutcome moved = service.move(10001L, "room-1", 99, -20);
+            SceneMoveOutcome missing = service.move(20002L, "room-1", 99, -20);
+
+            assertEquals(true, moved.moved());
+            assertEquals(0, moved.shardIndex());
+            assertEquals(false, missing.moved());
+            assertEquals(new SceneRuntimeStats(1, 1, 0, 1), service.stats());
         }
     }
 
@@ -448,6 +908,8 @@ class SceneServiceStrategyTest {
             ));
             executor.runNext();
             assertEquals(100, allianceEvents.allianceOf(10001L).orElseThrow().allianceId());
+            assertEquals(1, service.stats().projectionReceivedEvents());
+            assertEquals(1, service.stats().projectionAppliedEvents());
 
             service.leave(10001L, "room-1");
             executor.runNext();
@@ -508,6 +970,8 @@ class SceneServiceStrategyTest {
             ));
             executor.runNext();
             assertEquals(true, friendEvents.friendsOf(10001L).orElseThrow().contains(20002L));
+            assertEquals(1, service.stats().projectionReceivedEvents());
+            assertEquals(1, service.stats().projectionAppliedEvents());
 
             service.leave(10001L, "room-1");
             executor.runNext();

@@ -35,6 +35,9 @@ public final class InMemoryOwnerRepairOpsAuditLog implements OwnerRepairOpsAudit
     @Override
     public synchronized void record(OwnerRepairOpsAuditRecord record) {
         Objects.requireNonNull(record, "record");
+        if (!isSupportedAction(record.action())) {
+            throw new IllegalArgumentException("unsupported owner repair ops action: " + record.action());
+        }
         if (record.released() == 0 && "release".equals(record.action()) && !config.recordNotFoundRelease()) {
             recorded++;
             releaseOps++;
@@ -47,15 +50,26 @@ public final class InMemoryOwnerRepairOpsAuditLog implements OwnerRepairOpsAudit
         }
         records.addLast(record);
         recorded++;
-        releasedOwners += record.released();
-        if ("release-all".equals(record.action())) {
-            releaseAllOps++;
-        } else {
-            releaseOps++;
-            if (record.released() == 0) {
-                notFoundReleaseOps++;
+        switch (record.action()) {
+            case "release-all" -> {
+                releasedOwners += record.released();
+                releaseAllOps++;
             }
+            case "release" -> {
+                releasedOwners += record.released();
+                releaseOps++;
+                if (record.released() == 0) {
+                    notFoundReleaseOps++;
+                }
+            }
+            case "request" -> {
+            }
+            default -> throw new IllegalStateException("unreachable owner repair ops action: " + record.action());
         }
+    }
+
+    private static boolean isSupportedAction(String action) {
+        return "release".equals(action) || "release-all".equals(action) || "request".equals(action);
     }
 
     @Override

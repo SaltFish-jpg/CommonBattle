@@ -15,6 +15,12 @@ import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
 import com.commonbattle.game.scene.ScenePlayerInterestStats;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
+import com.commonbattle.game.social.AllianceMemberAction;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.AllianceSnapshot;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
+import com.commonbattle.game.social.FriendSnapshot;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -24,6 +30,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -191,6 +198,55 @@ class RoutedChatServiceTest {
         assertEquals(0, fixture.chat.stats().retainedMessages());
     }
 
+    @Test
+    void routedServiceSendsDirectAfterFriendEventThroughAwarenessAndSessionActors() {
+        RelationFixture fixture = RelationFixture.create(
+                playerId -> java.util.Optional.of(new FriendSnapshot(playerId, 3, Set.of(10002L))),
+                allianceId -> java.util.Optional.empty()
+        );
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.chat.sendDirectAfterFriendChanged(
+                new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                new DirectChatSendRequest(10001L, 10002L, "direct", 0),
+                sent::set
+        );
+
+        assertEquals(null, sent.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.SENT, sent.get().status());
+        assertEquals(ChatChannelIds.direct(10001L, 10002L), sent.get().delivery().orElseThrow().channelId());
+    }
+
+    @Test
+    void routedServiceJoinsAllianceAfterEventThroughAwarenessAndChannelActors() {
+        RelationFixture fixture = RelationFixture.create(
+                playerId -> java.util.Optional.empty(),
+                allianceId -> java.util.Optional.of(new AllianceSnapshot(allianceId, 3, Set.of(10001L)))
+        );
+        fixture.allianceAwareness.enter(10001L);
+        fixture.allianceAwareness.watchAlliance(900L);
+        fixture.executor.runAll();
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+
+        fixture.chat.joinAllianceAfterChanged(
+                new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                new AllianceChatJoinRequest(900L, 10001L),
+                joined::set
+        );
+
+        assertEquals(null, joined.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatJoinStatus.JOINED, joined.get().status());
+        assertEquals(Set.of(10001L), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+    }
+
     private record Fixture(
             RecordingExecutor executor,
             ActorSystem actors,
@@ -262,6 +318,72 @@ class RoutedChatServiceTest {
                     channels,
                     directSessions,
                     new RoutedChatService(channels, directSessions, config, accessControl)
+            );
+        }
+    }
+
+    private record RelationFixture(
+            RecordingExecutor executor,
+            SceneFriendAwarenessAgent friendAwareness,
+            SceneAllianceAwarenessAgent allianceAwareness,
+            ChatChannelManager channels,
+            RoutedChatService chat
+    ) {
+        private static RelationFixture create(
+                com.commonbattle.game.social.FriendSnapshotReader friendReader,
+                com.commonbattle.game.social.AllianceSnapshotReader allianceReader
+        ) {
+            RecordingExecutor executor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(executor, 64);
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+            SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
+                    messages,
+                    actors.actor("routed-friend-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    friendReader
+            );
+            SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
+                    messages,
+                    actors.actor("routed-alliance-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    allianceReader
+            );
+            ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
+                    new SceneProfileAwarenessAgent(messages, actors.actor("routed-profile-awareness"), ProfileInterestControl.noop()),
+                    friendAwareness,
+                    new ScenePlayerDomainEventAgent(messages, actors.actor("routed-domain-awareness")),
+                    allianceAwareness
+            );
+            ChatMessagePolicy policy = request ->
+                    ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());
+            ChatChannelManager channels = new ChatChannelManager(
+                    actors,
+                    messages,
+                    interests,
+                    new AllianceAwareChatChannelAccessPolicy(allianceAwareness),
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    (target, operation) -> AdmissionDecision.accept()
+            );
+            DirectChatSessionManager directSessions = new DirectChatSessionManager(
+                    actors,
+                    messages,
+                    new FriendAwareDirectChatAccessPolicy(friendAwareness),
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    (target, operation) -> AdmissionDecision.accept()
+            );
+            allianceAwareness.attachMembershipChanges(new ChatAllianceMembershipProjector(channels));
+            return new RelationFixture(
+                    executor,
+                    friendAwareness,
+                    allianceAwareness,
+                    channels,
+                    new RoutedChatService(channels, directSessions, new ChatRouteConfig(4))
             );
         }
     }

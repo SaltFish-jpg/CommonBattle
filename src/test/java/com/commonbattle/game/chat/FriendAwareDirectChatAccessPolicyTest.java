@@ -31,7 +31,8 @@ class FriendAwareDirectChatAccessPolicyTest {
         Fixture fixture = Fixture.create();
         fixture.friendAwareness.enter(10001L);
         fixture.executor.runAll();
-        fixture.friendAwareness.handleSnapshot(new FriendSnapshot(10001L, 1, Set.of(10002L)));
+        fixture.friendAwareness.refresh(new FriendSnapshot(10001L, 1, Set.of(10002L)));
+        fixture.executor.runAll();
         AtomicReference<ChatSendResult> sent = new AtomicReference<>();
 
         fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "private", 0), sent::set);
@@ -59,7 +60,8 @@ class FriendAwareDirectChatAccessPolicyTest {
         Fixture fixture = Fixture.create();
         fixture.friendAwareness.enter(10001L);
         fixture.executor.runAll();
-        fixture.friendAwareness.handleSnapshot(new FriendSnapshot(10001L, 1, Set.of(20002L)));
+        fixture.friendAwareness.refresh(new FriendSnapshot(10001L, 1, Set.of(20002L)));
+        fixture.executor.runAll();
         AtomicReference<ChatSendResult> sent = new AtomicReference<>();
 
         fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "private", 0), sent::set);
@@ -74,18 +76,20 @@ class FriendAwareDirectChatAccessPolicyTest {
         Fixture fixture = Fixture.create();
         fixture.friendAwareness.enter(10001L);
         fixture.executor.runAll();
-        fixture.friendAwareness.handleFriendChanged(new FriendChangedEvent(
+        fixture.friendAwareness.onFriendChanged(new FriendChangedEvent(
                 10001L,
                 10002L,
                 FriendRelationAction.ADD,
                 2
         ));
+        fixture.executor.runAll();
         AtomicReference<ChatSendResult> stale = new AtomicReference<>();
         AtomicReference<ChatSendResult> repaired = new AtomicReference<>();
 
         fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "private", 0), stale::set);
         fixture.executor.runAll();
-        fixture.friendAwareness.handleSnapshot(new FriendSnapshot(10001L, 2, Set.of(10002L)));
+        fixture.friendAwareness.refresh(new FriendSnapshot(10001L, 2, Set.of(10002L)));
+        fixture.executor.runAll();
         fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "after repair", 0), repaired::set);
         fixture.executor.runAll();
 
@@ -119,6 +123,98 @@ class FriendAwareDirectChatAccessPolicyTest {
                 policy.inspect(new DirectChatSendRequest(10001L, 10002L, "private", 0)));
     }
 
+    @Test
+    void friendEventStrictPolicyRefreshesSnapshotBeforeReturningDecision() {
+        Fixture fixture = Fixture.create(playerId -> java.util.Optional.of(
+                new FriendSnapshot(playerId, 3, Set.of(10002L, 30003L))
+        ));
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        FriendAwareDirectChatAccessPolicy policy = new FriendAwareDirectChatAccessPolicy(fixture.friendAwareness);
+        AtomicReference<ChatSendStatus> status = new AtomicReference<>();
+
+        policy.inspectAfterFriendChanged(
+                new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                new DirectChatSendRequest(10001L, 10002L, "private", 0),
+                status::set
+        );
+
+        assertEquals(null, status.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.SENT, status.get());
+        assertEquals(new com.commonbattle.game.scene.SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0,
+                1, 0, 1, 0, 0), fixture.friendAwareness.projectionStats());
+    }
+
+    @Test
+    void friendEventStrictPolicyRejectsWhenRemoteSnapshotIsNotFreshEnough() {
+        Fixture fixture = Fixture.create(playerId -> java.util.Optional.of(
+                new FriendSnapshot(playerId, 2, Set.of(10002L))
+        ));
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        FriendAwareDirectChatAccessPolicy policy = new FriendAwareDirectChatAccessPolicy(fixture.friendAwareness);
+        AtomicReference<ChatSendStatus> status = new AtomicReference<>();
+
+        policy.inspectAfterFriendChanged(
+                new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                new DirectChatSendRequest(10001L, 10002L, "private", 0),
+                status::set
+        );
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.STALE_FRIENDS, status.get());
+        assertEquals(1, fixture.friendAwareness.projectionStats().freshReadRemoteStale());
+    }
+
+    @Test
+    void directManagerSendsAfterFriendEventFreshReadInsideSessionActor() {
+        Fixture fixture = Fixture.create(playerId -> java.util.Optional.of(
+                new FriendSnapshot(playerId, 3, Set.of(10002L, 30003L))
+        ));
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.directSessions.sendAfterFriendChanged(
+                new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                new DirectChatSendRequest(10001L, 10002L, "private", 0),
+                sent::set
+        );
+
+        assertEquals(null, sent.get());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.SENT, sent.get().status());
+        assertEquals(List.of("private"),
+                fixture.directSessions.session(10001L, 10002L).snapshotNow().history().stream()
+                        .map(ChatDelivery::text)
+                        .toList());
+    }
+
+    @Test
+    void directManagerRejectsAfterFriendEventWhenFreshReadIsStale() {
+        Fixture fixture = Fixture.create(playerId -> java.util.Optional.of(
+                new FriendSnapshot(playerId, 2, Set.of(10002L))
+        ));
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.directSessions.sendAfterFriendChanged(
+                new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                new DirectChatSendRequest(10001L, 10002L, "private", 0),
+                sent::set
+        );
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.STALE_FRIENDS, sent.get().status());
+        assertEquals(List.of(), fixture.directSessions.session(10001L, 10002L).snapshotNow().history());
+    }
+
     private record Fixture(
             RecordingExecutor executor,
             ActorSystem actors,
@@ -126,12 +222,18 @@ class FriendAwareDirectChatAccessPolicyTest {
             DirectChatSessionManager directSessions
     ) {
         private static Fixture create() {
+            return create(playerId -> java.util.Optional.empty());
+        }
+
+        private static Fixture create(com.commonbattle.game.social.FriendSnapshotReader snapshotReader) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
             SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
                     messages,
-                    actors.actor("chat-friend-awareness")
+                    actors.actor("chat-friend-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    snapshotReader
             );
             ChatMessagePolicy messagePolicy = request ->
                     ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());

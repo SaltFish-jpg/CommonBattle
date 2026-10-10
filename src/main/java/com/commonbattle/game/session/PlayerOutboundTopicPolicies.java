@@ -13,6 +13,7 @@ public final class PlayerOutboundTopicPolicies {
     public static final String BAG_SNAPSHOT = "bag.snapshot";
     public static final String ACTIVITY_PROGRESS = "activity.progress";
     public static final String SCENE_SNAPSHOT = "scene.snapshot";
+    public static final String SCENE_BROADCAST = "scene.broadcast";
     public static final String COMBAT_FLOAT_TEXT = "combat.float";
     public static final String SHOP_SNAPSHOT = "shop.snapshot";
     public static final String GROWTH_SNAPSHOT = "growth.snapshot";
@@ -36,6 +37,7 @@ public final class PlayerOutboundTopicPolicies {
                 .register(BAG_SNAPSHOT, PlayerOutboundTopicPolicy.coalescing("bag"))
                 .register(ACTIVITY_PROGRESS, PlayerOutboundTopicPolicy.coalescing("activity"))
                 .register(SCENE_SNAPSHOT, PlayerOutboundTopicPolicy.coalescing("scene"))
+                .register(SCENE_BROADCAST, PlayerOutboundTopicPolicy.bestEffort())
                 .register(COMBAT_FLOAT_TEXT, PlayerOutboundTopicPolicy.bestEffort())
                 .register(SHOP_SNAPSHOT, PlayerOutboundTopicPolicy.coalescing("shop"))
                 .register(GROWTH_SNAPSHOT, PlayerOutboundTopicPolicy.coalescing("growth"))

@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /**
  * owner 修复运维操作审计记录。
- * 记录人工释放隔离 owner 的动作、目标、释放数量和来源，方便事后排障。
+ * 记录人工释放隔离 owner、人工请求重放等动作的目标和来源，方便事后排障。
  */
 public record OwnerRepairOpsAuditRecord(
         String action,

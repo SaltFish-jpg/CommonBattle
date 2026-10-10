@@ -106,6 +106,40 @@ class PlayerGameAgentManagerTest {
     }
 
     @Test
+    void restoresCommandWatermarkWhenLoadingPersistedPlayerSnapshot() {
+        Fixture fixture = Fixture.create();
+        PlayerCommandSequencer sourceSequencer = new PlayerCommandSequencer();
+        sourceSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
+        PlayerStateSnapshot seed = new PlayerProfile(10001L, SERVER_OPEN_TIME)
+                .snapshot(7, 5, CLOCK.instant())
+                .withCommandSequencer(sourceSequencer.snapshotForPlayer(10001L));
+        fixture.repository.save(10001L, seed);
+
+        fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+
+        assertEquals(PlayerCommandStatus.DUPLICATE, fixture.commandSequencer.inspect(command(2)));
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.commandSequencer.inspect(command(3)));
+        assertEquals(PlayerCommandStatus.GAP, fixture.commandSequencer.inspect(command(4)));
+    }
+
+    @Test
+    void savePersistsCurrentCommandWatermarkFromSharedSequencer() {
+        Fixture fixture = Fixture.create();
+        fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        fixture.commandSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
+        AtomicReference<PlayerStateSnapshot> saved = new AtomicReference<>();
+
+        assertTrue(fixture.manager.save(10001L, saved::set));
+        fixture.executor.runAll();
+
+        assertEquals(1, saved.get().commandSequencer().watermarks().size());
+        assertEquals(2, saved.get().commandSequencer().watermarks().getFirst().lastSequence());
+        assertEquals(saved.get(), fixture.repository.load(10001L).orElseThrow());
+    }
+
+    @Test
     void recoveredEventRevisionContinuesWhenDomainEventIsPublished() {
         RecordingEventPublisher published = new RecordingEventPublisher();
         Fixture fixture = Fixture.create(new ReliableVersionedEventPublisher(
@@ -269,6 +303,50 @@ class PlayerGameAgentManagerTest {
         assertTrue(fixture.directory.locate(AgentIdentity.player(10001L)).isEmpty());
         assertEquals(AgentLifecycleState.PASSIVATED,
                 fixture.lifecycles.record(AgentIdentity.player(10001L)).orElseThrow().state());
+    }
+
+    @Test
+    void passivateAndSaveRestoresActiveLifecycleWhenAsyncCommandIsPending() {
+        RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+        Fixture fixture = Fixture.create(null, limitedStockConfig(), stocks, new InMemoryPlayerCommandAuditLog());
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        long epoch = sessions.bind(10001L, "session-1").epoch();
+        InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
+        PlayerCommandDispatcher dispatcher = dispatcher(fixture, sessions, audit, new RecordingResultSink());
+        AtomicReference<RuntimeException> failure = new AtomicReference<>();
+
+        PlayerCommandResult accepted = dispatcher.dispatch(new PlayerCommand(
+                10001L,
+                "session-1",
+                epoch,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+        ));
+        fixture.executor.runAll();
+        assertTrue(fixture.manager.passivateAndSave(10001L, new PlayerStateSaveCallback() {
+            @Override
+            public void saved(PlayerStateSnapshot snapshot) {
+                throw new AssertionError("pending async command must not be passivated");
+            }
+
+            @Override
+            public void failed(long playerId, RuntimeException error) {
+                failure.set(error);
+            }
+        }));
+        fixture.executor.runAll();
+
+        assertEquals(PlayerCommandStatus.ACCEPTED, accepted.status());
+        assertInstanceOf(PendingAsyncPlayerCommandException.class, failure.get());
+        assertTrue(fixture.manager.get(10001L).isPresent());
+        assertTrue(fixture.directory.locate(AgentIdentity.player(10001L)).isPresent());
+        assertEquals(AgentLifecycleState.ACTIVE,
+                fixture.lifecycles.record(AgentIdentity.player(10001L)).orElseThrow().state());
+        assertTrue(fixture.repository.load(10001L).isEmpty());
     }
 
     @Test
@@ -558,6 +636,7 @@ class PlayerGameAgentManagerTest {
             InMemoryPlayerStateRepository repository,
             InMemoryAgentDirectory directory,
             AgentLifecycleManager lifecycles,
+            PlayerCommandSequencer commandSequencer,
             PlayerGameAgentManager manager
     ) {
         private static Fixture create() {
@@ -587,6 +666,7 @@ class PlayerGameAgentManagerTest {
             );
             InMemoryGameConfigRegistry configs = new InMemoryGameConfigRegistry(new GameConfigValidator(), CLOCK);
             assertEquals(GameConfigPublishStatus.PUBLISHED, configs.publish(configPackage).status());
+            PlayerCommandSequencer commandSequencer = new PlayerCommandSequencer();
             PlayerGameAgentManager manager = new PlayerGameAgentManager(
                     actors,
                     messages,
@@ -600,9 +680,14 @@ class PlayerGameAgentManagerTest {
                     PlayerStateSaveListener.ignore(),
                     shopStockAsyncClient,
                     PlayerPushPort.NOOP,
-                    audit
+                    audit,
+                    commandSequencer,
+                    null,
+                    false,
+                    Duration.ZERO,
+                    Duration.ofMinutes(5)
             );
-            return new Fixture(executor, actors, messages, repository, directory, lifecycles, manager);
+            return new Fixture(executor, actors, messages, repository, directory, lifecycles, commandSequencer, manager);
         }
     }
 
@@ -636,7 +721,7 @@ class PlayerGameAgentManagerTest {
     ) {
         PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                 sessions,
-                new PlayerCommandSequencer(),
+                fixture.commandSequencer,
                 new AdmissionControlledAgentRouter(
                         (target, operation) -> AdmissionDecision.accept(),
                         new LifecycleAwareAgentRouter(fixture.lifecycles, fixture.messages)
@@ -650,6 +735,17 @@ class PlayerGameAgentManagerTest {
                 new PlayerBusinessCommandHandler(fixture.manager::getOrCreate, results)
         );
         return dispatcher;
+    }
+
+    private static PlayerCommand command(long sequence) {
+        return new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                sequence,
+                PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                new ActivityProgressCommand("kill-3", 1)
+        );
     }
 
     private static final class RecordingEventPublisher implements EventPublisher {

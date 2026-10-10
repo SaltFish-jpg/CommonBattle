@@ -60,6 +60,26 @@ class ActorSystemTest {
     }
 
     @Test
+    void currentActorContextIsScopedToMailboxTask() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 64);
+        ActorRef player = system.actor("player-1");
+        List<String> observed = new ArrayList<>();
+
+        assertTrue(ActorContext.current().isEmpty());
+        system.send(player, context -> {
+            observed.add(ActorContext.requireCurrent().self().id());
+            observed.add(ActorContext.requireCurrent(player).self().id());
+        });
+        assertTrue(ActorContext.current().isEmpty());
+
+        executor.runNext();
+
+        assertEquals(List.of("player-1", "player-1"), observed);
+        assertTrue(ActorContext.current().isEmpty());
+    }
+
+    @Test
     void mailboxIsNotScheduledTwiceWhileRunning() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem system = new ActorSystem(executor, 64);
@@ -96,6 +116,34 @@ class ActorSystemTest {
         executor.runNext();
         assertEquals(5, runs.get());
         assertEquals(0, executor.queued());
+    }
+
+    @Test
+    void busyMailboxYieldsToOtherActorAfterBatchLimit() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem system = new ActorSystem(executor, 2);
+        ActorRef hotPlayer = system.actor("player-10001");
+        ActorRef normalPlayer = system.actor("player-10002");
+        List<String> order = new ArrayList<>();
+
+        for (int i = 1; i <= 5; i++) {
+            int sequence = i;
+            system.send(hotPlayer, ignored -> order.add("hot-" + sequence));
+        }
+        system.send(normalPlayer, ignored -> order.add("normal-1"));
+
+        executor.runNext();
+        assertEquals(List.of("hot-1", "hot-2"), order);
+        assertEquals(2, executor.queued());
+
+        executor.runNext();
+        assertEquals(List.of("hot-1", "hot-2", "normal-1"), order);
+
+        executor.runNext();
+        assertEquals(List.of("hot-1", "hot-2", "normal-1", "hot-3", "hot-4"), order);
+
+        executor.runNext();
+        assertEquals(List.of("hot-1", "hot-2", "normal-1", "hot-3", "hot-4", "hot-5"), order);
     }
 
     @Test

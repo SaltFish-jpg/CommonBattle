@@ -98,6 +98,61 @@ class DefaultAgentMessagePortTest {
     }
 
     @Test
+    void remoteCallMapsThrownGatewayFailureToDeliveryResult() {
+        RuntimeException failure = new RuntimeException("route down");
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(
+                new ActorSystem(new RecordingExecutor(), 64),
+                new ThrowingRpcGateway(failure),
+                new ManualAskTimeoutScheduler(),
+                error -> AgentDeliveryResult.remoteUnavailable("mapped")
+        );
+        AtomicReference<AgentDeliveryResult> delivery = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+
+        port.callRemote(new RpcRequest<>("SCENE", "scene.enter", "payload", String.class), new RemoteAgentCallback<>() {
+            @Override
+            public void success(String response) {
+                throw new AssertionError("call must fail");
+            }
+
+            @Override
+            public void failure(AgentDeliveryResult result, Throwable cause) {
+                delivery.set(result);
+                error.set(cause);
+            }
+        });
+
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, delivery.get().status());
+        assertEquals("mapped", delivery.get().reason());
+        assertEquals(failure, error.get());
+    }
+
+    @Test
+    void rawRemoteCallReportsThrownGatewayFailureToCallback() {
+        RuntimeException failure = new RuntimeException("route down");
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(
+                new ActorSystem(new RecordingExecutor(), 64),
+                new ThrowingRpcGateway(failure),
+                new ManualAskTimeoutScheduler()
+        );
+        AtomicReference<Throwable> error = new AtomicReference<>();
+
+        port.callRemote(new RpcRequest<>("SCENE", "scene.enter", "payload", String.class), new RpcCallback<>() {
+            @Override
+            public void success(String response) {
+                throw new AssertionError("call must fail");
+            }
+
+            @Override
+            public void failure(Throwable cause) {
+                error.set(cause);
+            }
+        });
+
+        assertEquals(failure, error.get());
+    }
+
+    @Test
     void askLocalReadsTargetStateAndReturnsOnRequesterMailbox() {
         RecordingExecutor executor = new RecordingExecutor();
         ManualAskTimeoutScheduler timeouts = new ManualAskTimeoutScheduler();
@@ -271,6 +326,13 @@ class DefaultAgentMessagePortTest {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
             callback.failure(failure);
+        }
+    }
+
+    private record ThrowingRpcGateway(RuntimeException failure) implements RpcGateway {
+        @Override
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            throw failure;
         }
     }
 

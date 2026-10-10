@@ -25,6 +25,8 @@ import com.commonbattle.game.growth.GrowthRecoveryResult;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
 import com.commonbattle.game.growth.GrowthSnapshot;
+import com.commonbattle.game.player.event.EventProgressRule;
+import com.commonbattle.game.player.event.ShopItemPurchasedEvent;
 import com.commonbattle.game.shop.InMemoryShopOrderRepository;
 import com.commonbattle.game.shop.PlayerShopState;
 import com.commonbattle.game.shop.ShopCatalog;
@@ -50,6 +52,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerGameAgentTest {
@@ -95,6 +98,20 @@ class PlayerGameAgentTest {
         assertEquals(1, activities.progress.get("daily-login").value);
         assertEquals(100, bag.itemCounts.get("gold"));
         assertEquals(2, bag.itemCounts.get("exp_potion"));
+    }
+
+    @Test
+    void migrationExportSnapshotRequiresPlayerMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        PlayerGameAgent agent = createAgent(executor);
+        AtomicReference<PlayerStateSnapshot> snapshot = new AtomicReference<>();
+
+        assertThrows(IllegalStateException.class, agent::exportForMigrationInCurrentMailbox);
+
+        agent.exportForMigration(snapshot::set);
+        executor.runNext();
+
+        assertEquals(10001L, snapshot.get().playerId());
     }
 
     @Test
@@ -257,6 +274,40 @@ class PlayerGameAgentTest {
     }
 
     @Test
+    void shopPurchaseEventProgressesActivityAndClaimAddsRewardThroughSameMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createShopActivityAgent(executor, pushes);
+        AtomicReference<ShopPurchaseResult> purchase = new AtomicReference<>();
+        AtomicReference<com.commonbattle.game.activity.ActivityClaimResult> activity = new AtomicReference<>();
+        agent.onLogin("daily-login", ignored -> {
+        });
+        executor.runNext();
+        pushes.messages.clear();
+
+        agent.buyShopItem("order-10001-shop-activity", "growth_pack", 1, purchase::set);
+
+        assertEquals(0, agent.profile().activities().progress("buy-growth-pack").value());
+        assertEquals(100, agent.profile().bag().count("gold"));
+        executor.runNext();
+
+        assertEquals(ShopPurchaseStatus.SUCCESS, purchase.get().status());
+        assertEquals(1, agent.profile().activities().progress("buy-growth-pack").value());
+        assertEquals(50, agent.profile().bag().count("gold"));
+        assertEquals(1, agent.profile().bag().count("exp_potion"));
+        assertEquals(PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS, pushes.messages.get(0).topic());
+        assertEquals(PlayerOutboundTopicPolicies.SHOP_SNAPSHOT, pushes.messages.get(1).topic());
+        assertEquals(PlayerOutboundTopicPolicies.BAG_SNAPSHOT, pushes.messages.get(2).topic());
+
+        agent.claimActivity("buy-growth-pack", activity::set);
+        executor.runNext();
+
+        assertEquals(1, activity.get().progress());
+        assertEquals(4, agent.profile().bag().count("gem"));
+        assertEquals(true, agent.profile().activities().progress("buy-growth-pack").claimed());
+    }
+
+    @Test
     void duplicateShopOrderReplaysInsidePlayerMailboxWithoutDoubleMutation() {
         RecordingExecutor executor = new RecordingExecutor();
         PlayerGameAgent agent = createShopAgent(executor);
@@ -356,6 +407,64 @@ class PlayerGameAgentTest {
         assertEquals(60, agent.profile().bag().count("gold"));
         assertEquals(5, agent.profile().bag().count("gem"));
         assertEquals(2, agent.profile().activities().progress("battle-win-1").value());
+    }
+
+    @Test
+    void coreBusinessCommandsShareOnePlayerMailboxAndRunInSubmissionOrder() {
+        RecordingExecutor executor = new RecordingExecutor();
+        PlayerGameAgent agent = createCoreBusinessAgent(executor);
+        AtomicReference<com.commonbattle.game.activity.ActivityClaimResult> login = new AtomicReference<>();
+        AtomicReference<BattleSettlementResult> battle = new AtomicReference<>();
+        AtomicReference<ShopPurchaseResult> shop = new AtomicReference<>();
+        AtomicReference<GrowthResult> growth = new AtomicReference<>();
+        AtomicReference<com.commonbattle.game.activity.ActivityClaimResult> activity = new AtomicReference<>();
+        List<String> callbacks = new ArrayList<>();
+
+        agent.onLogin("daily-login", result -> {
+            login.set(result);
+            callbacks.add("login");
+        });
+        agent.clearBattleStage("settle-10001-1", "forest-1", result -> {
+            battle.set(result);
+            callbacks.add("battle");
+        });
+        agent.buyShopItem("order-10001-1", "growth_pack", 1, result -> {
+            shop.set(result);
+            callbacks.add("shop");
+        });
+        agent.useExpItems(3, result -> {
+            growth.set(result);
+            callbacks.add("growth");
+        });
+        agent.claimActivity("battle-win-1", result -> {
+            activity.set(result);
+            callbacks.add("activity");
+        });
+
+        assertEquals(1, executor.queued());
+        assertNull(login.get());
+        assertNull(battle.get());
+        assertNull(shop.get());
+        assertNull(growth.get());
+        assertNull(activity.get());
+        assertEquals(0, agent.profile().bag().count("gold"));
+        assertEquals(0, agent.profile().bag().count("exp_potion"));
+        assertEquals(0, agent.profile().bag().count("gem"));
+
+        executor.runNext();
+
+        assertEquals(List.of("login", "battle", "shop", "growth", "activity"), callbacks);
+        assertEquals(BattleSettlementStatus.VICTORY, battle.get().status());
+        assertEquals(ShopPurchaseStatus.SUCCESS, shop.get().status());
+        assertEquals(2, growth.get().afterLevel());
+        assertEquals(1, activity.get().bagResult().changes().size());
+        assertEquals(115, agent.profile().growth().stamina());
+        assertEquals(80, agent.profile().bag().count("gold"));
+        assertEquals(0, agent.profile().bag().count("exp_potion"));
+        assertEquals(7, agent.profile().bag().count("gem"));
+        assertEquals(1, agent.profile().shop().lifetimePurchased("growth_pack"));
+        assertEquals(1, agent.profile().activities().progress("battle-win-1").value());
+        assertEquals(0, executor.queued());
     }
 
     private static PlayerGameAgent createAgent(Executor executor) {
@@ -469,6 +578,62 @@ class PlayerGameAgentTest {
         );
     }
 
+    private static PlayerGameAgent createShopActivityAgent(Executor executor, PlayerPushPort pushes) {
+        ActorSystem actors = new ActorSystem(executor, 64);
+        ActorRef self = actors.actor("player-10001");
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gold", "currency", 999999));
+        items.register(new ItemDefinition("exp_potion", "growth", 999));
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        BagService bagService = new BagService(items);
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "daily-login",
+                ActivityType.LOGIN,
+                1,
+                Reward.of(new ItemStack("gold", 100))
+        ));
+        activities.register(new ActivityDefinition(
+                "buy-growth-pack",
+                ActivityType.COUNTER,
+                1,
+                Reward.of(new ItemStack("gem", 4)),
+                com.commonbattle.game.activity.ActivitySchedule.alwaysOpen(),
+                com.commonbattle.game.activity.ParticipationCondition.always(),
+                EventProgressRule.of(ShopItemPurchasedEvent.TYPE, "growth_pack")
+        ));
+        ActivityService activityService = new ActivityService(activities, bagService);
+        GrowthService growthService = new GrowthService(bagService, "exp_potion", 60, 100);
+        ShopCatalog shops = new ShopCatalog();
+        shops.register(new ShopItemDefinition(
+                "growth_pack",
+                new ItemStack("gold", 50),
+                Reward.of(new ItemStack("exp_potion", 1)),
+                2,
+                1,
+                ShopItemDefinition.UNLIMITED_STOCK
+        ));
+        ShopService shopService = new ShopService(
+                shops,
+                bagService,
+                com.commonbattle.game.shop.ShopStockRepository.unlimited(),
+                new InMemoryShopOrderRepository(),
+                CLOCK,
+                ZoneOffset.UTC
+        );
+        return new PlayerGameAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                self,
+                new PlayerProfile(10001L),
+                activityService,
+                growthService,
+                shopService,
+                CLOCK,
+                Instant.parse("2026-08-01T00:00:00Z"),
+                pushes
+        );
+    }
+
     private static PlayerGameAgent createBattleAgent(Executor executor) {
         ActorSystem actors = new ActorSystem(executor, 64);
         ActorRef self = actors.actor("player-10001");
@@ -487,6 +652,75 @@ class PlayerGameAgentTest {
         ActivityService activityService = new ActivityService(activities, bagService);
         GrowthService growthService = new GrowthService(bagService, "exp_potion", 60, 100);
         ShopService shopService = new ShopService(new ShopCatalog(), bagService, CLOCK, ZoneOffset.UTC);
+        BattleStageCatalog battles = new BattleStageCatalog();
+        battles.register(new BattleStageDefinition(
+                "forest-1",
+                100,
+                40,
+                70,
+                8,
+                5,
+                Reward.of(new ItemStack("gold", 30)),
+                "battle-win-1",
+                1,
+                Reward.of(new ItemStack("gem", 5)),
+                3,
+                5
+        ));
+        BattleService battleService = new BattleService(battles, bagService, activityService);
+        return new PlayerGameAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                self,
+                new PlayerProfile(10001L),
+                activityService,
+                growthService,
+                shopService,
+                battleService,
+                CLOCK,
+                Instant.parse("2026-08-01T00:00:00Z")
+        );
+    }
+
+    private static PlayerGameAgent createCoreBusinessAgent(Executor executor) {
+        ActorSystem actors = new ActorSystem(executor, 64);
+        ActorRef self = actors.actor("player-10001");
+        ItemCatalog items = new ItemCatalog();
+        items.register(new ItemDefinition("gold", "currency", 999999));
+        items.register(new ItemDefinition("exp_potion", "growth", 999));
+        items.register(new ItemDefinition("gem", "currency", 999999));
+        BagService bagService = new BagService(items);
+        ActivityCatalog activities = new ActivityCatalog();
+        activities.register(new ActivityDefinition(
+                "daily-login",
+                ActivityType.LOGIN,
+                1,
+                Reward.of(new ItemStack("gold", 100), new ItemStack("exp_potion", 2))
+        ));
+        activities.register(new ActivityDefinition(
+                "battle-win-1",
+                ActivityType.COUNTER,
+                1,
+                Reward.of(new ItemStack("gem", 2))
+        ));
+        ActivityService activityService = new ActivityService(activities, bagService);
+        GrowthService growthService = new GrowthService(bagService, "exp_potion", 60, 100);
+        ShopCatalog shops = new ShopCatalog();
+        shops.register(new ShopItemDefinition(
+                "growth_pack",
+                new ItemStack("gold", 50),
+                Reward.of(new ItemStack("exp_potion", 1)),
+                2,
+                1,
+                ShopItemDefinition.UNLIMITED_STOCK
+        ));
+        ShopService shopService = new ShopService(
+                shops,
+                bagService,
+                com.commonbattle.game.shop.ShopStockRepository.unlimited(),
+                new InMemoryShopOrderRepository(),
+                CLOCK,
+                ZoneOffset.UTC
+        );
         BattleStageCatalog battles = new BattleStageCatalog();
         battles.register(new BattleStageDefinition(
                 "forest-1",

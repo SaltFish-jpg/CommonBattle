@@ -8,6 +8,7 @@ import com.commonbattle.cluster.registry.RegistryPayloadCodecs;
 import com.commonbattle.example.cross.CrossPayloadCodecs;
 import com.commonbattle.game.chat.ChatPayloadCodecs;
 import com.commonbattle.game.player.PlayerBusinessCommandPayloadCodecs;
+import com.commonbattle.game.player.PlayerBusinessCommandProtocolValidator;
 import com.commonbattle.game.player.PlayerPushPayloadCodecs;
 import com.commonbattle.game.session.PlayerClientPayloadCodecs;
 import com.commonbattle.game.shop.ShopStockPayloadCodecs;
@@ -32,12 +33,14 @@ public final class BootPayloadCodecs {
     }
 
     private static PayloadCodecRegistry registerCommon(PayloadCodecRegistry registry) {
-        return ClusterEventPayloadCodecs.registerTo(
+        PayloadCodecRegistry registered = ClusterEventPayloadCodecs.registerTo(
                 PlayerPushPayloadCodecs.registerTo(ChatPayloadCodecs.registerTo(ShopStockPayloadCodecs.registerTo(
                         PlayerBusinessCommandPayloadCodecs.registerTo(AgentMigrationPayloadCodecs.registerTo(
                                 AgentDirectoryPayloadCodecs.registerTo(RegistryPayloadCodecs.registerTo(registry))
                         ))
                 )))
         );
+        PlayerBusinessCommandProtocolValidator.validate(registered);
+        return registered;
     }
 }

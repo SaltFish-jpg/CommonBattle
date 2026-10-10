@@ -39,6 +39,8 @@ import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayStats;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
 import com.commonbattle.game.player.NettyPlayerGatewayStats;
 import com.commonbattle.game.player.PlayerGatewayView;
@@ -115,6 +117,8 @@ class RuntimeHealthRegistryTest {
                 ZoneOffset.UTC
         );
         PlayerBusinessResponseHub businessResponses = new PlayerBusinessResponseHub();
+        PlayerBusinessCommandGatewayView businessCommandGateway =
+                () -> new PlayerBusinessCommandGatewayStats(1, 1, 0, 0, 0);
         PlayerOutboundDeliveryHub outboundDeliveries = new PlayerOutboundDeliveryHub(
                 new InMemoryPlayerSessionRegistry(CLOCK),
                 CLOCK,
@@ -133,8 +137,8 @@ class RuntimeHealthRegistryTest {
         );
 
         registry.register(List.of(cache, configRecovery, actorRpc, lifecycles, migrations, migrationExecutor,
-                migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, asyncShopPurchases,
-                outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery,
+                migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, businessCommandGateway,
+                asyncShopPurchases, outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery,
                 registrySubscriptions, actorSchedule));
         registry.register(cache);
 
@@ -150,6 +154,7 @@ class RuntimeHealthRegistryTest {
             assertEquals(1, registry.profileRuntimes().size());
             assertEquals(1, registry.sceneRuntimes().size());
             assertEquals(1, registry.shopRuntimes().size());
+            assertEquals(1, registry.playerBusinessCommandGateways().size());
             assertEquals(1, registry.playerBusinessResponses().size());
             assertEquals(1, registry.playerOutboundDeliveries().size());
             assertEquals(1, registry.playerGateways().size());

@@ -1,6 +1,7 @@
 package com.commonbattle.game.event;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
@@ -53,11 +54,15 @@ class OwnerActorEventSubscriptionTest {
         try (Fixture fixture = Fixture.create(ClusterEventCenter.DEFAULT_HISTORY_LIMIT)) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
+            ActorRef target = actors.actor("scene-domain-events");
             List<Long> handledPlayers = new ArrayList<>();
             ActorMailboxEventSubscriber mailboxSubscriber = new ActorMailboxEventSubscriber(
                     new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
-                    actors.actor("scene-domain-events"),
-                    (context, event) -> handledPlayers.add(((PlayerDomainVersionedEvent) event).playerId())
+                    target,
+                    (context, event) -> {
+                        assertEquals(target, ActorContext.requireCurrent(target).self());
+                        handledPlayers.add(((PlayerDomainVersionedEvent) event).playerId());
+                    }
             );
             AtomicLong revision = new AtomicLong();
             try (OwnerActorEventSubscription subscription = new OwnerActorEventSubscription(

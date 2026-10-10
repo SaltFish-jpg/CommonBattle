@@ -133,23 +133,34 @@ public final class DefaultAgentMessagePort implements AgentMessagePort, AutoClos
 
     @Override
     public <T> void callRemote(RpcRequest<T> request, RpcCallback<T> callback) {
-        rpc.call(request, callback);
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        try {
+            rpc.call(request, callback);
+        } catch (RuntimeException e) {
+            callback.failure(e);
+        }
     }
 
     @Override
     public <T> void callRemote(RpcRequest<T> request, RemoteAgentCallback<T> callback) {
+        Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
-        rpc.call(request, new RpcCallback<>() {
-            @Override
-            public void success(T response) {
-                callback.success(response);
-            }
+        try {
+            rpc.call(request, new RpcCallback<>() {
+                @Override
+                public void success(T response) {
+                    callback.success(response);
+                }
 
-            @Override
-            public void failure(Throwable error) {
-                callback.failure(remoteFailures.map(error), error);
-            }
-        });
+                @Override
+                public void failure(Throwable error) {
+                    callback.failure(remoteFailures.map(error), error);
+                }
+            });
+        } catch (RuntimeException e) {
+            callback.failure(remoteFailures.map(e), e);
+        }
     }
 
     @Override

@@ -10,12 +10,14 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
     private final AtomicLong startedPurchases = new AtomicLong();
     private final AtomicLong immediatePurchases = new AtomicLong();
     private final AtomicLong stockReservations = new AtomicLong();
+    private final AtomicLong currentPendingCommands = new AtomicLong();
     private final AtomicLong reservedCallbacks = new AtomicLong();
     private final AtomicLong outOfStockCallbacks = new AtomicLong();
     private final AtomicLong rpcFailures = new AtomicLong();
     private final AtomicLong lateCallbacks = new AtomicLong();
     private final AtomicLong completedPurchases = new AtomicLong();
     private final AtomicLong rejectedPurchases = new AtomicLong();
+    private final AtomicLong abandonedPendingCommands = new AtomicLong();
     private final AtomicLong releasedReservations = new AtomicLong();
     private final AtomicLong releaseFailures = new AtomicLong();
 
@@ -29,6 +31,14 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
 
     void stockReservation() {
         stockReservations.incrementAndGet();
+    }
+
+    void pendingCommandStarted() {
+        currentPendingCommands.incrementAndGet();
+    }
+
+    void pendingCommandFinished() {
+        currentPendingCommands.updateAndGet(current -> Math.max(0, current - 1));
     }
 
     void reservedCallback() {
@@ -55,6 +65,10 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
         rejectedPurchases.incrementAndGet();
     }
 
+    void abandonedPendingCommand() {
+        abandonedPendingCommands.incrementAndGet();
+    }
+
     void releasedReservation() {
         releasedReservations.incrementAndGet();
     }
@@ -69,12 +83,14 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
                 startedPurchases.get(),
                 immediatePurchases.get(),
                 stockReservations.get(),
+                currentPendingCommands.get(),
                 reservedCallbacks.get(),
                 outOfStockCallbacks.get(),
                 rpcFailures.get(),
                 lateCallbacks.get(),
                 completedPurchases.get(),
                 rejectedPurchases.get(),
+                abandonedPendingCommands.get(),
                 releasedReservations.get(),
                 releaseFailures.get()
         );

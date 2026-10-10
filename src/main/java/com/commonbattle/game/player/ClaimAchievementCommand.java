@@ -27,6 +27,7 @@ public record ClaimAchievementCommand(String achievementId) implements PlayerBus
                 execution.profile().bag(),
                 achievementId
         );
+        execution.publishBagChanged(operation(), false, result.reward());
         execution.pushAchievementSnapshot();
         execution.pushBagSnapshot();
         return result;

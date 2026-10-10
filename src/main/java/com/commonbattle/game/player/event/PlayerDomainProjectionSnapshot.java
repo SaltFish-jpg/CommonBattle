@@ -13,10 +13,20 @@ import java.util.Objects;
 public record PlayerDomainProjectionSnapshot(
         long playerId,
         long eventRevision,
-        Map<String, Integer> stageClearCounts
+        Map<String, Integer> stageClearCounts,
+        Map<String, Integer> bagItemCounts
 ) {
+    public PlayerDomainProjectionSnapshot(
+            long playerId,
+            long eventRevision,
+            Map<String, Integer> stageClearCounts
+    ) {
+        this(playerId, eventRevision, stageClearCounts, Map.of());
+    }
+
     public PlayerDomainProjectionSnapshot {
         stageClearCounts = Map.copyOf(stageClearCounts);
+        bagItemCounts = Map.copyOf(bagItemCounts);
         if (playerId <= 0) {
             throw new IllegalArgumentException("playerId must be positive");
         }
@@ -32,6 +42,15 @@ public record PlayerDomainProjectionSnapshot(
                 throw new IllegalArgumentException("clearCount must not be negative");
             }
         });
+        bagItemCounts.forEach((itemId, count) -> {
+            Objects.requireNonNull(itemId, "itemId");
+            if (itemId.isBlank()) {
+                throw new IllegalArgumentException("itemId must not be blank");
+            }
+            if (count == null || count < 0) {
+                throw new IllegalArgumentException("item count must not be negative");
+            }
+        });
     }
 
     public static PlayerDomainProjectionSnapshot from(PlayerStateSnapshot state) {
@@ -39,7 +58,8 @@ public record PlayerDomainProjectionSnapshot(
         Map<String, Integer> clears = new LinkedHashMap<>();
         state.battle().stages().forEach((stageId, progress) ->
                 clears.put(stageId, progress.clearCount()));
-        return new PlayerDomainProjectionSnapshot(state.playerId(), state.eventRevision(), clears);
+        return new PlayerDomainProjectionSnapshot(state.playerId(), state.eventRevision(), clears,
+                state.bag().itemCounts());
     }
 
     public String ownerKey() {

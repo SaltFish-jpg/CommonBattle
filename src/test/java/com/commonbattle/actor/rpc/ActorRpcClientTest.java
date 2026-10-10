@@ -1,6 +1,7 @@
 package com.commonbattle.actor.rpc;
 
 import com.commonbattle.actor.ActorOverflowStrategy;
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorSystemConfig;
@@ -37,6 +38,33 @@ class ActorRpcClientTest {
         assertEquals(1, client.stats().succeededResponses());
         executor.runNext();
         assertEquals("player-1:ok", result.get());
+    }
+
+    @Test
+    void immediateRpcResponseDoesNotReenterCurrentMailboxTask() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 1);
+        ActorRef owner = actors.actor("player-1");
+        ActorRpcClient client = new ActorRpcClient(actors, owner, new ImmediateSuccessGateway());
+        List<String> order = new ArrayList<>();
+
+        actors.send(owner, context -> {
+            order.add("request:" + ActorContext.requireCurrent(owner).self().id());
+            client.call(new RpcRequest<>("scene", "scene.enter", "request", String.class),
+                    (callbackContext, response) -> order.add("callback:" + ActorContext.requireCurrent(owner).self().id()),
+                    (callbackContext, error) -> {
+                        throw new AssertionError(error);
+                    });
+            order.add("after-call");
+        });
+
+        executor.runNext();
+        assertEquals(List.of("request:player-1", "after-call"), order);
+        assertEquals(1, actors.stats().queuedTasksByCategory().get(ActorTaskCategory.RPC_CALLBACK));
+
+        executor.runNext();
+
+        assertEquals(List.of("request:player-1", "after-call", "callback:player-1"), order);
     }
 
     @Test

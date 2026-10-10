@@ -10,6 +10,8 @@ import com.commonbattle.game.activity.ActivityAccessContext;
 import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.achievement.AchievementClaimResult;
+import com.commonbattle.game.bag.BagChange;
+import com.commonbattle.game.bag.BagResult;
 import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.battle.BattleService;
 import com.commonbattle.game.config.GameConfigRegistry;
@@ -35,6 +37,7 @@ import com.commonbattle.game.session.PlayerCommand;
 import com.commonbattle.game.session.PlayerCommandAuditOutcome;
 import com.commonbattle.game.session.PlayerCommandAuditRecord;
 import com.commonbattle.game.session.PlayerCommandAuditSink;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.session.PlayerCommandStatus;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
 import com.commonbattle.game.task.TaskClaimResult;
@@ -42,6 +45,10 @@ import com.commonbattle.game.task.TaskClaimResult;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.LongFunction;
@@ -63,6 +70,8 @@ public final class PlayerGameAgent {
     private final AsyncShopPurchaseMetrics asyncShopPurchases;
     private final PlayerPushPort pushes;
     private final PlayerCommandAuditSink asyncCommandAuditSink;
+    private final LongFunction<PlayerCommandSequencerSnapshot> commandSequencerSnapshots;
+    private final Map<PendingAsyncCommand, PendingAsyncCommandState> pendingAsyncCommands = new HashMap<>();
     private long stateRevision;
     private long domainEventRevision;
 
@@ -312,6 +321,28 @@ public final class PlayerGameAgent {
             PlayerPushPort pushes,
             PlayerCommandAuditSink asyncCommandAuditSink
     ) {
+        this(messages, self, profile, configView, clock, serverOpenTime, domainEventPublisher,
+                initialStateRevision, initialEventRevision, domainEventListener, shopStockAsyncClient,
+                asyncShopPurchases, pushes, asyncCommandAuditSink, PlayerCommandSequencerSnapshot::empty);
+    }
+
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            GameConfigView configView,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink,
+            LongFunction<PlayerCommandSequencerSnapshot> commandSequencerSnapshots
+    ) {
         this(
                 messages,
                 self,
@@ -326,7 +357,8 @@ public final class PlayerGameAgent {
                 shopStockAsyncClient,
                 asyncShopPurchases,
                 pushes,
-                asyncCommandAuditSink
+                asyncCommandAuditSink,
+                commandSequencerSnapshots
         );
     }
 
@@ -428,6 +460,35 @@ public final class PlayerGameAgent {
         );
     }
 
+    public PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            ActivityService activityService,
+            GrowthService growthService,
+            ShopService shopService,
+            Clock clock,
+            Instant serverOpenTime,
+            PlayerPushPort pushes
+    ) {
+        this(
+                messages,
+                self,
+                profile,
+                fixedRuntimeResolver(activityService, growthService, shopService),
+                clock,
+                serverOpenTime,
+                null,
+                0,
+                0,
+                null,
+                null,
+                new AsyncShopPurchaseMetrics(),
+                pushes,
+                PlayerCommandAuditSink.NOOP
+        );
+    }
+
     private PlayerGameAgent(
             AgentMessagePort messages,
             ActorRef self,
@@ -444,6 +505,28 @@ public final class PlayerGameAgent {
             PlayerPushPort pushes,
             PlayerCommandAuditSink asyncCommandAuditSink
     ) {
+        this(messages, self, profile, runtimeResolver, clock, serverOpenTime, domainEventPublisher,
+                initialStateRevision, initialEventRevision, domainEventListener, shopStockAsyncClient,
+                asyncShopPurchases, pushes, asyncCommandAuditSink, PlayerCommandSequencerSnapshot::empty);
+    }
+
+    private PlayerGameAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            PlayerProfile profile,
+            LongFunction<PlayerGameRuntime> runtimeResolver,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            long initialStateRevision,
+            long initialEventRevision,
+            PlayerDomainEventListener domainEventListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            AsyncShopPurchaseMetrics asyncShopPurchases,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink,
+            LongFunction<PlayerCommandSequencerSnapshot> commandSequencerSnapshots
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.profile = Objects.requireNonNull(profile, "profile");
@@ -456,6 +539,7 @@ public final class PlayerGameAgent {
         this.asyncShopPurchases = Objects.requireNonNull(asyncShopPurchases, "asyncShopPurchases");
         this.pushes = Objects.requireNonNull(pushes, "pushes");
         this.asyncCommandAuditSink = Objects.requireNonNull(asyncCommandAuditSink, "asyncCommandAuditSink");
+        this.commandSequencerSnapshots = Objects.requireNonNull(commandSequencerSnapshots, "commandSequencerSnapshots");
         loadRevision(initialStateRevision);
         loadDomainEventRevision(initialEventRevision);
     }
@@ -470,6 +554,7 @@ public final class PlayerGameAgent {
             service.recordLogin(profile.activities(), execution.activityAccess(), activityId);
             ActivityClaimResult result = service.claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId);
             execution.pushActivitySnapshot();
+            execution.publishBagChanged("player.login", false, result.bagResult());
             execution.pushBagSnapshot();
             callback.accept(result);
         });
@@ -487,17 +572,29 @@ public final class PlayerGameAgent {
             ActivityClaimResult result = execution.runtime().activityService()
                     .claim(profile.activities(), profile.bag(), execution.activityAccess(), activityId);
             execution.pushActivitySnapshot();
+            execution.publishBagChanged(PlayerBusinessOperations.ACTIVITY_CLAIM, false, result.bagResult());
             execution.pushBagSnapshot();
             callback.accept(result);
         });
     }
 
+    public void consumeBagItem(String itemId, int count, Consumer<BagResult> callback) {
+        Objects.requireNonNull(callback, "callback");
+        execute(execution -> callback.accept(new ConsumeBagItemCommand(itemId, count).execute(execution)));
+    }
+
     public void useExpItems(int count, Consumer<GrowthResult> callback) {
         execute(execution -> {
-            GrowthResult result = execution.runtime().growthService().useExpItems(profile.bag(), profile.growth(), count);
+            GrowthService service = execution.runtime().growthService();
+            String expItemId = service.expItemId();
+            int beforeItemCount = profile.bag().count(expItemId);
+            GrowthResult result = service.useExpItems(profile.bag(), profile.growth(), count);
             if (result.afterLevel() > result.beforeLevel()) {
                 execution.publish(new GrowthLevelChangedEvent(profile.playerId(), result.beforeLevel(), result.afterLevel()));
             }
+            execution.publishBagChanged(PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS, false, new BagResult(List.of(
+                    new BagChange(expItemId, beforeItemCount, profile.bag().count(expItemId))
+            )));
             execution.pushGrowthSnapshot();
             execution.pushBagSnapshot();
             callback.accept(result);
@@ -527,6 +624,7 @@ public final class PlayerGameAgent {
                     .purchaseAt(profile.bag(), profile.shop(), orderId, sku, quantity, clock.instant());
             if (result.success()) {
                 execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+                execution.publishBagChanged(PlayerBusinessOperations.SHOP_BUY, result.replayed(), result.cost(), result.reward());
                 if (!result.replayed()) {
                     execution.pushShopSnapshot();
                     execution.pushBagSnapshot();
@@ -556,63 +654,57 @@ public final class PlayerGameAgent {
         }
         String reservationId = reservationId(command, orderId);
         asyncShopPurchases.stockReservation();
-        new ActorMailboxShopStockClient(requireShopStockAsyncClient(), messages, self).reserve(
-                reservationId,
-                sku,
-                quantity,
-                new ActorShopStockCallback<>() {
-                    @Override
-                    public void success(com.commonbattle.actor.ActorContext context, ShopStockReserveResponse response) {
-                        if (!results.canComplete(command)) {
-                            asyncShopPurchases.lateCallback();
-                            if (response.reserved()) {
+        PendingAsyncCommand pending = PendingAsyncCommand.from(command);
+        pendingAsyncCommands.put(pending, new PendingAsyncCommandState(command, results));
+        asyncShopPurchases.pendingCommandStarted();
+        try {
+            new ActorMailboxShopStockClient(requireShopStockAsyncClient(), messages, self).reserve(
+                    reservationId,
+                    sku,
+                    quantity,
+                    new ActorShopStockCallback<>() {
+                        @Override
+                        public void success(com.commonbattle.actor.ActorContext context, ShopStockReserveResponse response) {
+                            removePendingAsyncCommand(pending);
+                            if (!results.canComplete(command)) {
+                                asyncShopPurchases.lateCallback();
+                                if (response.reserved()) {
+                                    releaseReservedStock(reservationId, sku, quantity);
+                                }
+                                return;
+                            }
+                            PlayerGameExecution callbackExecution = execution();
+                            ShopService callbackService = callbackExecution.runtime().requireShopService();
+                            if (!response.reserved()) {
+                                asyncShopPurchases.outOfStockCallback();
+                                completeShopPurchase(command, callbackExecution,
+                                        callbackService.outOfStock(profile.shop(), sku, quantity, clock.instant()), results);
+                                return;
+                            }
+                            asyncShopPurchases.reservedCallback();
+                            ShopPurchaseResult result = callbackService.purchaseReservedAt(
+                                    profile.bag(),
+                                    profile.shop(),
+                                    orderId,
+                                    sku,
+                                    quantity,
+                                    clock.instant()
+                            );
+                            if (!result.success()) {
                                 releaseReservedStock(reservationId, sku, quantity);
                             }
-                            return;
+                            completeShopPurchase(command, callbackExecution, result, results);
                         }
-                        PlayerGameExecution callbackExecution = execution();
-                        ShopService callbackService = callbackExecution.runtime().requireShopService();
-                        if (!response.reserved()) {
-                            asyncShopPurchases.outOfStockCallback();
-                            completeShopPurchase(command, callbackExecution,
-                                    callbackService.outOfStock(profile.shop(), sku, quantity, clock.instant()), results);
-                            return;
-                        }
-                        asyncShopPurchases.reservedCallback();
-                        ShopPurchaseResult result = callbackService.purchaseReservedAt(
-                                profile.bag(),
-                                profile.shop(),
-                                orderId,
-                                sku,
-                                quantity,
-                                clock.instant()
-                        );
-                        if (!result.success()) {
-                            releaseReservedStock(reservationId, sku, quantity);
-                        }
-                        completeShopPurchase(command, callbackExecution, result, results);
-                    }
 
-                    @Override
-                    public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
-                        if (!results.canComplete(command)) {
-                            asyncShopPurchases.lateCallback();
-                            return;
+                        @Override
+                        public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                            failAsyncShopPurchase(pending, command, results, error);
                         }
-                        asyncShopPurchases.rpcFailure();
-                        PlayerGameExecution failureExecution = execution();
-                        PlayerBusinessResponse response = PlayerBusinessResponse.failure(command, error);
-                        recordAsyncCommandAudit(
-                                command,
-                                PlayerCommandAuditOutcome.ASYNC_FAILED,
-                                failureExecution.runtime().version(),
-                                response.code(),
-                                response.message()
-                        );
-                        results.completed(command, response);
                     }
-                }
-        );
+            );
+        } catch (RuntimeException e) {
+            failAsyncShopPurchase(pending, command, results, e);
+        }
     }
 
     public void clearBattleStage(String stageId, Consumer<BattleSettlementResult> callback) {
@@ -630,6 +722,7 @@ public final class PlayerGameAgent {
                     .clear(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             if (result.victory()) {
                 execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+                execution.publishBagChanged(PlayerBusinessOperations.BATTLE_CLEAR_STAGE, result.replayed(), result.rewardResult());
                 if (!result.replayed()) {
                     execution.pushBattleSettlementSnapshots(result);
                 }
@@ -652,6 +745,7 @@ public final class PlayerGameAgent {
             BattleSettlementResult result = execution.runtime().requireBattleService()
                     .sweep(profile.bag(), profile.battle(), execution.activityAccess().now(), settlementId, stageId);
             execution.publish(BattleStageClearedEvent.from(profile.playerId(), result));
+            execution.publishBagChanged(PlayerBusinessOperations.BATTLE_SWEEP_STAGE, result.replayed(), result.rewardResult());
             if (!result.replayed()) {
                 execution.pushBattleSettlementSnapshots(result);
             }
@@ -665,6 +759,7 @@ public final class PlayerGameAgent {
             TaskClaimResult result = execution.runtime().requireTaskService()
                     .claim(profile.tasks(), profile.bag(), taskId);
             execution.pushTaskSnapshot();
+            execution.publishBagChanged(PlayerBusinessOperations.TASK_CLAIM, false, result.reward());
             execution.pushBagSnapshot();
             callback.accept(result);
         });
@@ -676,6 +771,7 @@ public final class PlayerGameAgent {
             AchievementClaimResult result = execution.runtime().requireAchievementService()
                     .claim(profile.achievements(), profile.bag(), achievementId);
             execution.pushAchievementSnapshot();
+            execution.publishBagChanged(PlayerBusinessOperations.ACHIEVEMENT_CLAIM, false, result.reward());
             execution.pushBagSnapshot();
             callback.accept(result);
         });
@@ -715,6 +811,7 @@ public final class PlayerGameAgent {
 
     PlayerStateSnapshot saveInCurrentMailbox(PlayerStateRepository repository) {
         Objects.requireNonNull(repository, "repository");
+        com.commonbattle.actor.ActorContext.requireCurrent(self);
         PlayerStateSnapshot snapshot = nextSnapshot();
         repository.save(profile.playerId(), snapshot);
         return snapshot;
@@ -726,6 +823,7 @@ public final class PlayerGameAgent {
     }
 
     PlayerStateSnapshot exportForMigrationInCurrentMailbox() {
+        com.commonbattle.actor.ActorContext.requireCurrent(self);
         return nextSnapshot();
     }
 
@@ -740,6 +838,7 @@ public final class PlayerGameAgent {
         Objects.requireNonNull(repository, "repository");
         Objects.requireNonNull(callback, "callback");
         return timers.scheduleAtFixedRate(self, initialDelay, interval, ignored -> {
+            com.commonbattle.actor.ActorContext.requireCurrent(self);
             PlayerStateSnapshot snapshot = nextSnapshot();
             repository.save(profile.playerId(), snapshot);
             callback.accept(snapshot);
@@ -802,6 +901,7 @@ public final class PlayerGameAgent {
     }
 
     private PlayerGameExecution execution() {
+        com.commonbattle.actor.ActorContext.requireCurrent(self);
         PlayerGameRuntime runtime = runtimeResolver.apply(profile.playerId());
         return new PlayerGameExecution(profile, runtime, activityAccess(), this::publishDomainEvent, pushes);
     }
@@ -832,18 +932,18 @@ public final class PlayerGameAgent {
     }
 
     private void releaseReservedStock(String reservationId, String sku, int quantity) {
-        requireShopStockAsyncClient().release(
+        new ActorMailboxShopStockClient(requireShopStockAsyncClient(), messages, self).release(
                 reservationId,
                 sku,
                 quantity,
-                new ShopStockCallback<>() {
+                new ActorShopStockCallback<>() {
                     @Override
-                    public void success(ShopStockReleaseResponse response) {
+                    public void success(com.commonbattle.actor.ActorContext context, ShopStockReleaseResponse response) {
                         asyncShopPurchases.releasedReservation();
                     }
 
                     @Override
-                    public void failure(Throwable error) {
+                    public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
                         asyncShopPurchases.releaseFailure();
                     }
                 }
@@ -859,6 +959,7 @@ public final class PlayerGameAgent {
         if (result.success()) {
             asyncShopPurchases.completedPurchase();
             execution.publish(ShopItemPurchasedEvent.from(profile.playerId(), result));
+            execution.publishBagChanged(PlayerBusinessOperations.SHOP_BUY, result.replayed(), result.cost(), result.reward());
             if (!result.replayed()) {
                 execution.pushShopSnapshot();
                 execution.pushBagSnapshot();
@@ -897,6 +998,30 @@ public final class PlayerGameAgent {
                 resultCode,
                 reason
         ));
+    }
+
+    private void failAsyncShopPurchase(
+            PendingAsyncCommand pending,
+            PlayerCommand command,
+            PlayerBusinessResultSink results,
+            Throwable error
+    ) {
+        removePendingAsyncCommand(pending);
+        if (!results.canComplete(command)) {
+            asyncShopPurchases.lateCallback();
+            return;
+        }
+        asyncShopPurchases.rpcFailure();
+        PlayerGameExecution failureExecution = execution();
+        PlayerBusinessResponse response = PlayerBusinessResponse.failure(command, error);
+        recordAsyncCommandAudit(
+                command,
+                PlayerCommandAuditOutcome.ASYNC_FAILED,
+                failureExecution.runtime().version(),
+                response.code(),
+                response.message()
+        );
+        results.completed(command, response);
     }
 
     private String reservationId(PlayerCommand command, String orderId) {
@@ -939,7 +1064,52 @@ public final class PlayerGameAgent {
 
     private PlayerStateSnapshot nextSnapshot() {
         // 存盘边界：在玩家邮箱内生成完整状态快照并递增 revision，避免跨模块状态被拆成不一致切片。
+        cleanupAbandonedPendingAsyncCommands();
+        if (!pendingAsyncCommands.isEmpty()) {
+            throw new PendingAsyncPlayerCommandException(profile.playerId(), pendingAsyncCommands.size());
+        }
         stateRevision++;
-        return profile.snapshot(stateRevision, domainEventRevision, clock.instant());
+        PlayerCommandSequencerSnapshot commandSnapshot = Objects.requireNonNull(
+                commandSequencerSnapshots.apply(profile.playerId()),
+                "commandSequencerSnapshot"
+        );
+        return profile.snapshot(stateRevision, domainEventRevision, clock.instant())
+                .withCommandSequencer(commandSnapshot);
+    }
+
+    private void cleanupAbandonedPendingAsyncCommands() {
+        Iterator<PendingAsyncCommandState> iterator = pendingAsyncCommands.values().iterator();
+        while (iterator.hasNext()) {
+            PendingAsyncCommandState state = iterator.next();
+            if (!state.results().canComplete(state.command())) {
+                iterator.remove();
+                asyncShopPurchases.pendingCommandFinished();
+                asyncShopPurchases.abandonedPendingCommand();
+            }
+        }
+    }
+
+    private void removePendingAsyncCommand(PendingAsyncCommand pending) {
+        if (pendingAsyncCommands.remove(pending) != null) {
+            asyncShopPurchases.pendingCommandFinished();
+        }
+    }
+
+    private record PendingAsyncCommand(String sessionId, long sessionEpoch, long sequence, String operation) {
+        private static PendingAsyncCommand from(PlayerCommand command) {
+            return new PendingAsyncCommand(
+                    command.sessionId(),
+                    command.sessionEpoch(),
+                    command.sequence(),
+                    command.operation()
+            );
+        }
+    }
+
+    private record PendingAsyncCommandState(PlayerCommand command, PlayerBusinessResultSink results) {
+        private PendingAsyncCommandState {
+            Objects.requireNonNull(command, "command");
+            Objects.requireNonNull(results, "results");
+        }
     }
 }

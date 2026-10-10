@@ -828,6 +828,10 @@ public final class ClusterNodeConfig {
         return integer("scene.shards", actorWorkers());
     }
 
+    public int sceneShardChunkSize() {
+        return integer("scene.shard.chunk.size", 1);
+    }
+
     public boolean sceneTickEnabled() {
         return Boolean.parseBoolean(property("scene.tick.enabled", "false"));
     }
@@ -909,6 +913,7 @@ public final class ClusterNodeConfig {
         }
         validatePositiveInteger(issues, "scene.capacity");
         validatePositiveInteger(issues, "scene.shards");
+        validatePositiveInteger(issues, "scene.shard.chunk.size");
     }
 
     private void validatePort(List<ClusterConfigIssue> issues, String key) {

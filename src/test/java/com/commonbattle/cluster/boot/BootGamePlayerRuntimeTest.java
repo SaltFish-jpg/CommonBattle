@@ -15,6 +15,7 @@ import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
+import com.commonbattle.game.bag.BagChangeAuditQuery;
 import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigValidator;
@@ -218,6 +219,9 @@ class BootGamePlayerRuntimeTest {
         String metrics = RuntimeMetricsFormatter.format(snapshot);
         assertEquals(1, snapshot.playerAgents().managerCount());
         assertEquals(1, snapshot.playerAgents().loadedAgents());
+        assertEquals(1, snapshot.businessCommandCatalogs().viewCount());
+        assertEquals(10, snapshot.businessCommandCatalogs().descriptorCount());
+        assertEquals(9, snapshot.businessCommandCatalogs().operationCount());
         assertEquals(1, snapshot.playerOutboundDeliveries().runtimeCount());
         assertEquals(0, snapshot.playerAgents().autoSaveSchedulers());
         assertEquals(1, snapshot.playerAgents().drainServices());
@@ -225,19 +229,32 @@ class BootGamePlayerRuntimeTest {
         assertEquals(1, snapshot.businessAgentMessages().portCount());
         assertEquals(2, snapshot.businessAgentMessages().submittedRequests());
         assertEquals(2, snapshot.businessAgentMessages().localRequests());
+        assertEquals(1, snapshot.bagChangeAudits().auditCount());
+        assertTrue(snapshot.bagChangeAudits().recorded() >= 2);
         assertTrue(json.contains("\"playerAgents\":{\"managerCount\":1,\"loadedAgents\":1"));
+        assertTrue(json.contains("\"businessCommandCatalogs\":{\"viewCount\":1,\"descriptorCount\":10"));
         assertTrue(json.contains("\"businessAgentMessages\":{\"portCount\":1,\"submittedRequests\":2"));
+        assertTrue(json.contains("\"bagChangeAudits\":{\"auditCount\":1"));
         assertTrue(metrics.contains("commonbattle_player_agents_loaded 1"));
+        assertTrue(metrics.contains("commonbattle_player_business_command_catalog_descriptors 10"));
+        assertTrue(metrics.contains("commonbattle_player_business_command_catalog_descriptors_by_domain{domain=\"battle\"} 2"));
         assertTrue(metrics.contains("commonbattle_player_agent_drain_services 1"));
         assertTrue(metrics.contains("commonbattle_async_shop_purchase_views 1"));
         assertTrue(metrics.contains("commonbattle_business_agent_message_submitted_requests_total 2"));
+        assertTrue(metrics.contains("commonbattle_bag_change_audits 1"));
+        assertEquals(2, players.bagChangeAudit()
+                .query(new BagChangeAuditQuery(10001L, "exp_potion",
+                        PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS, 0, 10))
+                .matched());
         assertTrue(players.logins().logoutAndPassivate(login.session(), ignored -> {
         }));
         executor.runAll();
         assertEquals(2, profileSnapshots.find(10001L).orElseThrow().level());
         assertEquals(1, runtime.healthRegistry().commandDispatchers().size());
+        assertEquals(1, runtime.healthRegistry().playerBusinessCommandCatalogs().size());
         assertEquals(1, runtime.healthRegistry().playerOutboundDeliveries().size());
         assertEquals(1, runtime.healthRegistry().commandAudits().size());
+        assertEquals(1, runtime.healthRegistry().bagChangeAudits().size());
         assertEquals(1, runtime.healthRegistry().lifecycleManagers().size());
         assertEquals(1, runtime.healthRegistry().businessAgentMessages().size());
         assertEquals(2, runtime.healthRegistry().actorMailboxPressures().size());

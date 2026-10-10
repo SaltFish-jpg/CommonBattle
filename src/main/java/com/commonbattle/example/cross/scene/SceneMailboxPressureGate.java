@@ -26,6 +26,12 @@ public final class SceneMailboxPressureGate {
         return new SceneAdmission(placement, decision);
     }
 
+    public SceneAdmission admitMove(String sceneId, int chunkX, int chunkY) {
+        ScenePlacement placement = scenes.place(sceneId, chunkX, chunkY);
+        AdmissionDecision decision = admissions.admit(sceneIdentity(placement), SceneOperations.MOVE);
+        return new SceneAdmission(placement, decision);
+    }
+
     public static String actorIdOf(AgentIdentity identity) {
         return identity.key();
     }

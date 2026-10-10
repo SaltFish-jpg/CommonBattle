@@ -1117,6 +1117,12 @@ public final class ClusterEventPayloadCodecs {
                     + CodedOutputStream.computeInt64Size(5, event.revision())
                     + CodedOutputStream.computeInt64Size(6, event.occurredAt().getEpochSecond())
                     + CodedOutputStream.computeInt32Size(7, event.occurredAt().getNano());
+            List<byte[]> attributes = new ArrayList<>();
+            for (Map.Entry<String, String> entry : event.attributes().entrySet()) {
+                byte[] attribute = encodeEventAttribute(entry.getKey(), entry.getValue());
+                attributes.add(attribute);
+                size += CodedOutputStream.computeByteArraySize(8, attribute);
+            }
             byte[] bytes = new byte[size];
             try {
                 CodedOutputStream output = CodedOutputStream.newInstance(bytes);
@@ -1127,6 +1133,9 @@ public final class ClusterEventPayloadCodecs {
                 output.writeInt64(5, event.revision());
                 output.writeInt64(6, event.occurredAt().getEpochSecond());
                 output.writeInt32(7, event.occurredAt().getNano());
+                for (byte[] attribute : attributes) {
+                    output.writeByteArray(8, attribute);
+                }
                 output.flush();
                 return bytes;
             } catch (IOException e) {
@@ -1144,6 +1153,7 @@ public final class ClusterEventPayloadCodecs {
             long revision = 1;
             long epochSecond = 0;
             int nano = 0;
+            Map<String, String> attributes = new HashMap<>();
             try {
                 int tag;
                 while ((tag = input.readTag()) != 0) {
@@ -1155,6 +1165,7 @@ public final class ClusterEventPayloadCodecs {
                         case 5 -> revision = input.readInt64();
                         case 6 -> epochSecond = input.readInt64();
                         case 7 -> nano = input.readInt32();
+                        case 8 -> decodeEventAttribute(input.readByteArray(), attributes);
                         default -> input.skipField(tag);
                     }
                 }
@@ -1164,11 +1175,48 @@ public final class ClusterEventPayloadCodecs {
                         subject,
                         delta,
                         revision,
-                        Instant.ofEpochSecond(epochSecond, nano)
+                        Instant.ofEpochSecond(epochSecond, nano),
+                        attributes
                 );
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode player domain event", e);
             }
+        }
+    }
+
+    private static byte[] encodeEventAttribute(String key, String value) {
+        int size = stringSize(1, key)
+                + stringSize(2, value);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, key);
+            output.writeString(2, value);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode player domain event attribute", e);
+        }
+    }
+
+    private static void decodeEventAttribute(byte[] bytes, Map<String, String> attributes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String key = "";
+        String value = "";
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> key = input.readString();
+                    case 2 -> value = input.readString();
+                    default -> input.skipField(tag);
+                }
+            }
+            if (!key.isBlank()) {
+                attributes.put(key, value);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode player domain event attribute", e);
         }
     }
 
@@ -2089,12 +2137,18 @@ public final class ClusterEventPayloadCodecs {
 
     private static byte[] encodePlayerDomainProjectionSnapshot(PlayerDomainProjectionSnapshot snapshot) {
         List<byte[]> stageEntries = new ArrayList<>();
+        List<byte[]> bagEntries = new ArrayList<>();
         int size = CodedOutputStream.computeInt64Size(1, snapshot.playerId())
                 + CodedOutputStream.computeInt64Size(2, snapshot.eventRevision());
         for (Map.Entry<String, Integer> entry : snapshot.stageClearCounts().entrySet()) {
             byte[] encoded = encodeStageClearEntry(entry.getKey(), entry.getValue());
             stageEntries.add(encoded);
             size += CodedOutputStream.computeByteArraySize(3, encoded);
+        }
+        for (Map.Entry<String, Integer> entry : snapshot.bagItemCounts().entrySet()) {
+            byte[] encoded = encodeBagItemCountEntry(entry.getKey(), entry.getValue());
+            bagEntries.add(encoded);
+            size += CodedOutputStream.computeByteArraySize(4, encoded);
         }
         byte[] bytes = new byte[size];
         try {
@@ -2103,6 +2157,9 @@ public final class ClusterEventPayloadCodecs {
             output.writeInt64(2, snapshot.eventRevision());
             for (byte[] entry : stageEntries) {
                 output.writeByteArray(3, entry);
+            }
+            for (byte[] entry : bagEntries) {
+                output.writeByteArray(4, entry);
             }
             output.flush();
             return bytes;
@@ -2116,6 +2173,7 @@ public final class ClusterEventPayloadCodecs {
         long playerId = 1;
         long eventRevision = 0;
         Map<String, Integer> stageClears = new HashMap<>();
+        Map<String, Integer> bagItems = new HashMap<>();
         try {
             int tag;
             while ((tag = input.readTag()) != 0) {
@@ -2123,10 +2181,11 @@ public final class ClusterEventPayloadCodecs {
                     case 1 -> playerId = input.readInt64();
                     case 2 -> eventRevision = input.readInt64();
                     case 3 -> decodeStageClearEntry(input.readByteArray(), stageClears);
+                    case 4 -> decodeBagItemCountEntry(input.readByteArray(), bagItems);
                     default -> input.skipField(tag);
                 }
             }
-            return new PlayerDomainProjectionSnapshot(playerId, eventRevision, stageClears);
+            return new PlayerDomainProjectionSnapshot(playerId, eventRevision, stageClears, bagItems);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode player domain projection snapshot", e);
         }
@@ -2165,6 +2224,42 @@ public final class ClusterEventPayloadCodecs {
             }
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode player domain stage clear entry", e);
+        }
+    }
+
+    private static byte[] encodeBagItemCountEntry(String itemId, int count) {
+        int size = stringSize(1, itemId)
+                + CodedOutputStream.computeInt32Size(2, count);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, itemId);
+            output.writeInt32(2, count);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode player domain bag item entry", e);
+        }
+    }
+
+    private static void decodeBagItemCountEntry(byte[] bytes, Map<String, Integer> bagItems) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String itemId = "";
+        int count = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> itemId = input.readString();
+                    case 2 -> count = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            if (!itemId.isBlank()) {
+                bagItems.put(itemId, count);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode player domain bag item entry", e);
         }
     }
 

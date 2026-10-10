@@ -89,6 +89,40 @@ class BootOwnerEventRepairsTest {
         }
     }
 
+    @Test
+    void repairControlStartsStandaloneSchedulerWhenDispatcherIsDisabled() {
+        BootRuntime runtime = new BootRuntime();
+        try {
+            ClusterNodeConfig config = ClusterNodeConfig.fromProperties(baseConfig());
+            RecordingOwnerInterests delegate = new RecordingOwnerInterests();
+
+            OwnerEventInterestControl control = BootOwnerEventRepairs.repairControl(
+                    runtime,
+                    config,
+                    null,
+                    "profileEventRepairs",
+                    ProfileChangedEvent.TOPIC,
+                    delegate
+            );
+
+            assertNotSame(delegate, control);
+            assertEquals(1, runtime.healthRegistry().ownerEventRepairSchedulers().size());
+            assertEquals(1, runtime.healthRegistry().ownerEventRepairIsolationAdmins().size());
+            assertEquals(0, runtime.healthRegistry().ownerEventRepairDispatchers().size());
+
+            control.requestRepairOwner(ProfileChangedEvent.ownerKey(10001L));
+
+            OwnerEventRepairSchedulerStats stats = runtime.healthRegistry()
+                    .ownerEventRepairSchedulers()
+                    .getFirst()
+                    .repairSchedulerStats();
+            assertEquals(1, stats.pendingOwners());
+            assertEquals(7, stats.defaultPriority());
+        } finally {
+            runtime.close();
+        }
+    }
+
     private static Properties baseConfig() {
         Properties properties = new Properties();
         properties.setProperty("cluster.kind", "SCENE");

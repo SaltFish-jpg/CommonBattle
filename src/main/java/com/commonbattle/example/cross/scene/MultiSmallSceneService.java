@@ -1,5 +1,6 @@
 package com.commonbattle.example.cross.scene;
 
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.cluster.ServiceDescriptor;
@@ -14,6 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * 多小型场景承载策略。
@@ -33,7 +35,8 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
         this.baseDescriptor = ServiceMetadata.withProtocolVersion(ServiceMetadata.withLoad(new ServiceDescriptor(
                 serviceId,
                 endpoint,
-                Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MESSAGE),
+                Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MOVE,
+                        SceneOperations.COMBAT_DAMAGE, SceneOperations.MESSAGE),
                 Map.of(
                         "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
                         "scene.capacity", String.valueOf(capacity)
@@ -100,9 +103,11 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
     }
 
     public SmallSceneAgentSnapshot exportForMigrationInCurrentMailbox(String sceneId) {
-        if (!scenes.containsKey(sceneId)) {
+        ActorRef actor = scenes.get(sceneId);
+        if (actor == null) {
             throw new IllegalStateException("scene agent not loaded: " + sceneId);
         }
+        ActorContext.requireCurrent(actor);
         return new SmallSceneAgentSnapshot(sceneId, scenePlayers(sceneId));
     }
 
@@ -140,6 +145,30 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
     }
 
     @Override
+    public void enterAsync(
+            long playerId,
+            String sceneId,
+            int chunkX,
+            int chunkY,
+            Consumer<ScenePlacement> callback,
+            Consumer<Throwable> failure
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        Objects.requireNonNull(failure, "failure");
+        ScenePlacement placement;
+        try {
+            placement = place(sceneId, chunkX, chunkY);
+        } catch (RuntimeException e) {
+            failure.accept(e);
+            return;
+        }
+        actorsSend(placement.actor(), () -> {
+            ActorContext.requireCurrent(placement.actor());
+            callback.accept(enter(playerId, sceneId, chunkX, chunkY));
+        }, failure);
+    }
+
+    @Override
     public boolean leave(long playerId, String sceneId) {
         Set<Long> players = playersByScene.get(sceneId);
         if (players == null) {
@@ -151,5 +180,71 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
             scenes.remove(sceneId);
         }
         return removed;
+    }
+
+    @Override
+    public void leaveAsync(
+            long playerId,
+            String sceneId,
+            Consumer<Boolean> callback,
+            Consumer<Throwable> failure
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        Objects.requireNonNull(failure, "failure");
+        ActorRef actor = scenes.get(sceneId);
+        if (actor == null) {
+            callback.accept(false);
+            return;
+        }
+        actorsSend(actor, () -> {
+            ActorContext.requireCurrent(actor);
+            callback.accept(leave(playerId, sceneId));
+        }, failure);
+    }
+
+    @Override
+    public SceneMoveOutcome move(long playerId, String sceneId, int chunkX, int chunkY) {
+        Set<Long> players = playersByScene.get(sceneId);
+        if (players == null || !players.contains(playerId)) {
+            return SceneMoveOutcome.rejected(sceneId, chunkX, chunkY);
+        }
+        return new SceneMoveOutcome(sceneId, chunkX, chunkY, 0, 0, true);
+    }
+
+    @Override
+    public void moveAsync(
+            long playerId,
+            String sceneId,
+            int chunkX,
+            int chunkY,
+            Consumer<SceneMoveOutcome> callback,
+            Consumer<Throwable> failure
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        Objects.requireNonNull(failure, "failure");
+        ActorRef actor = scenes.get(sceneId);
+        if (actor == null) {
+            callback.accept(SceneMoveOutcome.rejected(sceneId, chunkX, chunkY));
+            return;
+        }
+        actorsSend(actor, () -> {
+            ActorContext.requireCurrent(actor);
+            callback.accept(move(playerId, sceneId, chunkX, chunkY));
+        }, failure);
+    }
+
+    private void actorsSend(ActorRef actor, Runnable task, Consumer<Throwable> failure) {
+        try {
+            // Scene RPC 入站边界：调用线程只投递，状态变更统一回到目标 scene actor mailbox。
+            actors.send(actor, ignored -> {
+                try {
+                    task.run();
+                } catch (RuntimeException e) {
+                    failure.accept(e);
+                }
+            });
+        } catch (RuntimeException e) {
+            failure.accept(e);
+        }
     }
 }

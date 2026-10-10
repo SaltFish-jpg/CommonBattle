@@ -7,6 +7,7 @@ import com.commonbattle.actor.agent.AgentRouteType;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -14,6 +15,8 @@ import java.util.Objects;
  * 准入失败时不会触碰 Actor 邮箱，调用方可直接向客户端或上游 RPC 返回限流错误。
  */
 public final class AdmissionControlledAgentRouter {
+    private static final Duration LIFECYCLE_RETRY_AFTER = Duration.ofMillis(100);
+
     private final InboundAdmissionController admissions;
     private final LifecycleAwareAgentRouter router;
 
@@ -42,7 +45,7 @@ public final class AdmissionControlledAgentRouter {
         }
         AgentRoute route = router.resolve(target);
         if (route.type() == AgentRouteType.MISSING) {
-            return new AdmissionRouteResult(AdmissionDecision.reject(route.reason(), java.time.Duration.ZERO), route);
+            return new AdmissionRouteResult(AdmissionDecision.reject(route.reason(), retryAfter(route.reason())), route);
         }
         return new AdmissionRouteResult(decision, route);
     }
@@ -54,5 +57,12 @@ public final class AdmissionControlledAgentRouter {
             return router.tellResolvedLocal(routed.route(), task);
         }
         return AgentDeliveryResult.rejected(routed.admission().reason(), routed.admission().retryAfter());
+    }
+
+    private static Duration retryAfter(String reason) {
+        if ("agent_migrating".equals(reason) || "agent_passivating".equals(reason)) {
+            return LIFECYCLE_RETRY_AFTER;
+        }
+        return Duration.ZERO;
     }
 }

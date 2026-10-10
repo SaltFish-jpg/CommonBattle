@@ -12,17 +12,38 @@ public record SceneProjectionStats(
         long repairRequests,
         long appliedSnapshots,
         long ignoredSnapshots,
-        int staleViews
+        int staleViews,
+        long freshReadRequests,
+        long freshReadLocalHits,
+        long freshReadRefreshes,
+        long freshReadRemoteStale,
+        long freshReadRemoteMisses
 ) {
+    public SceneProjectionStats(
+            long receivedEvents,
+            long appliedEvents,
+            long duplicateEvents,
+            long gapEvents,
+            long repairRequests,
+            long appliedSnapshots,
+            long ignoredSnapshots,
+            int staleViews
+    ) {
+        this(receivedEvents, appliedEvents, duplicateEvents, gapEvents, repairRequests, appliedSnapshots,
+                ignoredSnapshots, staleViews, 0, 0, 0, 0, 0);
+    }
+
     public SceneProjectionStats {
         if (receivedEvents < 0 || appliedEvents < 0 || duplicateEvents < 0 || gapEvents < 0
-                || repairRequests < 0 || appliedSnapshots < 0 || ignoredSnapshots < 0 || staleViews < 0) {
+                || repairRequests < 0 || appliedSnapshots < 0 || ignoredSnapshots < 0 || staleViews < 0
+                || freshReadRequests < 0 || freshReadLocalHits < 0 || freshReadRefreshes < 0
+                || freshReadRemoteStale < 0 || freshReadRemoteMisses < 0) {
             throw new IllegalArgumentException("scene projection stats must not be negative");
         }
     }
 
     public static SceneProjectionStats empty() {
-        return new SceneProjectionStats(0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneProjectionStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneProjectionStats plus(SceneProjectionStats other) {
@@ -34,7 +55,12 @@ public record SceneProjectionStats(
                 repairRequests + other.repairRequests,
                 appliedSnapshots + other.appliedSnapshots,
                 ignoredSnapshots + other.ignoredSnapshots,
-                staleViews + other.staleViews
+                staleViews + other.staleViews,
+                freshReadRequests + other.freshReadRequests,
+                freshReadLocalHits + other.freshReadLocalHits,
+                freshReadRefreshes + other.freshReadRefreshes,
+                freshReadRemoteStale + other.freshReadRemoteStale,
+                freshReadRemoteMisses + other.freshReadRemoteMisses
         );
     }
 }

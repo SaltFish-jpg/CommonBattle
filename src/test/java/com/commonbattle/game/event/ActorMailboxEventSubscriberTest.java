@@ -1,6 +1,7 @@
 package com.commonbattle.game.event;
 
 import com.commonbattle.actor.ActorOverflowStrategy;
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorSystemConfig;
@@ -38,10 +39,12 @@ class ActorMailboxEventSubscriberTest {
         ActorMailboxEventSubscriber subscriber = new ActorMailboxEventSubscriber(
                 new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
                 scene,
-                (context, event) -> handledBy.set(context.self().id() + ":" + event.ownerKey())
+                (context, event) -> handledBy.set(ActorContext.requireCurrent(scene).self().id() + ":" + event.ownerKey())
         );
 
+        assertEquals(true, ActorContext.current().isEmpty());
         subscriber.onEvent(profileEvent(1));
+        assertEquals(true, ActorContext.current().isEmpty());
 
         assertEquals(null, handledBy.get());
         assertEquals(1, subscriber.stats().receivedEvents());

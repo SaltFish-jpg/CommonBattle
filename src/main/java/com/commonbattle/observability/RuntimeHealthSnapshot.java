@@ -32,6 +32,8 @@ public record RuntimeHealthSnapshot(
         BusinessAgentMessageHealthStats businessAgentMessages,
         BusinessAgentRpcEndpointHealthStats businessAgentRpcEndpoints,
         PlayerCommandStats commands,
+        PlayerBusinessCommandCatalogHealthStats businessCommandCatalogs,
+        PlayerBusinessCommandGatewayHealthStats businessCommandGateways,
         PlayerBusinessResponseHealthStats businessResponses,
         PlayerOutboundDeliveryHealthStats playerOutboundDeliveries,
         PlayerGatewayHealthStats playerGateways,
@@ -66,6 +68,8 @@ public record RuntimeHealthSnapshot(
         ChatRuntimeHealthStats chatRuntimes,
         SceneRuntimeHealthStats sceneRuntimes,
         ShopRuntimeHealthStats shopRuntimes,
+        EventGatedCommandAuditHealthStats eventGatedCommandAudits,
+        BagChangeAuditHealthStats bagChangeAudits,
         PlayerCommandAuditHealthStats commandAudits
 ) {
 }

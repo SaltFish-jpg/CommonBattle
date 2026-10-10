@@ -25,10 +25,13 @@ import com.commonbattle.game.agent.BusinessAgentHandlerRegistry;
 import com.commonbattle.game.agent.BusinessAgentIdempotencyConfig;
 import com.commonbattle.game.agent.BusinessAgentRpcEndpoint;
 import com.commonbattle.game.agent.DefaultBusinessAgentMessagePort;
+import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.observability.ActorHotspotPolicy;
+import com.commonbattle.game.player.CompositePlayerDomainEventListener;
 import com.commonbattle.game.player.PlayerBusinessCommandBinder;
+import com.commonbattle.game.player.PlayerBusinessCommandCatalog;
 import com.commonbattle.game.player.PlayerBusinessCommandEndpoint;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
 import com.commonbattle.game.player.PlayerBusinessCommandHandler;
@@ -40,6 +43,8 @@ import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.player.PlayerGatewayConfig;
 import com.commonbattle.game.player.OutboundPlayerPushPort;
 import com.commonbattle.game.player.PlayerStateRepository;
+import com.commonbattle.game.player.PlayerDomainEventListener;
+import com.commonbattle.game.player.event.BagChangeAuditPlayerEventListener;
 import com.commonbattle.game.profile.PlayerProfileEventProjector;
 import com.commonbattle.game.profile.PlayerProfileSnapshotProjector;
 import com.commonbattle.game.profile.FriendProfileEventProjector;
@@ -85,12 +90,14 @@ record BootGamePlayerRuntime(
         PlayerOutboundDeliveryHub outbound,
         PlayerClientConnectionService clientConnections,
         PlayerClientCommandIngress clientCommandIngress,
+        PlayerCommandSequencer commandSequencer,
         PlayerCommandDispatcher dispatcher,
         PlayerBusinessResponseHub businessResponses,
         PlayerBusinessCommandGateway businessCommands,
         BusinessAgentHandlerRegistry businessAgentHandlers,
         DefaultBusinessAgentMessagePort businessMessages,
         InMemoryPlayerCommandAuditLog audit,
+        InMemoryBagChangeAuditLog bagChangeAudit,
         PlayerAutoSaveScheduler autoSaves,
         PlayerAgentDrainService drain
 ) {
@@ -563,6 +570,12 @@ record BootGamePlayerRuntime(
                 PlayerDeliveryOverflowStrategy.DROP_OLDEST
         );
         InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
+        InMemoryBagChangeAuditLog bagChangeAudit = new InMemoryBagChangeAuditLog();
+        PlayerDomainEventListener playerDomainEventListener = CompositePlayerDomainEventListener.of(
+                new PlayerProfileEventProjector(profileSnapshots, profileEvents, clock)::onPlayerDomainEvent,
+                new BagChangeAuditPlayerEventListener(bagChangeAudit, clock)
+        );
+        PlayerCommandSequencer commandSequencer = new PlayerCommandSequencer();
         PlayerGameAgentManager agents = new PlayerGameAgentManager(
                 actors,
                 messages,
@@ -572,11 +585,12 @@ record BootGamePlayerRuntime(
                 clock,
                 serverOpenTime,
                 playerDomainEvents,
-                new PlayerProfileEventProjector(profileSnapshots, profileEvents, clock)::onPlayerDomainEvent,
+                playerDomainEventListener,
                 new PlayerProfileSnapshotProjector(profileSnapshots)::project,
                 shopStockAsyncClient,
                 new OutboundPlayerPushPort(outbound),
                 audit,
+                commandSequencer,
                 actorSchedules,
                 growthStaminaRecoveryEnabled,
                 growthStaminaRecoveryInitialDelay,
@@ -614,7 +628,7 @@ record BootGamePlayerRuntime(
         runtime.observe("businessAgentMailboxPressure", businessAgentMailboxAdmissions);
         PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                 sessions,
-                new PlayerCommandSequencer(),
+                commandSequencer,
                 new AdmissionControlledAgentRouter(
                         commandAdmissions,
                         lifecycleRouter
@@ -649,6 +663,7 @@ record BootGamePlayerRuntime(
                 dispatcher,
                 new PlayerBusinessCommandHandler(agents::getOrCreate, businessResponses)
         );
+        runtime.observe("playerBusinessCommandCatalog", PlayerBusinessCommandCatalog.view());
         if (rpc instanceof ClusterRpcGateway clusterRpc) {
             new PlayerBusinessCommandEndpoint(businessCommands).bind(clusterRpc);
             bindBusinessAgentRpcEndpoint(runtime, lifecycleRouter, businessAgentHandlers,
@@ -686,12 +701,14 @@ record BootGamePlayerRuntime(
                 outbound,
                 clientConnections,
                 clientCommandIngress,
+                commandSequencer,
                 dispatcher,
                 businessResponses,
                 businessCommands,
                 businessAgentHandlers,
                 businessMessages,
                 audit,
+                bagChangeAudit,
                 autoSaves,
                 drain
         );
@@ -703,6 +720,7 @@ record BootGamePlayerRuntime(
         runtime.observe("playerLogins", logins);
         runtime.observe("playerOutboundDeliveries", outbound);
         runtime.observe("playerCommandAudit", audit);
+        runtime.observe("bagChangeAudit", bagChangeAudit);
         runtime.observe("playerCommandDispatcher", dispatcher);
         runtime.observe("playerBusinessResponses", businessResponses);
         runtime.observe("playerAgentDrain", drain);

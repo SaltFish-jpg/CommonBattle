@@ -1,6 +1,7 @@
 package com.commonbattle.example.cross.scene;
 
 import com.commonbattle.cluster.ServiceDescriptor;
+import com.commonbattle.game.scene.SceneProjectionStats;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
 import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
@@ -9,6 +10,7 @@ import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * 带 Profile 动态关注的 Scene 服务包装层。
@@ -63,7 +65,37 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
 
     @Override
     public SceneRuntimeStats stats() {
-        return delegate.stats();
+        SceneRuntimeStats delegateStats = delegate.stats();
+        SceneProjectionStats projection = SceneProjectionStats.empty();
+        if (friendEvents != null) {
+            projection = projection.plus(friendEvents.projectionStats());
+        }
+        if (allianceEvents != null) {
+            projection = projection.plus(allianceEvents.projectionStats());
+        }
+        return new SceneRuntimeStats(
+                delegateStats.activeScenes(),
+                delegateStats.activePlayers(),
+                delegateStats.shardCount(),
+                delegateStats.maxShardPlayers(),
+                delegateStats.playerInterests(),
+                delegateStats.allianceReferences(),
+                delegateStats.duplicateEnters(),
+                delegateStats.missingLeaves(),
+                projection.receivedEvents(),
+                projection.appliedEvents(),
+                projection.duplicateEvents(),
+                projection.gapEvents(),
+                projection.repairRequests(),
+                projection.appliedSnapshots(),
+                projection.ignoredSnapshots(),
+                projection.staleViews(),
+                projection.freshReadRequests(),
+                projection.freshReadLocalHits(),
+                projection.freshReadRefreshes(),
+                projection.freshReadRemoteStale(),
+                projection.freshReadRemoteMisses()
+        );
     }
 
     @Override
@@ -88,6 +120,32 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     }
 
     @Override
+    public void enterAsync(
+            long playerId,
+            String sceneId,
+            int chunkX,
+            int chunkY,
+            Consumer<ScenePlacement> callback,
+            Consumer<Throwable> failure
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        Objects.requireNonNull(failure, "failure");
+        delegate.enterAsync(playerId, sceneId, chunkX, chunkY, placement -> {
+            profiles.enter(playerId, placement.sceneId());
+            if (domainEvents != null) {
+                domainEvents.enter(playerId);
+            }
+            if (allianceEvents != null) {
+                allianceEvents.enter(playerId);
+            }
+            if (friendEvents != null) {
+                friendEvents.enter(playerId);
+            }
+            callback.accept(placement);
+        }, failure);
+    }
+
+    @Override
     public boolean leave(long playerId, String sceneId) {
         boolean left = delegate.leave(playerId, sceneId);
         if (left) {
@@ -103,6 +161,49 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
             }
         }
         return left;
+    }
+
+    @Override
+    public void leaveAsync(
+            long playerId,
+            String sceneId,
+            Consumer<Boolean> callback,
+            Consumer<Throwable> failure
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        Objects.requireNonNull(failure, "failure");
+        delegate.leaveAsync(playerId, sceneId, left -> {
+            if (left) {
+                profiles.leave(playerId, sceneId);
+                if (domainEvents != null) {
+                    domainEvents.leave(playerId);
+                }
+                if (allianceEvents != null) {
+                    allianceEvents.leave(playerId);
+                }
+                if (friendEvents != null) {
+                    friendEvents.leave(playerId);
+                }
+            }
+            callback.accept(left);
+        }, failure);
+    }
+
+    @Override
+    public SceneMoveOutcome move(long playerId, String sceneId, int chunkX, int chunkY) {
+        return delegate.move(playerId, sceneId, chunkX, chunkY);
+    }
+
+    @Override
+    public void moveAsync(
+            long playerId,
+            String sceneId,
+            int chunkX,
+            int chunkY,
+            Consumer<SceneMoveOutcome> callback,
+            Consumer<Throwable> failure
+    ) {
+        delegate.moveAsync(playerId, sceneId, chunkX, chunkY, callback, failure);
     }
 
     public SceneProfileAwarenessAgent profiles() {

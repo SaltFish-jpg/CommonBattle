@@ -12,6 +12,7 @@ import com.commonbattle.game.battle.BattleSettlementStatus;
 import com.commonbattle.game.battle.BattleStageProgressSnapshot;
 import com.commonbattle.game.battle.PlayerBattleSnapshot;
 import com.commonbattle.game.growth.GrowthSnapshot;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.shop.PlayerShopSnapshot;
 import com.commonbattle.game.task.PlayerTasksSnapshot;
 import com.commonbattle.game.task.TaskProgressSnapshot;
@@ -74,6 +75,7 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
         dto.battleStages = stageEntries(snapshot.battle().stages());
         dto.tasks = taskEntries(snapshot.tasks().progress());
         dto.achievements = achievementEntries(snapshot.achievements().progress());
+        dto.commandSequences = commandSequenceEntries(snapshot.commandSequencer().watermarks());
         return dto;
     }
 
@@ -88,6 +90,8 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
                 new PlayerBattleSnapshot(settlementMap(dto.battleSettlements), stageMap(dto.battleStages)),
                 new PlayerTasksSnapshot(taskMap(dto.tasks)),
                 new PlayerAchievementsSnapshot(achievementMap(dto.achievements)),
+                new PlayerCommandSequencerSnapshot(dto.playerId,
+                        commandSequenceWatermarks(dto.playerId, dto.commandSequences)),
                 dto.eventRevision,
                 dto.revision,
                 instant(dto.savedAtMillis)
@@ -177,6 +181,37 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
             values.put(entry.key, new AchievementProgressSnapshot(entry.value, entry.claimed));
         }
         return values;
+    }
+
+    private List<CommandSequenceDto> commandSequenceEntries(
+            List<PlayerCommandSequencerSnapshot.Watermark> watermarks
+    ) {
+        return watermarks.stream()
+                .sorted(Comparator
+                        .comparing(PlayerCommandSequencerSnapshot.Watermark::sessionId)
+                        .thenComparingLong(PlayerCommandSequencerSnapshot.Watermark::sessionEpoch))
+                .map(watermark -> {
+                    CommandSequenceDto dto = new CommandSequenceDto();
+                    dto.sessionId = watermark.sessionId();
+                    dto.sessionEpoch = watermark.sessionEpoch();
+                    dto.lastSequence = watermark.lastSequence();
+                    return dto;
+                })
+                .toList();
+    }
+
+    private List<PlayerCommandSequencerSnapshot.Watermark> commandSequenceWatermarks(
+            long playerId,
+            List<CommandSequenceDto> entries
+    ) {
+        return list(entries).stream()
+                .map(entry -> new PlayerCommandSequencerSnapshot.Watermark(
+                        playerId,
+                        entry.sessionId,
+                        entry.sessionEpoch,
+                        entry.lastSequence
+                ))
+                .toList();
     }
 
     private List<BattleSettlementDto> settlementEntries(Map<String, BattleSettlementSnapshot> values) {
@@ -300,6 +335,7 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
         public List<BattleStageDto> battleStages = new ArrayList<>();
         public List<ProgressDto> tasks = new ArrayList<>();
         public List<ProgressDto> achievements = new ArrayList<>();
+        public List<CommandSequenceDto> commandSequences = new ArrayList<>();
     }
 
     public static final class IntEntryDto {
@@ -341,5 +377,11 @@ public final class ProtostuffPlayerStateSnapshotSerializer implements PlayerStat
         public int bestStars;
         public long firstClearedAtMillis;
         public long updatedAtMillis;
+    }
+
+    public static final class CommandSequenceDto {
+        public String sessionId = "";
+        public long sessionEpoch;
+        public long lastSequence;
     }
 }

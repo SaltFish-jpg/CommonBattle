@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.Clock;
 import java.time.ZoneOffset;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,11 +37,12 @@ class SmallSceneAgentMigrationAdapterTest {
         SmallSceneAgentMigrationStatePacker packer =
                 new SmallSceneAgentMigrationStatePacker(fixture.scenes, serializer);
 
-        AgentMigrationSnapshot migration = packer.pack(
+        AgentMigrationSnapshot migration = packInSceneMailbox(
+                fixture,
+                packer,
                 AgentIdentity.scene("room-1"),
                 new AgentLocation(ServiceId.of(ServiceKind.SCENE, "r1", "scene-2"),
-                        new ActorRef("scene:scene-2:room-1")),
-                null
+                        new ActorRef("scene:scene-2:room-1"))
         );
         SmallSceneAgentSnapshot snapshot = serializer.deserialize(migration.stateBytes());
 
@@ -80,11 +82,12 @@ class SmallSceneAgentMigrationAdapterTest {
         fixture.scenes.enter(10001L, "room-1", 0, 0);
         SmallSceneAgentMigrationStatePacker packer =
                 new SmallSceneAgentMigrationStatePacker(fixture.scenes, serializer);
-        AgentMigrationSnapshot snapshot = packer.pack(
+        AgentMigrationSnapshot snapshot = packInSceneMailbox(
+                fixture,
+                packer,
                 AgentIdentity.scene("room-1"),
                 new AgentLocation(ServiceId.of(ServiceKind.SCENE, "r1", "scene-2"),
-                        new ActorRef("scene:scene-2:room-1")),
-                null
+                        new ActorRef("scene:scene-2:room-1"))
         );
         AgentMigrationTask task = new AgentMigrationTask(
                 "migration-scene-1",
@@ -118,5 +121,17 @@ class SmallSceneAgentMigrationAdapterTest {
             serviceId = ServiceId.of(ServiceKind.SCENE, "r1", node);
             scenes = new MultiSmallSceneService(actors, serviceId, new ServiceEndpoint("127.0.0.1", 9100), 10);
         }
+    }
+
+    private static AgentMigrationSnapshot packInSceneMailbox(
+            Fixture fixture,
+            SmallSceneAgentMigrationStatePacker packer,
+            AgentIdentity identity,
+            AgentLocation target
+    ) {
+        AtomicReference<AgentMigrationSnapshot> snapshot = new AtomicReference<>();
+        fixture.actors.send(new ActorRef(fixture.scenes.actorId(identity.key())),
+                context -> snapshot.set(packer.pack(identity, target, context)));
+        return snapshot.get();
     }
 }

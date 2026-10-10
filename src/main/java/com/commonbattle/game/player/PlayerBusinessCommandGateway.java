@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 玩家业务命令统一入口。
  * 本服玩家命令进入本地邮箱；远端玩家命令按 Agent owner 转发到目标 Game 服，调用方始终收到统一响应信封。
  */
-public final class PlayerBusinessCommandGateway implements AutoCloseable {
+public final class PlayerBusinessCommandGateway implements PlayerBusinessCommandGatewayView, AutoCloseable {
     public static final Duration DEFAULT_RESPONSE_TIMEOUT = Duration.ofSeconds(5);
 
     private final PlayerCommandDispatcher dispatcher;
@@ -32,6 +32,7 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
     private final Duration responseTimeout;
     private final ScheduledExecutorService timeoutScheduler;
     private final boolean ownsTimeoutScheduler;
+    private final PlayerBusinessCommandGatewayMetrics metrics = new PlayerBusinessCommandGatewayMetrics();
 
     public PlayerBusinessCommandGateway(
             PlayerCommandDispatcher dispatcher,
@@ -172,28 +173,58 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
             PlayerCommandResult result,
             PlayerBusinessResponseCallback callback
     ) {
+        metrics.remoteForward();
         AgentLocation location = result.route()
                 .flatMap(route -> route.location())
                 .orElseThrow(() -> new IllegalStateException("remote player command has no target location"));
-        rpc.call(
-                RpcRequest.toService(
-                        location.serviceId(),
-                        PlayerBusinessRpcOperations.DISPATCH,
-                        command,
-                        PlayerBusinessResponse.class
-                ),
-                new RpcCallback<>() {
-                    @Override
-                    public void success(PlayerBusinessResponse response) {
-                        callback.completed(response);
-                    }
+        AtomicBoolean completed = new AtomicBoolean();
+        ScheduledFuture<?> timeoutFuture = scheduleRemoteForwardTimeout(command, callback, completed);
+        try {
+            rpc.call(
+                    RpcRequest.toService(
+                            location.serviceId(),
+                            PlayerBusinessRpcOperations.DISPATCH,
+                            command,
+                            PlayerBusinessResponse.class
+                    ),
+                    new RpcCallback<>() {
+                        @Override
+                        public void success(PlayerBusinessResponse response) {
+                            completeRemoteForward(
+                                    completed,
+                                    timeoutFuture,
+                                    metrics::remoteForwardSuccessResponse,
+                                    metrics::lateRemoteForwardResponse,
+                                    () -> callback.completed(response)
+                            );
+                        }
 
-                    @Override
-                    public void failure(Throwable error) {
-                        callback.completed(PlayerBusinessResponse.failure(command, error));
+                        @Override
+                        public void failure(Throwable error) {
+                            completeRemoteForward(
+                                    completed,
+                                    timeoutFuture,
+                                    metrics::remoteForwardFailureResponse,
+                                    metrics::lateRemoteForwardResponse,
+                                    () -> callback.completed(PlayerBusinessResponse.failure(command, error))
+                            );
+                        }
                     }
-                }
-        );
+            );
+        } catch (RuntimeException e) {
+            completeRemoteForward(
+                    completed,
+                    timeoutFuture,
+                    metrics::remoteForwardFailureResponse,
+                    metrics::lateRemoteForwardResponse,
+                    () -> callback.completed(PlayerBusinessResponse.failure(command, e))
+            );
+        }
+    }
+
+    @Override
+    public PlayerBusinessCommandGatewayStats commandGatewayStats() {
+        return metrics.snapshot();
     }
 
     @Override
@@ -209,6 +240,42 @@ public final class PlayerBusinessCommandGateway implements AutoCloseable {
                 responseTimeout.toMillis(),
                 TimeUnit.MILLISECONDS
         );
+    }
+
+    private ScheduledFuture<?> scheduleRemoteForwardTimeout(
+            PlayerCommand command,
+            PlayerBusinessResponseCallback callback,
+            AtomicBoolean completed
+    ) {
+        return timeoutScheduler.schedule(
+                () -> {
+                    if (completed.compareAndSet(false, true)) {
+                        metrics.remoteForwardTimedOutResponse();
+                        callback.completed(PlayerBusinessResponse.failure(
+                                command,
+                                new PlayerBusinessResponseTimeoutException(command, responseTimeout)
+                        ));
+                    }
+                },
+                responseTimeout.toMillis(),
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    private static void completeRemoteForward(
+            AtomicBoolean completed,
+            ScheduledFuture<?> timeoutFuture,
+            Runnable completedMetric,
+            Runnable lateMetric,
+            Runnable action
+    ) {
+        if (!completed.compareAndSet(false, true)) {
+            lateMetric.run();
+            return;
+        }
+        completedMetric.run();
+        cancel(timeoutFuture);
+        action.run();
     }
 
     private static void cancel(ScheduledFuture<?> future) {

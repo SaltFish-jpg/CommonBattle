@@ -1,10 +1,20 @@
 package com.commonbattle.game.player;
 
+import com.commonbattle.battle.log.BattleLogEntry;
 import com.commonbattle.cluster.protocol.EncodedPayload;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.protocol.PayloadEncoding;
+import com.commonbattle.game.bag.BagChange;
+import com.commonbattle.game.bag.BagResult;
+import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.battle.BattleSettlementStatus;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
 import com.commonbattle.game.session.PlayerCommand;
 import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -76,6 +86,19 @@ class PlayerBusinessCommandPayloadCodecsTest {
         UseExpItemsCommand use = assertInstanceOf(UseExpItemsCommand.class, decoded);
         assertEquals(PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS, use.operation());
         assertEquals(command, use);
+    }
+
+    @Test
+    void encodesAndDecodesConsumeBagItemCommand() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ConsumeBagItemCommand command = new ConsumeBagItemCommand("stamina_potion", 2);
+
+        EncodedPayload encoded = registry.encode(command);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        ConsumeBagItemCommand consume = assertInstanceOf(ConsumeBagItemCommand.class, decoded);
+        assertEquals(PlayerBusinessOperations.BAG_CONSUME_ITEM, consume.operation());
+        assertEquals(command, consume);
     }
 
     @Test
@@ -217,5 +240,66 @@ class PlayerBusinessCommandPayloadCodecsTest {
         assertEquals("stock not enough", envelope.message());
         assertEquals(250, envelope.retryAfterMillis());
         assertEquals(null, envelope.payload());
+    }
+
+    @Test
+    void encodesAndDecodesBusinessResponseEnvelopeWithShopResultPayload() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ShopPurchaseResult result = new ShopPurchaseResult(
+                ShopPurchaseStatus.SUCCESS,
+                "growth_pack",
+                1,
+                new BagResult(List.of(new BagChange("gold", 100, 70))),
+                new BagResult(List.of(new BagChange("exp_potion", 0, 2))),
+                3,
+                1,
+                false
+        );
+        PlayerBusinessResponse response = new PlayerBusinessResponse(
+                10001L,
+                "session-1",
+                1,
+                11,
+                PlayerBusinessOperations.SHOP_BUY,
+                PlayerBusinessResponseStatus.SUCCESS,
+                PlayerBusinessResponse.OK,
+                "",
+                result
+        );
+
+        EncodedPayload encoded = registry.encode(response);
+        PlayerBusinessResponse decoded = (PlayerBusinessResponse) registry.decode(
+                encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        assertEquals(PayloadEncoding.PROTOBUF, encoded.codecName());
+        assertEquals(result, decoded.payload());
+    }
+
+    @Test
+    void encodesAndDecodesBattleSettlementResultPayload() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        BattleSettlementResult result = new BattleSettlementResult(
+                "settle-1",
+                "forest-1",
+                BattleSettlementStatus.VICTORY,
+                3,
+                90,
+                0,
+                new BagResult(List.of(new BagChange("gold", 10, 40))),
+                "kill-3",
+                1,
+                3,
+                true,
+                1,
+                List.of(new BattleLogEntry(1, Instant.parse("2026-09-01T00:00:00Z"), "round", "hit")),
+                false,
+                false
+        );
+
+        EncodedPayload encoded = registry.encode(result);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        assertEquals(PayloadEncoding.PROTOBUF, encoded.codecName());
+        assertEquals(result, decoded);
     }
 }

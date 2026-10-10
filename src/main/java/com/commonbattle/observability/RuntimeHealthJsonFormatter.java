@@ -39,6 +39,8 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "businessAgentMessages", businessAgentMessages(snapshot)).append(',');
         object(json, "businessAgentRpcEndpoints", businessAgentRpcEndpoints(snapshot)).append(',');
         object(json, "commands", commands(snapshot)).append(',');
+        object(json, "businessCommandCatalogs", businessCommandCatalogs(snapshot)).append(',');
+        object(json, "businessCommandGateways", businessCommandGateways(snapshot)).append(',');
         object(json, "businessResponses", businessResponses(snapshot)).append(',');
         object(json, "playerOutboundDeliveries", playerOutboundDeliveries(snapshot)).append(',');
         object(json, "playerGateways", playerGateways(snapshot)).append(',');
@@ -73,6 +75,8 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "chatRuntimes", chatRuntimes(snapshot)).append(',');
         object(json, "sceneRuntimes", sceneRuntimes(snapshot)).append(',');
         object(json, "shopRuntimes", shopRuntimes(snapshot)).append(',');
+        object(json, "eventGatedCommandAudits", eventGatedCommandAudits(snapshot)).append(',');
+        object(json, "bagChangeAudits", bagChangeAudits(snapshot)).append(',');
         object(json, "commandAudits", commandAudits(snapshot));
         json.append('}');
         return json.toString();
@@ -341,6 +345,33 @@ public final class RuntimeHealthJsonFormatter {
         return json;
     }
 
+    private static StringBuilder businessCommandGateways(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        PlayerBusinessCommandGatewayHealthStats stats = snapshot.businessCommandGateways();
+        json.append('{');
+        number(json, "gatewayCount", stats.gatewayCount()).append(',');
+        number(json, "remoteForwards", stats.remoteForwards()).append(',');
+        number(json, "remoteForwardSuccessResponses", stats.remoteForwardSuccessResponses()).append(',');
+        number(json, "remoteForwardFailureResponses", stats.remoteForwardFailureResponses()).append(',');
+        number(json, "remoteForwardTimedOutResponses", stats.remoteForwardTimedOutResponses()).append(',');
+        number(json, "lateRemoteForwardResponses", stats.lateRemoteForwardResponses());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder businessCommandCatalogs(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        PlayerBusinessCommandCatalogHealthStats stats = snapshot.businessCommandCatalogs();
+        json.append('{');
+        number(json, "viewCount", stats.viewCount()).append(',');
+        number(json, "descriptorCount", stats.descriptorCount()).append(',');
+        number(json, "operationCount", stats.operationCount()).append(',');
+        number(json, "commandTypeCount", stats.commandTypeCount()).append(',');
+        object(json, "descriptorsByDomain", stringIntegerMap(stats.descriptorsByDomain()));
+        json.append('}');
+        return json;
+    }
+
     private static StringBuilder businessResponses(RuntimeHealthSnapshot snapshot) {
         StringBuilder json = new StringBuilder();
         json.append('{');
@@ -372,14 +403,18 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "startedPurchases", snapshot.asyncShopPurchases().startedPurchases()).append(',');
         number(json, "immediatePurchases", snapshot.asyncShopPurchases().immediatePurchases()).append(',');
         number(json, "stockReservations", snapshot.asyncShopPurchases().stockReservations()).append(',');
+        number(json, "currentPendingCommands", snapshot.asyncShopPurchases().currentPendingCommands()).append(',');
         number(json, "reservedCallbacks", snapshot.asyncShopPurchases().reservedCallbacks()).append(',');
         number(json, "outOfStockCallbacks", snapshot.asyncShopPurchases().outOfStockCallbacks()).append(',');
         number(json, "rpcFailures", snapshot.asyncShopPurchases().rpcFailures()).append(',');
         number(json, "lateCallbacks", snapshot.asyncShopPurchases().lateCallbacks()).append(',');
         number(json, "completedPurchases", snapshot.asyncShopPurchases().completedPurchases()).append(',');
         number(json, "rejectedPurchases", snapshot.asyncShopPurchases().rejectedPurchases()).append(',');
+        number(json, "abandonedPendingCommands", snapshot.asyncShopPurchases().abandonedPendingCommands()).append(',');
         number(json, "releasedReservations", snapshot.asyncShopPurchases().releasedReservations()).append(',');
-        number(json, "releaseFailures", snapshot.asyncShopPurchases().releaseFailures());
+        number(json, "releaseFailures", snapshot.asyncShopPurchases().releaseFailures()).append(',');
+        number(json, "stockReservationCallbackGap", snapshot.asyncShopPurchases().stockReservationCallbackGap()).append(',');
+        number(json, "compensationAttempts", snapshot.asyncShopPurchases().compensationAttempts());
         json.append('}');
         return json;
     }
@@ -940,7 +975,36 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "projectionRepairRequests", snapshot.sceneRuntimes().projectionRepairRequests()).append(',');
         number(json, "projectionAppliedSnapshots", snapshot.sceneRuntimes().projectionAppliedSnapshots()).append(',');
         number(json, "projectionIgnoredSnapshots", snapshot.sceneRuntimes().projectionIgnoredSnapshots()).append(',');
-        number(json, "projectionStaleViews", snapshot.sceneRuntimes().projectionStaleViews());
+        number(json, "projectionStaleViews", snapshot.sceneRuntimes().projectionStaleViews()).append(',');
+        number(json, "projectionFreshReadRequests", snapshot.sceneRuntimes().projectionFreshReadRequests()).append(',');
+        number(json, "projectionFreshReadLocalHits", snapshot.sceneRuntimes().projectionFreshReadLocalHits()).append(',');
+        number(json, "projectionFreshReadRefreshes", snapshot.sceneRuntimes().projectionFreshReadRefreshes()).append(',');
+        number(json, "projectionFreshReadRemoteStale", snapshot.sceneRuntimes().projectionFreshReadRemoteStale())
+                .append(',');
+        number(json, "projectionFreshReadRemoteMisses", snapshot.sceneRuntimes().projectionFreshReadRemoteMisses())
+                .append(',');
+        object(json, "friendProjection", sceneProjection(snapshot.sceneRuntimes().friendProjection())).append(',');
+        object(json, "allianceProjection", sceneProjection(snapshot.sceneRuntimes().allianceProjection()));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder sceneProjection(com.commonbattle.game.scene.SceneProjectionStats stats) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "receivedEvents", stats.receivedEvents()).append(',');
+        number(json, "appliedEvents", stats.appliedEvents()).append(',');
+        number(json, "duplicateEvents", stats.duplicateEvents()).append(',');
+        number(json, "gapEvents", stats.gapEvents()).append(',');
+        number(json, "repairRequests", stats.repairRequests()).append(',');
+        number(json, "appliedSnapshots", stats.appliedSnapshots()).append(',');
+        number(json, "ignoredSnapshots", stats.ignoredSnapshots()).append(',');
+        number(json, "staleViews", stats.staleViews()).append(',');
+        number(json, "freshReadRequests", stats.freshReadRequests()).append(',');
+        number(json, "freshReadLocalHits", stats.freshReadLocalHits()).append(',');
+        number(json, "freshReadRefreshes", stats.freshReadRefreshes()).append(',');
+        number(json, "freshReadRemoteStale", stats.freshReadRemoteStale()).append(',');
+        number(json, "freshReadRemoteMisses", stats.freshReadRemoteMisses());
         json.append('}');
         return json;
     }
@@ -982,6 +1046,34 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "maxElapsedMillis", snapshot.commandAudits().maxElapsedMillis()).append(',');
         object(json, "configVersionCounts", numberMap(snapshot.commandAudits().configVersionCounts())).append(',');
         object(json, "resultCodeCounts", stringNumberMap(snapshot.commandAudits().resultCodeCounts()));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder eventGatedCommandAudits(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "auditCount", snapshot.eventGatedCommandAudits().auditCount()).append(',');
+        number(json, "retained", snapshot.eventGatedCommandAudits().retained()).append(',');
+        number(json, "recorded", snapshot.eventGatedCommandAudits().recorded()).append(',');
+        number(json, "submitted", snapshot.eventGatedCommandAudits().submitted()).append(',');
+        number(json, "completed", snapshot.eventGatedCommandAudits().completed()).append(',');
+        number(json, "failed", snapshot.eventGatedCommandAudits().failed()).append(',');
+        number(json, "dropped", snapshot.eventGatedCommandAudits().dropped());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder bagChangeAudits(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "auditCount", snapshot.bagChangeAudits().auditCount()).append(',');
+        number(json, "retained", snapshot.bagChangeAudits().retained()).append(',');
+        number(json, "recorded", snapshot.bagChangeAudits().recorded()).append(',');
+        number(json, "increased", snapshot.bagChangeAudits().increased()).append(',');
+        number(json, "decreased", snapshot.bagChangeAudits().decreased()).append(',');
+        number(json, "unchanged", snapshot.bagChangeAudits().unchanged()).append(',');
+        number(json, "dropped", snapshot.bagChangeAudits().dropped());
         json.append('}');
         return json;
     }

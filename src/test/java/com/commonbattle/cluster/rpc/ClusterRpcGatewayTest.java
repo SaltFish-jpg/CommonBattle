@@ -15,13 +15,19 @@ import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.example.cross.AgentStatus;
+import com.commonbattle.example.cross.CombatDamageRequest;
+import com.commonbattle.example.cross.CombatDamageResult;
 import com.commonbattle.example.cross.CrossServerPlayerAgent;
 import com.commonbattle.example.cross.EnterSceneFailureCode;
 import com.commonbattle.example.cross.EnterSceneRequest;
 import com.commonbattle.example.cross.EnterSceneResult;
 import com.commonbattle.example.cross.LeaveSceneRequest;
 import com.commonbattle.example.cross.LeaveSceneResult;
+import com.commonbattle.example.cross.MoveSceneRequest;
+import com.commonbattle.example.cross.MoveSceneResult;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.example.cross.scene.InMemorySceneBroadcastSink;
+import com.commonbattle.example.cross.scene.LargeSceneShardService;
 import com.commonbattle.example.cross.scene.ProfileAwareSceneService;
 import com.commonbattle.example.cross.scene.MultiSmallSceneService;
 import com.commonbattle.example.cross.scene.SceneEnterTargetSelector;
@@ -178,7 +184,12 @@ class ClusterRpcGatewayTest {
             ClusterRpcGateway sceneGateway = new ClusterRpcGateway(sceneService.descriptor(), sceneDirectory, topology, transport);
             sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> {
                 EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, request.payload());
-                ScenePlacement placement = sceneService.enter(payload.playerId(), payload.sceneId(), 0, 0);
+                ScenePlacement placement = sceneService.enter(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
                 responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), 7001L));
             });
             sceneGateway.handle(SceneOperations.LEAVE, (request, responder) -> {
@@ -344,6 +355,341 @@ class ClusterRpcGatewayTest {
         ), callback);
 
         assertEquals("world-1", callback.response.get());
+    }
+
+    @Test
+    void sceneMoveRpcTransfersPlayerBetweenLargeSceneShards() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService sceneService = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9002),
+                    "world-1",
+                    8,
+                    4,
+                    java.time.Clock.systemUTC()
+            );
+            ScenePlacement entered = sceneService.enter(10001L, "world-1", 0, 0);
+            ScenePlacement target = sceneService.place("world-1", 4, 0);
+            registry.register(game);
+            registry.register(sceneService.descriptor());
+            ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+            gameDirectory.watch(ServiceKind.SCENE);
+            ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+            sceneDirectory.watch(ServiceKind.GAME);
+            ClusterRpcGateway sceneGateway = new ClusterRpcGateway(
+                    sceneService.descriptor(),
+                    sceneDirectory,
+                    topology,
+                    transport
+            );
+            sceneGateway.handle(SceneOperations.MOVE, (request, responder) -> {
+                MoveSceneRequest payload = assertInstanceOf(MoveSceneRequest.class, request.payload());
+                com.commonbattle.example.cross.scene.SceneMoveOutcome outcome = sceneService.move(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                responder.success(new MoveSceneResult(
+                        payload.playerId(),
+                        outcome.sceneId(),
+                        outcome.chunkX(),
+                        outcome.chunkY(),
+                        outcome.previousShardIndex(),
+                        outcome.shardIndex(),
+                        outcome.moved(),
+                        outcome.aoi().visibleEnter(),
+                        outcome.aoi().visibleLeave(),
+                        outcome.aoi().observerEnter(),
+                        outcome.aoi().observerLeave()
+                ));
+            });
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+            MoveCallback callback = new MoveCallback();
+
+            gameGateway.call(new RpcRequest<>(
+                    ServiceKind.SCENE.name(),
+                    SceneOperations.MOVE,
+                    new MoveSceneRequest(10001L, "world-1", 4, 0),
+                    MoveSceneResult.class
+            ), callback);
+
+            MoveSceneResult response = callback.response.get();
+            assertEquals(true, response.moved());
+            assertEquals(entered.shardIndex(), response.previousShardIndex());
+            assertEquals(target.shardIndex(), response.shardIndex());
+            assertEquals(Set.of(), sceneService.shardPlayers(entered.shardIndex()));
+            assertEquals(Set.of(10001L), sceneService.shardPlayers(target.shardIndex()));
+        }
+    }
+
+    @Test
+    void playerAgentSceneMoveRoundTripReturnsThroughMailboxAndUpdatesChunk() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        RecordingExecutor gameExecutor = new RecordingExecutor();
+        RecordingExecutor sceneExecutor = new RecordingExecutor();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        try (ActorSystem gameActors = new ActorSystem(gameExecutor, 1);
+             ActorSystem sceneActors = new ActorSystem(sceneExecutor, 1)) {
+            LargeSceneShardService sceneService = LargeSceneShardService.create(
+                    sceneActors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9002),
+                    "world-1",
+                    8,
+                    4,
+                    java.time.Clock.systemUTC()
+            );
+            registry.register(game);
+            registry.register(sceneService.descriptor());
+            ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+            gameDirectory.watch(ServiceKind.SCENE);
+            ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+            sceneDirectory.watch(ServiceKind.GAME);
+            ClusterRpcGateway sceneGateway = new ClusterRpcGateway(
+                    sceneService.descriptor(),
+                    sceneDirectory,
+                    topology,
+                    transport
+            );
+            sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> {
+                EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, request.payload());
+                ScenePlacement placement = sceneService.enter(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), placement.shardIndex()));
+            });
+            sceneGateway.handle(SceneOperations.MOVE, (request, responder) -> {
+                MoveSceneRequest payload = assertInstanceOf(MoveSceneRequest.class, request.payload());
+                com.commonbattle.example.cross.scene.SceneMoveOutcome outcome = sceneService.move(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                responder.success(new MoveSceneResult(
+                        payload.playerId(),
+                        outcome.sceneId(),
+                        outcome.chunkX(),
+                        outcome.chunkY(),
+                        outcome.previousShardIndex(),
+                        outcome.shardIndex(),
+                        outcome.moved(),
+                        outcome.aoi().visibleEnter(),
+                        outcome.aoi().visibleLeave(),
+                        outcome.aoi().observerEnter(),
+                        outcome.aoi().observerLeave()
+                ));
+            });
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+            CrossServerPlayerAgent agent = new CrossServerPlayerAgent(gameActors, gameGateway, 10001L);
+            agent.enterScene("world-1");
+            gameExecutor.runNext();
+            gameExecutor.runNext();
+            assertEquals(AgentStatus.IN_SCENE, agent.status());
+
+            agent.moveScene(4, 0);
+            gameExecutor.runNext();
+
+            assertEquals(0, agent.sceneChunkX());
+            assertEquals(null, agent.lastSceneMove());
+
+            gameExecutor.runNext();
+
+            assertEquals(AgentStatus.IN_SCENE, agent.status());
+            assertEquals(4, agent.sceneChunkX());
+            assertEquals(0, agent.sceneChunkY());
+            assertEquals(true, agent.lastSceneMove().moved());
+            assertEquals(Set.of(10001L), sceneService.shardPlayers(agent.lastSceneMove().shardIndex()));
+        }
+    }
+
+    @Test
+    void sceneCombatDamageRpcAppliesOnSceneShardAndBroadcastsToAoi() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService sceneService = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9002),
+                    "world-1",
+                    8,
+                    4,
+                    java.time.Clock.systemUTC(),
+                    broadcasts
+            );
+            sceneService.enter(10001L, "world-1", 0, 0);
+            sceneService.enter(20002L, "world-1", 1, 0);
+            sceneService.enter(30003L, "world-1", 2, 0);
+            sceneService.registerCombatant(10001L, 100);
+            sceneService.registerCombatant(20002L, 80);
+            registry.register(game);
+            registry.register(sceneService.descriptor());
+            ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+            gameDirectory.watch(ServiceKind.SCENE);
+            ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+            sceneDirectory.watch(ServiceKind.GAME);
+            ClusterRpcGateway sceneGateway = new ClusterRpcGateway(
+                    sceneService.descriptor(),
+                    sceneDirectory,
+                    topology,
+                    transport
+            );
+            sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> {
+                EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, request.payload());
+                ScenePlacement placement = sceneService.enter(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), placement.shardIndex()));
+            });
+            sceneGateway.handle(SceneOperations.COMBAT_DAMAGE, (request, responder) -> {
+                CombatDamageRequest payload = assertInstanceOf(CombatDamageRequest.class, request.payload());
+                com.commonbattle.example.cross.scene.SceneCombatDamageOutcome outcome = sceneService.applyDamage(
+                        payload.attackerId(),
+                        payload.targetId(),
+                        payload.damage()
+                );
+                responder.success(new CombatDamageResult(
+                        outcome.sceneId(),
+                        outcome.attackerId(),
+                        outcome.targetId(),
+                        outcome.shardIndex(),
+                        outcome.damage(),
+                        outcome.hpBefore(),
+                        outcome.hpAfter(),
+                        outcome.applied()
+                ));
+            });
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+            CombatDamageCallback callback = new CombatDamageCallback();
+
+            gameGateway.call(new RpcRequest<>(
+                    ServiceKind.SCENE.name(),
+                    SceneOperations.COMBAT_DAMAGE,
+                    new CombatDamageRequest("world-1", 10001L, 20002L, 35),
+                    CombatDamageResult.class
+            ), callback);
+
+            CombatDamageResult response = callback.response.get();
+            assertEquals(true, response.applied());
+            assertEquals(80, response.hpBefore());
+            assertEquals(45, response.hpAfter());
+            assertEquals(45, sceneService.hitPoints(20002L).orElseThrow());
+            assertEquals(Set.of(10001L, 20002L, 30003L), broadcasts.envelopes().getLast().recipients());
+        }
+    }
+
+    @Test
+    void playerAgentSceneCombatDamageRoundTripReturnsThroughMailbox() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.SCENE)
+                .allow(ServiceKind.SCENE, ServiceKind.GAME);
+        RecordingExecutor gameExecutor = new RecordingExecutor();
+        RecordingExecutor sceneExecutor = new RecordingExecutor();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem gameActors = new ActorSystem(gameExecutor, 1);
+             ActorSystem sceneActors = new ActorSystem(sceneExecutor, 1)) {
+            LargeSceneShardService sceneService = LargeSceneShardService.create(
+                    sceneActors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9002),
+                    "world-1",
+                    8,
+                    4,
+                    java.time.Clock.systemUTC(),
+                    broadcasts
+            );
+            sceneService.enter(10001L, "world-1", 0, 0);
+            sceneService.enter(20002L, "world-1", 1, 0);
+            sceneService.registerCombatant(10001L, 100);
+            sceneService.registerCombatant(20002L, 80);
+            registry.register(game);
+            registry.register(sceneService.descriptor());
+            ClusterDirectory gameDirectory = new ClusterDirectory(registry);
+            gameDirectory.watch(ServiceKind.SCENE);
+            ClusterDirectory sceneDirectory = new ClusterDirectory(registry);
+            sceneDirectory.watch(ServiceKind.GAME);
+            ClusterRpcGateway sceneGateway = new ClusterRpcGateway(
+                    sceneService.descriptor(),
+                    sceneDirectory,
+                    topology,
+                    transport
+            );
+            sceneGateway.handle(SceneOperations.ENTER, (request, responder) -> {
+                EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, request.payload());
+                ScenePlacement placement = sceneService.enter(
+                        payload.playerId(),
+                        payload.sceneId(),
+                        payload.chunkX(),
+                        payload.chunkY()
+                );
+                responder.success(new EnterSceneResult(payload.playerId(), placement.sceneId(), placement.shardIndex()));
+            });
+            sceneGateway.handle(SceneOperations.COMBAT_DAMAGE, (request, responder) -> {
+                CombatDamageRequest payload = assertInstanceOf(CombatDamageRequest.class, request.payload());
+                com.commonbattle.example.cross.scene.SceneCombatDamageOutcome outcome = sceneService.applyDamage(
+                        payload.attackerId(),
+                        payload.targetId(),
+                        payload.damage()
+                );
+                responder.success(new CombatDamageResult(
+                        outcome.sceneId(),
+                        outcome.attackerId(),
+                        outcome.targetId(),
+                        outcome.shardIndex(),
+                        outcome.damage(),
+                        outcome.hpBefore(),
+                        outcome.hpAfter(),
+                        outcome.applied()
+                ));
+            });
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+            CrossServerPlayerAgent agent = new CrossServerPlayerAgent(gameActors, gameGateway, 10001L);
+            agent.enterScene("world-1");
+            gameExecutor.runNext();
+            gameExecutor.runNext();
+            assertEquals(AgentStatus.IN_SCENE, agent.status());
+            agent.attackSceneTarget(20002L, 35);
+            gameExecutor.runNext();
+
+            assertEquals(null, agent.lastCombatDamage());
+
+            gameExecutor.runNext();
+
+            assertEquals(AgentStatus.IN_SCENE, agent.status());
+            assertEquals(45, agent.lastCombatDamage().hpAfter());
+            assertEquals(45, sceneService.hitPoints(20002L).orElseThrow());
+        }
     }
 
     @Test
@@ -905,6 +1251,34 @@ class ClusterRpcGatewayTest {
         @Override
         public void failure(Throwable error) {
             this.error.set(error);
+        }
+    }
+
+    private static final class MoveCallback implements com.commonbattle.actor.rpc.RpcCallback<MoveSceneResult> {
+        private final AtomicReference<MoveSceneResult> response = new AtomicReference<>();
+
+        @Override
+        public void success(MoveSceneResult response) {
+            this.response.set(response);
+        }
+
+        @Override
+        public void failure(Throwable error) {
+            throw new AssertionError(error);
+        }
+    }
+
+    private static final class CombatDamageCallback implements com.commonbattle.actor.rpc.RpcCallback<CombatDamageResult> {
+        private final AtomicReference<CombatDamageResult> response = new AtomicReference<>();
+
+        @Override
+        public void success(CombatDamageResult response) {
+            this.response.set(response);
+        }
+
+        @Override
+        public void failure(Throwable error) {
+            throw new AssertionError(error);
         }
     }
 }

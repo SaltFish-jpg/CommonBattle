@@ -1,9 +1,11 @@
 package com.commonbattle.game.scene;
 
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.event.SubscriptionDecision;
+import com.commonbattle.game.player.event.BagChangedEvent;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainEventDelivery;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
@@ -28,6 +30,7 @@ public final class ScenePlayerDomainEventAgent {
     private OwnerEventInterestControl interests;
     private final Set<Long> onlinePlayers = new HashSet<>();
     private final Map<Long, Integer> stageClears = new HashMap<>();
+    private final Map<Long, Map<String, Integer>> bagItems = new HashMap<>();
 
     public ScenePlayerDomainEventAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, new PlayerDomainEventProcessor(), OwnerEventInterestControl.noop());
@@ -52,6 +55,7 @@ public final class ScenePlayerDomainEventAgent {
         this.processor = Objects.requireNonNull(processor, "processor");
         this.interests = Objects.requireNonNull(interests, "interests");
         this.processor.on(BattleStageClearedEvent.TYPE, this::onBattleStageCleared);
+        this.processor.on(BagChangedEvent.TYPE, this::onBagChanged);
     }
 
     public void attachInterests(OwnerEventInterestControl interests) {
@@ -70,6 +74,7 @@ public final class ScenePlayerDomainEventAgent {
         messages.tellLocal(self, ignored -> {
             if (onlinePlayers.remove(playerId)) {
                 stageClears.remove(playerId);
+                bagItems.remove(playerId);
                 interests.unwatchOwner(PlayerDomainVersionedEvent.ownerKey(playerId));
             }
         });
@@ -80,6 +85,7 @@ public final class ScenePlayerDomainEventAgent {
     }
 
     public void handlePlayerDomainEvent(PlayerDomainVersionedEvent event) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(event, "event");
         if (onlinePlayers.contains(event.playerId())) {
             SubscriptionDecision decision = processor.apply(event);
@@ -94,6 +100,7 @@ public final class ScenePlayerDomainEventAgent {
     }
 
     public void handleSnapshot(PlayerDomainProjectionSnapshot snapshot) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(snapshot, "snapshot");
         if (!onlinePlayers.contains(snapshot.playerId())) {
             return;
@@ -107,12 +114,26 @@ public final class ScenePlayerDomainEventAgent {
         } else {
             stageClears.remove(snapshot.playerId());
         }
+        if (snapshot.bagItemCounts().isEmpty()) {
+            bagItems.remove(snapshot.playerId());
+        } else {
+            bagItems.put(snapshot.playerId(), new HashMap<>(snapshot.bagItemCounts()));
+        }
         processor.repairOwner(snapshot.ownerKey(), snapshot.eventRevision());
     }
 
     public OptionalInt stageClears(long playerId) {
         Integer clears = stageClears.get(playerId);
         return clears == null ? OptionalInt.empty() : OptionalInt.of(clears);
+    }
+
+    public OptionalInt bagCount(long playerId, String itemId) {
+        Objects.requireNonNull(itemId, "itemId");
+        Map<String, Integer> counts = bagItems.get(playerId);
+        if (counts == null || !counts.containsKey(itemId)) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(counts.get(itemId));
     }
 
     public boolean stale(long playerId) {
@@ -131,5 +152,37 @@ public final class ScenePlayerDomainEventAgent {
         PlayerDomainVersionedEvent event = delivery.event();
         // 场景派生视图边界：事件 revision 通过 processor 去重后，才更新场景本地只读视图。
         stageClears.merge(event.playerId(), event.delta(), Integer::sum);
+    }
+
+    private void onBagChanged(PlayerDomainEventDelivery delivery) {
+        PlayerDomainVersionedEvent event = delivery.event();
+        Map<String, Integer> counts = bagItems.computeIfAbsent(event.playerId(), ignored -> new HashMap<>());
+        int changeCount = parseInt(event.attributes().get("changeCount"), 0);
+        for (int index = 0; index < changeCount; index++) {
+            String itemId = event.attributes().get("change." + index + ".itemId");
+            if (itemId == null || itemId.isBlank()) {
+                continue;
+            }
+            int after = parseInt(event.attributes().get("change." + index + ".after"), 0);
+            if (after <= 0) {
+                counts.remove(itemId);
+            } else {
+                counts.put(itemId, after);
+            }
+        }
+        if (counts.isEmpty()) {
+            bagItems.remove(event.playerId());
+        }
+    }
+
+    private static int parseInt(String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 }

@@ -92,11 +92,16 @@ final class ClusterDescriptors {
                     ChatOperations.LEAVE_ALLIANCE,
                     ChatOperations.SEND_ALLIANCE,
                     ChatOperations.SEND_DIRECT,
+                    ChatOperations.JOIN_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT,
                     BusinessAgentRpcOperations.DISPATCH
             );
             case SCENE -> Set.of(
                     SceneOperations.ENTER,
                     SceneOperations.LEAVE,
+                    SceneOperations.MOVE,
+                    SceneOperations.COMBAT_DAMAGE,
                     SceneOperations.MESSAGE,
                     BusinessAgentRpcOperations.DISPATCH
             );

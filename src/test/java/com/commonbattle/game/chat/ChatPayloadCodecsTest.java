@@ -1,6 +1,10 @@
 package com.commonbattle.game.chat;
 
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
+import com.commonbattle.game.social.AllianceMemberAction;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -47,6 +51,30 @@ class ChatPayloadCodecsTest {
                 roundTrip(registry, new AllianceChatSendRequest(900L, 10001L, "hello", 5)));
         assertEquals(new DirectChatSendRequest(10001L, 10002L, "hello", 5),
                 roundTrip(registry, new DirectChatSendRequest(10001L, 10002L, "hello", 5)));
+        assertEquals(new AllianceChatJoinAfterEventRequest(
+                        new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                        new AllianceChatJoinRequest(900L, 10001L)
+                ),
+                roundTrip(registry, new AllianceChatJoinAfterEventRequest(
+                        new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                        new AllianceChatJoinRequest(900L, 10001L)
+                )));
+        assertEquals(new AllianceChatSendAfterEventRequest(
+                        new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.LEAVE, 4),
+                        new AllianceChatSendRequest(900L, 10001L, "alliance", 6)
+                ),
+                roundTrip(registry, new AllianceChatSendAfterEventRequest(
+                        new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.LEAVE, 4),
+                        new AllianceChatSendRequest(900L, 10001L, "alliance", 6)
+                )));
+        assertEquals(new DirectChatSendAfterFriendEventRequest(
+                        new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                        new DirectChatSendRequest(10001L, 10002L, "direct", 7)
+                ),
+                roundTrip(registry, new DirectChatSendAfterFriendEventRequest(
+                        new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                        new DirectChatSendRequest(10001L, 10002L, "direct", 7)
+                )));
     }
 
     private static Object roundTrip(PayloadCodecRegistry registry, Object payload) {

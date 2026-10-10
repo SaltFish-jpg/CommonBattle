@@ -40,6 +40,16 @@ public final class PayloadCodecRegistry {
         protostuffSchemas.computeIfAbsent(javaType, RuntimeSchema::getSchema);
     }
 
+    public boolean hasProtobufCodec(Class<?> javaType) {
+        Objects.requireNonNull(javaType, "javaType");
+        return byJavaType.containsKey(javaType);
+    }
+
+    public boolean hasPayloadCodec(Class<?> javaType) {
+        Objects.requireNonNull(javaType, "javaType");
+        return byJavaType.containsKey(javaType) || protostuffByTypeName.containsKey(javaType.getName());
+    }
+
     public EncodedPayload encode(Object payload) {
         if (payload == null) {
             return new EncodedPayload(PayloadEncoding.NONE, NULL_TYPE, new byte[0]);

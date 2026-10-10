@@ -1,5 +1,8 @@
 package com.commonbattle.game.chat;
 
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.FriendChangedEvent;
+
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -59,6 +62,18 @@ public final class RoutedChatService implements ChatRuntimeView {
         channels.join(new ChatJoinRequest(ChatChannelIds.alliance(request.allianceId()), request.playerId(), request.allianceId()), callback);
     }
 
+    public void joinAllianceAfterChanged(
+            AllianceMemberChangedEvent event,
+            AllianceChatJoinRequest request,
+            Consumer<ChatJoinResult> callback
+    ) {
+        channels.joinAfterAllianceChanged(
+                event,
+                new ChatJoinRequest(ChatChannelIds.alliance(request.allianceId()), request.playerId(), request.allianceId()),
+                callback
+        );
+    }
+
     public void leaveAlliance(AllianceChatLeaveRequest request, Consumer<ChatLeaveResult> callback) {
         channels.leave(new ChatLeaveRequest(ChatChannelIds.alliance(request.allianceId()), request.playerId()), callback);
     }
@@ -72,8 +87,33 @@ public final class RoutedChatService implements ChatRuntimeView {
         ), callback);
     }
 
+    public void sendAllianceAfterChanged(
+            AllianceMemberChangedEvent event,
+            AllianceChatSendRequest request,
+            Consumer<ChatSendResult> callback
+    ) {
+        channels.sendAfterAllianceChanged(
+                event,
+                new ChatSendRequest(
+                        ChatChannelIds.alliance(request.allianceId()),
+                        request.senderId(),
+                        request.text(),
+                        request.requiredProfileRevision()
+                ),
+                callback
+        );
+    }
+
     public void sendDirect(DirectChatSendRequest request, Consumer<ChatSendResult> callback) {
         directSessions.send(request, callback);
+    }
+
+    public void sendDirectAfterFriendChanged(
+            FriendChangedEvent event,
+            DirectChatSendRequest request,
+            Consumer<ChatSendResult> callback
+    ) {
+        directSessions.sendAfterFriendChanged(event, request, callback);
     }
 
     public String worldChannelId(String worldId, long playerId) {

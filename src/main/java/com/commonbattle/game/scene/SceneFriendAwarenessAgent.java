@@ -1,5 +1,6 @@
 package com.commonbattle.game.scene;
 
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.OwnerEventInterestControl;
@@ -9,6 +10,7 @@ import com.commonbattle.game.social.FriendChangedEvent;
 import com.commonbattle.game.social.FriendOwnerKeyParser;
 import com.commonbattle.game.social.FriendRelationAction;
 import com.commonbattle.game.social.FriendSnapshot;
+import com.commonbattle.game.social.FriendSnapshotReader;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -25,6 +27,7 @@ import java.util.function.Consumer;
 public final class SceneFriendAwarenessAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
+    private final FriendSnapshotReader snapshotReader;
     private OwnerEventInterestControl interests;
     private final Set<Long> onlinePlayers = new HashSet<>();
     private final Map<Long, ScenePlayerFriendView> friends = new HashMap<>();
@@ -36,6 +39,11 @@ public final class SceneFriendAwarenessAgent {
     private long repairRequests;
     private long appliedSnapshots;
     private long ignoredSnapshots;
+    private long freshReadRequests;
+    private long freshReadLocalHits;
+    private long freshReadRefreshes;
+    private long freshReadRemoteStale;
+    private long freshReadRemoteMisses;
 
     public SceneFriendAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, OwnerEventInterestControl.noop());
@@ -46,9 +54,19 @@ public final class SceneFriendAwarenessAgent {
             ActorRef self,
             OwnerEventInterestControl interests
     ) {
+        this(messages, self, interests, ignored -> Optional.empty());
+    }
+
+    public SceneFriendAwarenessAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            OwnerEventInterestControl interests,
+            FriendSnapshotReader snapshotReader
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.interests = Objects.requireNonNull(interests, "interests");
+        this.snapshotReader = Objects.requireNonNull(snapshotReader, "snapshotReader");
     }
 
     public void attachInterests(OwnerEventInterestControl interests) {
@@ -93,7 +111,32 @@ public final class SceneFriendAwarenessAgent {
         });
     }
 
+    public void onFriendChangedAndReadFreshView(
+            FriendChangedEvent event,
+            Consumer<Optional<ScenePlayerFriendView>> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleFriendChanged(event);
+            callback.accept(readFreshFriendsOf(event.playerId(), event.revision()).view());
+        });
+    }
+
+    public void onFriendChangedAndReadFreshResult(
+            FriendChangedEvent event,
+            Consumer<SceneFriendReadResult> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleFriendChanged(event);
+            callback.accept(readFreshFriendsOf(event.playerId(), event.revision()));
+        });
+    }
+
     public synchronized void handleFriendChanged(FriendChangedEvent event) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(event, "event");
         apply(event);
     }
@@ -103,6 +146,7 @@ public final class SceneFriendAwarenessAgent {
     }
 
     public synchronized void handleSnapshot(FriendSnapshot snapshot) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(snapshot, "snapshot");
         if (!onlinePlayers.contains(snapshot.playerId())) {
             ignoredSnapshots++;
@@ -124,6 +168,45 @@ public final class SceneFriendAwarenessAgent {
 
     public synchronized Optional<ScenePlayerFriendView> friendsOf(long playerId) {
         return Optional.ofNullable(friends.get(playerId));
+    }
+
+    public synchronized Optional<ScenePlayerFriendView> freshFriendsOf(long playerId, long minimumRevision) {
+        ActorContext.requireCurrent(self);
+        SceneFriendReadResult result = readFreshFriendsOf(playerId, minimumRevision);
+        return result.fresh() ? result.view() : Optional.empty();
+    }
+
+    public synchronized SceneFriendReadResult readFreshFriendsOf(long playerId, long minimumRevision) {
+        ActorContext.requireCurrent(self);
+        if (minimumRevision < 0) {
+            throw new IllegalArgumentException("minimumRevision must not be negative");
+        }
+        freshReadRequests++;
+        Optional<ScenePlayerFriendView> local = friendsOf(playerId)
+                .filter(view -> !view.stale() && view.revision() >= minimumRevision);
+        if (local.isPresent()) {
+            freshReadLocalHits++;
+            return SceneFriendReadResult.of(local.orElseThrow(), SceneFriendReadStatus.LOCAL_HIT);
+        }
+        Optional<FriendSnapshot> snapshot = snapshotReader.find(playerId);
+        if (snapshot.isPresent() && snapshot.orElseThrow().revision() >= minimumRevision) {
+            handleSnapshot(snapshot.orElseThrow());
+            Optional<ScenePlayerFriendView> refreshed = friendsOf(playerId)
+                    .filter(view -> !view.stale() && view.revision() >= minimumRevision);
+            if (refreshed.isPresent()) {
+                freshReadRefreshes++;
+                return SceneFriendReadResult.of(refreshed.orElseThrow(), SceneFriendReadStatus.REFRESHED);
+            }
+            freshReadRemoteStale++;
+            return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_STALE);
+        }
+        if (snapshot.isPresent()) {
+            freshReadRemoteStale++;
+            return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_STALE);
+        } else {
+            freshReadRemoteMisses++;
+            return SceneFriendReadResult.empty(SceneFriendReadStatus.REMOTE_MISS);
+        }
     }
 
     public synchronized boolean stale(long playerId) {
@@ -149,7 +232,12 @@ public final class SceneFriendAwarenessAgent {
                 repairRequests,
                 appliedSnapshots,
                 ignoredSnapshots,
-                staleViews
+                staleViews,
+                freshReadRequests,
+                freshReadLocalHits,
+                freshReadRefreshes,
+                freshReadRemoteStale,
+                freshReadRemoteMisses
         );
     }
 

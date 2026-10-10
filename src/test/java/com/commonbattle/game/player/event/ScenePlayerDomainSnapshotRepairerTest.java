@@ -45,7 +45,7 @@ class ScenePlayerDomainSnapshotRepairerTest {
         repository.save(10001L, state(10001L, 5, Map.of(
                 "forest-1", 2,
                 "cave-1", 1
-        )));
+        ), Map.of("gold", 90, "gem", 5)));
         scene.enter(10001L);
         executor.runNext();
         ScenePlayerDomainSnapshotRepairer repairer = new ScenePlayerDomainSnapshotRepairer(
@@ -61,6 +61,8 @@ class ScenePlayerDomainSnapshotRepairerTest {
         executor.runNext();
 
         assertEquals(3, scene.stageClears(10001L).orElseThrow());
+        assertEquals(90, scene.bagCount(10001L, "gold").orElseThrow());
+        assertEquals(5, scene.bagCount(10001L, "gem").orElseThrow());
         assertEquals(5, scene.revisionOf(10001L));
         assertFalse(scene.stale(10001L));
     }
@@ -86,7 +88,12 @@ class ScenePlayerDomainSnapshotRepairerTest {
                 result.status() == SnapshotRepairStatus.INVALID_OWNER_KEY));
     }
 
-    private static PlayerStateSnapshot state(long playerId, long eventRevision, Map<String, Integer> clears) {
+    private static PlayerStateSnapshot state(
+            long playerId,
+            long eventRevision,
+            Map<String, Integer> clears,
+            Map<String, Integer> bagItems
+    ) {
         Map<String, BattleStageProgressSnapshot> stages = clears.entrySet().stream()
                 .collect(java.util.stream.Collectors.toMap(
                         Map.Entry::getKey,
@@ -95,7 +102,7 @@ class ScenePlayerDomainSnapshotRepairerTest {
         return new PlayerStateSnapshot(
                 playerId,
                 NOW,
-                new BagSnapshot(Map.of()),
+                new BagSnapshot(bagItems),
                 new PlayerActivitiesSnapshot(Map.of()),
                 new GrowthSnapshot(20, 0),
                 PlayerShopSnapshot.empty(),

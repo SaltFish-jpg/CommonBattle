@@ -6,9 +6,11 @@ import com.commonbattle.battle.buff.StatusEffect;
 import com.commonbattle.battle.command.AttackCommand;
 import com.commonbattle.battle.command.CastSkillCommand;
 import com.commonbattle.battle.command.Command;
+import com.commonbattle.battle.command.UseSkillCommand;
 import com.commonbattle.battle.component.BuffComponent;
 import com.commonbattle.battle.component.HealthComponent;
 import com.commonbattle.battle.context.BattleContext;
+import com.commonbattle.battle.skill.SkillManager;
 import com.commonbattle.battle.state.Entity;
 /**
  * 可复用的最小单位战斗规则集。
@@ -34,6 +36,14 @@ public class BasicRuleSet implements RuleSet {
             if (!caster.require(HealthComponent.class).alive()) {
                 throw new IllegalStateException("Dead caster cannot cast skill");
             }
+        }
+        if (command instanceof UseSkillCommand useSkill) {
+            Entity caster = context.state().requireEntity(useSkill.caster());
+            ensureCanAct(caster);
+            if (!caster.require(HealthComponent.class).alive()) {
+                throw new IllegalStateException("Dead caster cannot cast skill");
+            }
+            new SkillManager().requireActiveSkill(context, useSkill.caster(), useSkill.skillConfigId());
         }
     }
 

@@ -3,6 +3,8 @@ package com.commonbattle.cluster.protocol;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PayloadCodecRegistryTest {
     @Test
@@ -13,6 +15,9 @@ class PayloadCodecRegistryTest {
 
         assertEquals(PayloadEncoding.PROTOBUF, payload.codecName());
         assertEquals("ok", registry.decode(payload.codecName(), payload.typeName(), payload.bytes()));
+        assertTrue(registry.hasProtobufCodec(String.class));
+        assertTrue(registry.hasPayloadCodec(String.class));
+        assertFalse(registry.hasPayloadCodec(PrototypeRequest.class));
     }
 
     @Test
@@ -29,6 +34,8 @@ class PayloadCodecRegistryTest {
         assertEquals(PayloadEncoding.PROTOSTUFF, payload.codecName());
         assertEquals(10001L, decoded.playerId);
         assertEquals("auction-draft", decoded.feature);
+        assertFalse(registry.hasProtobufCodec(PrototypeRequest.class));
+        assertTrue(registry.hasPayloadCodec(PrototypeRequest.class));
     }
 
     public static class PrototypeRequest {

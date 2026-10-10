@@ -13,12 +13,14 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionControlledAgentRouter;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
+import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.observability.ActorHotspotPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -152,6 +154,41 @@ class PlayerCommandDispatcherTest {
     }
 
     @Test
+    void actorHotspotAdmissionRejectsAsBackpressureWithoutConsumingSequence() {
+        ActorHotspotAdmissionController[] controller = new ActorHotspotAdmissionController[1];
+        Fixture fixture = Fixture.localActorAwareAdmission(actors -> {
+            controller[0] = new ActorHotspotAdmissionController(
+                    (target, operation) -> AdmissionDecision.accept(),
+                    actors,
+                    List.of(),
+                    new ActorHotspotPolicy(0, 1, 10, 10, 20, 10_000, 20_000),
+                    Duration.ofMillis(75),
+                    ignored -> "player-10001",
+                    CLOCK
+            );
+            return controller[0];
+        });
+        AtomicInteger handled = new AtomicInteger();
+        fixture.dispatcher.handle("bag.use", (context, command) -> handled.incrementAndGet());
+        fixture.actors.send(new ActorRef("player-10001"), ignored -> {
+        });
+
+        PlayerCommandResult rejected = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+        PlayerCommandResult retry = fixture.dispatch(command(1));
+        fixture.executor.runNext();
+
+        assertEquals(PlayerCommandStatus.BACKPRESSURED, rejected.status());
+        assertEquals(ActorHotspotAdmissionController.THROTTLE_REASON, rejected.reason());
+        assertEquals(75, rejected.retryAfter().toMillis());
+        assertEquals(PlayerCommandStatus.ACCEPTED, retry.status());
+        assertEquals(1, handled.get());
+        assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.BACKPRESSURED));
+        assertEquals(1, controller[0].hotspotAdmissionStats().hotspotRejected());
+        assertEquals(1, controller[0].hotspotAdmissionStats().accepted());
+    }
+
+    @Test
     void migratingPlayerCommandIsRejectedWithExplicitStatus() {
         Fixture fixture = Fixture.local((target, operation) -> AdmissionDecision.accept());
         fixture.dispatcher.handle("bag.use", (context, command) -> {
@@ -219,6 +256,17 @@ class PlayerCommandDispatcherTest {
 
         assertEquals(PlayerCommandStatus.UNKNOWN_OPERATION, result.status());
         assertEquals(1, fixture.dispatcher.stats().count(PlayerCommandStatus.UNKNOWN_OPERATION));
+    }
+
+    @Test
+    void exposesRegisteredOperationsSnapshotForStartupValidation() {
+        Fixture fixture = Fixture.local((target, operation) -> AdmissionDecision.accept());
+        fixture.dispatcher.handle("bag.use", (context, command) -> {
+        });
+        fixture.dispatcher.handle("shop.buy", (context, command) -> {
+        });
+
+        assertEquals(java.util.Set.of("bag.use", "shop.buy"), fixture.dispatcher.registeredOperations());
     }
 
     @Test
@@ -338,16 +386,41 @@ class PlayerCommandDispatcherTest {
             return local(admissions, PlayerCommandAuditSink.NOOP, () -> 0);
         }
 
+        private static Fixture localActorAwareAdmission(
+                java.util.function.Function<ActorSystem, com.commonbattle.actor.backpressure.InboundAdmissionController> admissionsFactory
+        ) {
+            return localActorAwareAdmission(
+                    admissionsFactory,
+                    PlayerCommandAuditSink.NOOP,
+                    () -> 0,
+                    ActorSystemConfig.defaults(1).withBatchSize(64)
+            );
+        }
+
         private static Fixture local(
                 com.commonbattle.actor.backpressure.InboundAdmissionController admissions,
                 PlayerCommandAuditSink auditSink,
                 ConfigVersionSupplier configVersion
         ) {
-            return local(admissions, auditSink, configVersion, ActorSystemConfig.defaults(1).withBatchSize(64));
+            return localActorAwareAdmission(
+                    ignored -> admissions,
+                    auditSink,
+                    configVersion,
+                    ActorSystemConfig.defaults(1).withBatchSize(64)
+            );
         }
 
         private static Fixture local(
                 com.commonbattle.actor.backpressure.InboundAdmissionController admissions,
+                PlayerCommandAuditSink auditSink,
+                ConfigVersionSupplier configVersion,
+                ActorSystemConfig actorConfig
+        ) {
+            return localActorAwareAdmission(ignored -> admissions, auditSink, configVersion, actorConfig);
+        }
+
+        private static Fixture localActorAwareAdmission(
+                java.util.function.Function<ActorSystem, com.commonbattle.actor.backpressure.InboundAdmissionController> admissionsFactory,
                 PlayerCommandAuditSink auditSink,
                 ConfigVersionSupplier configVersion,
                 ActorSystemConfig actorConfig
@@ -372,7 +445,7 @@ class PlayerCommandDispatcherTest {
                     sessions,
                     new PlayerCommandSequencer(),
                     new AdmissionControlledAgentRouter(
-                            admissions,
+                            admissionsFactory.apply(actors),
                             new LifecycleAwareAgentRouter(lifecycles, new DefaultAgentMessagePort(actors, new NoopRpcGateway()))
                     ),
                     auditSink,

@@ -54,7 +54,7 @@ class NettyClusterTransportTest {
                     game.id(),
                     scene.id(),
                     SceneOperations.ENTER,
-                    new EnterSceneRequest(10001L, "room-1")
+                    new EnterSceneRequest(10001L, "room-1", 3, 4)
             ));
 
             assertTrue(received.await(3, TimeUnit.SECONDS));
@@ -62,6 +62,8 @@ class NettyClusterTransportTest {
             assertEquals(SceneOperations.ENTER, envelope.operation());
             EnterSceneRequest payload = assertInstanceOf(EnterSceneRequest.class, envelope.payload());
             assertEquals("room-1", payload.sceneId());
+            assertEquals(3, payload.chunkX());
+            assertEquals(4, payload.chunkY());
             assertEventually(() -> gameTransport.stats().sentEnvelopes() == 1);
             assertEquals(1, gameTransport.stats().activeConnections());
             assertEquals(1, gameTransport.stats().connectionAttempts());

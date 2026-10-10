@@ -27,6 +27,7 @@ public record ClaimTaskCommand(String taskId) implements PlayerBusinessCommand<T
                 execution.profile().bag(),
                 taskId
         );
+        execution.publishBagChanged(operation(), false, result.reward());
         execution.pushTaskSnapshot();
         execution.pushBagSnapshot();
         return result;

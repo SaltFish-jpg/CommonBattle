@@ -21,6 +21,8 @@ import com.commonbattle.game.activity.ActivityDefinition;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.activity.ActivityType;
 import com.commonbattle.game.bag.BagService;
+import com.commonbattle.game.bag.BagResult;
+import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.bag.ItemDefinition;
 import com.commonbattle.game.bag.ItemStack;
@@ -30,6 +32,11 @@ import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.battle.BattleSettlementStatus;
 import com.commonbattle.game.battle.BattleStageCatalog;
 import com.commonbattle.game.battle.BattleStageDefinition;
+import com.commonbattle.game.config.GameConfigPackage;
+import com.commonbattle.game.config.GameConfigRegistry;
+import com.commonbattle.game.config.GameConfigValidator;
+import com.commonbattle.game.config.GrowthTuning;
+import com.commonbattle.game.config.InMemoryGameConfigRegistry;
 import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.growth.GrowthService;
 import com.commonbattle.game.growth.GrowthSnapshot;
@@ -106,6 +113,54 @@ class PlayerBusinessCommandHandlerTest {
         assertEquals(6, fixture.audit.records().size());
         assertEquals(PlayerCommandAuditOutcome.EXECUTED, fixture.audit.last().outcome());
         assertEquals(7, fixture.audit.last().configVersion());
+    }
+
+    @Test
+    void consumeBagItemCommandRunsThroughPlayerMailbox() {
+        Fixture fixture = Fixture.createWithConfigRuntime();
+        fixture.agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("stamina_potion", 3)));
+
+        PlayerCommandResult accepted = fixture.dispatch(new ConsumeBagItemCommand("stamina_potion", 2));
+
+        assertEquals(PlayerCommandStatus.ACCEPTED, accepted.status());
+        assertEquals(1, fixture.executor.queued());
+        fixture.executor.runNext();
+
+        BagResult result = assertInstanceOf(BagResult.class, fixture.results.responses.getFirst());
+        assertEquals("stamina_potion", result.changes().getFirst().itemId());
+        assertEquals(3, result.changes().getFirst().before());
+        assertEquals(1, result.changes().getFirst().after());
+        assertEquals(1, fixture.agent.profile().bag().count("stamina_potion"));
+        assertEquals(PlayerCommandAuditOutcome.EXECUTED, fixture.audit.last().outcome());
+        assertEquals(PlayerBusinessOperations.BAG_CONSUME_ITEM, fixture.audit.last().operation());
+    }
+
+    @Test
+    void playerBusinessCommandCannotBypassPlayerMailbox() {
+        Fixture fixture = Fixture.createWithConfigRuntime();
+        fixture.agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("stamina_potion", 3)));
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> fixture.agent.executeBusiness(new ConsumeBagItemCommand("stamina_potion", 1)));
+
+        assertEquals("operation must run inside an actor mailbox", error.getMessage());
+        assertEquals(3, fixture.agent.profile().bag().count("stamina_potion"));
+    }
+
+    @Test
+    void consumeBagItemCommandReportsStableDomainCodeWhenItemIsNotEnough() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        Fixture fixture = Fixture.createWithConfigRuntime(results);
+
+        fixture.dispatch(new ConsumeBagItemCommand("stamina_potion", 1));
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getFirst();
+        assertEquals(PlayerBusinessResponseStatus.FAILED, response.status());
+        assertEquals(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM, response.code());
+        assertEquals(0, fixture.agent.profile().bag().count("stamina_potion"));
+        assertEquals(PlayerCommandAuditOutcome.FAILED, fixture.audit.last().outcome());
+        assertEquals(GameBusinessErrorCodes.BAG_NOT_ENOUGH_ITEM, fixture.audit.last().resultCode());
     }
 
     @Test
@@ -252,6 +307,29 @@ class PlayerBusinessCommandHandlerTest {
         }
 
         private static Fixture create(RecordingResultSink results) {
+            return create(results, null);
+        }
+
+        private static Fixture createWithConfigRuntime() {
+            return createWithConfigRuntime(new RecordingResultSink());
+        }
+
+        private static Fixture createWithConfigRuntime(RecordingResultSink results) {
+            GameConfigRegistry registry = new InMemoryGameConfigRegistry(new GameConfigValidator(), CLOCK);
+            registry.publish(new GameConfigPackage(
+                    1,
+                    List.of(
+                            new ItemDefinition("stamina_potion", "consume", 999),
+                            new ItemDefinition("exp_potion", "growth", 999)
+                    ),
+                    List.of(),
+                    new GrowthTuning("exp_potion", 60, 100),
+                    CLOCK.instant()
+            ));
+            return create(results, registry);
+        }
+
+        private static Fixture create(RecordingResultSink results, GameConfigRegistry configRegistry) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef self = actors.actor("player-10001");
@@ -260,14 +338,25 @@ class PlayerBusinessCommandHandlerTest {
             AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
             lifecycles.activate(AgentIdentity.player(10001L), self.id());
             executor.runNext();
-            PlayerGameAgent agent = new PlayerGameAgent(
-                    new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+            PlayerProfile profile = new PlayerProfile(10001L, Instant.parse("2026-08-01T00:00:00Z"));
+            PlayerGameAgent agent = configRegistry == null
+                    ? new PlayerGameAgent(
+                    messages,
                     self,
-                    new PlayerProfile(10001L, Instant.parse("2026-08-01T00:00:00Z")),
+                    profile,
                     activityService(),
                     growthService(),
                     shopService(),
                     battleService(),
+                    CLOCK,
+                    Instant.parse("2026-08-01T00:00:00Z")
+            )
+                    : new PlayerGameAgent(
+                    messages,
+                    self,
+                    profile,
+                    configRegistry,
                     CLOCK,
                     Instant.parse("2026-08-01T00:00:00Z")
             );

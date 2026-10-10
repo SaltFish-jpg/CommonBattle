@@ -25,18 +25,23 @@ class ActorScheduleRegistryTest {
                     ActorScheduleKey.of("player.daily.reset", 10001L),
                     player,
                     Duration.ofMillis(1),
-                    ignored -> runs.incrementAndGet()
+                    ignored -> {
+                        ActorContext.requireCurrent(player);
+                        runs.incrementAndGet();
+                    }
             );
 
             assertTrue(awaitQueued(executor, 1));
             assertEquals(1, schedules.stats().deliveredTimerMessages());
             assertEquals(0, schedules.stats().activeJobs());
             assertEquals(0, runs.get());
+            assertTrue(ActorContext.current().isEmpty());
             assertEquals(1, system.stats().queuedTasksByCategory().get(ActorTaskCategory.TIMER));
 
             executor.runNext();
 
             assertEquals(1, runs.get());
+            assertTrue(ActorContext.current().isEmpty());
         }
     }
 
@@ -49,8 +54,14 @@ class ActorScheduleRegistryTest {
         List<String> runs = new ArrayList<>();
 
         try (ActorScheduleRegistry schedules = new ActorScheduleRegistry(system)) {
-            schedules.scheduleOnce(key, scene, Duration.ofMillis(100), ignored -> runs.add("old"));
-            schedules.scheduleOnce(key, scene, Duration.ofMillis(1), ignored -> runs.add("new"));
+            schedules.scheduleOnce(key, scene, Duration.ofMillis(100), ignored -> {
+                ActorContext.requireCurrent(scene);
+                runs.add("old");
+            });
+            schedules.scheduleOnce(key, scene, Duration.ofMillis(1), ignored -> {
+                ActorContext.requireCurrent(scene);
+                runs.add("new");
+            });
 
             assertTrue(awaitQueued(executor, 1));
             executor.runNext();

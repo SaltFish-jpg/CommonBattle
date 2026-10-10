@@ -12,6 +12,7 @@ import com.commonbattle.game.battle.BattleSettlementStatus;
 import com.commonbattle.game.battle.BattleStageProgressSnapshot;
 import com.commonbattle.game.battle.PlayerBattleSnapshot;
 import com.commonbattle.game.growth.GrowthSnapshot;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.shop.PlayerShopSnapshot;
 import com.commonbattle.game.task.PlayerTasksSnapshot;
 import com.commonbattle.game.task.TaskProgressSnapshot;
@@ -125,6 +126,9 @@ class SerializedPlayerStateRepositoryTest {
                 new PlayerAchievementsSnapshot(Map.of(
                         "achievement-clear-forest",
                         new AchievementProgressSnapshot(1, false)
+                )),
+                new PlayerCommandSequencerSnapshot(10001L, List.of(
+                        new PlayerCommandSequencerSnapshot.Watermark(10001L, "session-1", 1, 3)
                 )),
                 8,
                 9,

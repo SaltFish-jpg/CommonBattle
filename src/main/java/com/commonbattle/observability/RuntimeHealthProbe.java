@@ -53,11 +53,15 @@ import com.commonbattle.cluster.event.ClusterEventSubscriptionStats;
 import com.commonbattle.cluster.event.ClusterEventTopicStats;
 import com.commonbattle.game.agent.BusinessAgentMessageView;
 import com.commonbattle.game.agent.BusinessAgentRpcEndpointView;
+import com.commonbattle.game.bag.BagChangeAuditStats;
+import com.commonbattle.game.bag.BagChangeAuditView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigAutoRecoveryStats;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.ActorEventSubscriberStats;
 import com.commonbattle.game.event.ActorEventSubscriberView;
+import com.commonbattle.game.event.EventGatedCommandAuditStats;
+import com.commonbattle.game.event.EventGatedCommandAuditView;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.OwnerEventRepairDispatcherStats;
@@ -73,6 +77,10 @@ import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
 import com.commonbattle.game.player.PlayerAutoSaveStats;
+import com.commonbattle.game.player.PlayerBusinessCommandCatalogStats;
+import com.commonbattle.game.player.PlayerBusinessCommandCatalogView;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayStats;
+import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessResponseStats;
 import com.commonbattle.game.player.PlayerBusinessResponseView;
 import com.commonbattle.game.player.PlayerGatewayView;
@@ -137,6 +145,8 @@ public final class RuntimeHealthProbe {
     private final Collection<LocalGameConfigCache> configCaches;
     private final Collection<GameConfigAutoRecovery> configRecoveries;
     private final Collection<PlayerCommandAuditView> commandAudits;
+    private Collection<EventGatedCommandAuditView> eventGatedCommandAudits = List.of();
+    private Collection<BagChangeAuditView> bagChangeAudits = List.of();
     private final Collection<ClusterEventCenter> eventCenters;
     private final Collection<ClusterEventSubscriptionManager> eventSubscriptions;
     private Collection<ActorEventSubscriberView> actorEventSubscribers = List.of();
@@ -152,6 +162,8 @@ public final class RuntimeHealthProbe {
     private Collection<PlayerGameAgentManager> playerAgentManagers = List.of();
     private Collection<PlayerAutoSaveScheduler> playerAutoSaves = List.of();
     private Collection<PlayerAgentDrainService> playerAgentDrains = List.of();
+    private Collection<PlayerBusinessCommandCatalogView> playerBusinessCommandCatalogs = List.of();
+    private Collection<PlayerBusinessCommandGatewayView> playerBusinessCommandGateways = List.of();
     private Collection<PlayerBusinessResponseView> playerBusinessResponses = List.of();
     private Collection<PlayerOutboundDeliveryView> playerOutboundDeliveries = List.of();
     private Collection<PlayerGatewayView> playerGateways = List.of();
@@ -212,6 +224,8 @@ public final class RuntimeHealthProbe {
         this.playerAgentManagers = registry.playerAgentManagers();
         this.playerAutoSaves = registry.playerAutoSaves();
         this.playerAgentDrains = registry.playerAgentDrains();
+        this.playerBusinessCommandCatalogs = registry.playerBusinessCommandCatalogs();
+        this.playerBusinessCommandGateways = registry.playerBusinessCommandGateways();
         this.playerBusinessResponses = registry.playerBusinessResponses();
         this.playerOutboundDeliveries = registry.playerOutboundDeliveries();
         this.playerGateways = registry.playerGateways();
@@ -226,6 +240,8 @@ public final class RuntimeHealthProbe {
         this.ownerEventRepairSchedulers = registry.ownerEventRepairSchedulers();
         this.ownerEventRepairDispatchers = registry.ownerEventRepairDispatchers();
         this.ownerRepairOpsAudits = registry.ownerRepairOpsAudits();
+        this.eventGatedCommandAudits = registry.eventGatedCommandAudits();
+        this.bagChangeAudits = registry.bagChangeAudits();
         this.registryHistories = registry.registryHistories();
         this.registrySubscriptions = registry.registrySubscriptions();
         this.remoteRegistryRecoveries = registry.remoteRegistryRecoveries();
@@ -547,6 +563,8 @@ public final class RuntimeHealthProbe {
         BusinessAgentMessageHealthStats businessAgentMessageStats = businessAgentMessageStats();
         BusinessAgentRpcEndpointHealthStats businessAgentRpcEndpointStats = businessAgentRpcEndpointStats();
         PlayerCommandStats commandStats = commandStats();
+        PlayerBusinessCommandCatalogHealthStats businessCommandCatalogStats = businessCommandCatalogStats();
+        PlayerBusinessCommandGatewayHealthStats businessCommandGatewayStats = businessCommandGatewayStats();
         PlayerBusinessResponseHealthStats businessResponseStats = businessResponseStats();
         PlayerOutboundDeliveryHealthStats playerOutboundDeliveryStats = playerOutboundDeliveryStats();
         PlayerGatewayHealthStats playerGatewayStats = playerGatewayStats();
@@ -570,6 +588,8 @@ public final class RuntimeHealthProbe {
         ConfigCacheHealthStats configStats = configStats();
         ConfigRecoveryHealthStats recoveryStats = configRecoveryStats();
         PlayerCommandAuditHealthStats auditStats = commandAuditStats();
+        EventGatedCommandAuditHealthStats eventGatedCommandAuditStats = eventGatedCommandAuditStats();
+        BagChangeAuditHealthStats bagChangeAuditStats = bagChangeAuditStats();
         EventCenterHealthStats eventCenterStats = eventCenterStats();
         EventSubscriptionHealthStats eventSubscriptionStats = eventSubscriptionStats();
         ActorEventSubscriberHealthStats actorEventSubscriberStats = actorEventSubscriberStats();
@@ -585,8 +605,11 @@ public final class RuntimeHealthProbe {
         RuntimeHealthStatus status = status(
                 actorStats.queuedTasks(),
                 outboxStats.pendingEvents(),
+                actorMailboxPressureStats,
+                actorHotspotAdmissionStats,
                 actorScheduleStats,
                 commandStats,
+                businessCommandGatewayStats,
                 businessResponseStats,
                 asyncShopPurchaseStats,
                 configStats,
@@ -601,6 +624,7 @@ public final class RuntimeHealthProbe {
                 ownerActorEventSubscriptionStats,
                 ownerEventRepairSchedulerStats,
                 ownerEventRepairDispatcherStats,
+                eventGatedCommandAuditStats,
                 profileInterestStats,
                 profileRuntimeStats,
                 sceneRuntimeStats,
@@ -613,13 +637,14 @@ public final class RuntimeHealthProbe {
                 migrationTaskRetentionStats,
                 migrationTaskStoreStats
         );
-        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, actorMailboxDiagnostics, actorMailboxPressureStats, actorHotspotAdmissionStats, actorIncidentStats, actorSlowTaskStats, actorScheduleStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, businessAgentMessageStats, businessAgentRpcEndpointStats, commandStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
+        return new RuntimeHealthSnapshot(clock.instant(), status, actorStats, actorMailboxDiagnostics, actorMailboxPressureStats, actorHotspotAdmissionStats, actorIncidentStats, actorSlowTaskStats, actorScheduleStats, rpcStats, rpcResilienceStats, rpcRouteStats, actorRpcStats, businessAgentMessageStats, businessAgentRpcEndpointStats, commandStats, businessCommandCatalogStats, businessCommandGatewayStats, businessResponseStats, playerOutboundDeliveryStats, playerGatewayStats, asyncShopPurchaseStats, agentStats, playerAgentStats,
                 migrationStats, migrationExecutorStats, migrationRecoveryStats, migrationRecoverySchedulerStats, migrationTaskRetentionStats, migrationTaskStoreStats, outboxStats, clusterStats, leaseStats, registryHistoryStats, registrySubscriptionStats, remoteRegistryRecoveryStats, descriptorPublisherStats, networkStats, configStats, recoveryStats,
                 eventCenterStats, eventSubscriptionStats, actorEventSubscriberStats, ownerActorEventSubscriptionStats,
                 ownerEventRepairSchedulerStats,
                 ownerEventRepairDispatcherStats,
                 ownerRepairOpsAuditStats,
-                profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats, auditStats);
+                profileInterestStats, profileRuntimeStats, chatRuntimeStats, sceneRuntimeStats, shopRuntimeStats,
+                eventGatedCommandAuditStats, bagChangeAuditStats, auditStats);
     }
 
     /**
@@ -760,6 +785,16 @@ public final class RuntimeHealthProbe {
                 .reduce(PlayerCommandStats.empty(), PlayerCommandStats::plus);
     }
 
+    private PlayerBusinessCommandCatalogHealthStats businessCommandCatalogStats() {
+        if (playerBusinessCommandCatalogs.isEmpty()) {
+            return PlayerBusinessCommandCatalogHealthStats.empty();
+        }
+        PlayerBusinessCommandCatalogStats stats = playerBusinessCommandCatalogs.stream()
+                .map(PlayerBusinessCommandCatalogView::commandCatalogStats)
+                .reduce(PlayerBusinessCommandCatalogStats.empty(), PlayerBusinessCommandCatalogStats::plus);
+        return PlayerBusinessCommandCatalogHealthStats.from(playerBusinessCommandCatalogs.size(), stats);
+    }
+
     private PlayerBusinessResponseHealthStats businessResponseStats() {
         if (playerBusinessResponses.isEmpty()) {
             return PlayerBusinessResponseHealthStats.empty();
@@ -768,6 +803,16 @@ public final class RuntimeHealthProbe {
                 .map(PlayerBusinessResponseView::stats)
                 .reduce(PlayerBusinessResponseStats.empty(), PlayerBusinessResponseStats::plus);
         return PlayerBusinessResponseHealthStats.from(playerBusinessResponses.size(), stats);
+    }
+
+    private PlayerBusinessCommandGatewayHealthStats businessCommandGatewayStats() {
+        if (playerBusinessCommandGateways.isEmpty()) {
+            return PlayerBusinessCommandGatewayHealthStats.empty();
+        }
+        PlayerBusinessCommandGatewayStats stats = playerBusinessCommandGateways.stream()
+                .map(PlayerBusinessCommandGatewayView::commandGatewayStats)
+                .reduce(PlayerBusinessCommandGatewayStats.empty(), PlayerBusinessCommandGatewayStats::plus);
+        return PlayerBusinessCommandGatewayHealthStats.from(playerBusinessCommandGateways.size(), stats);
     }
 
     private AsyncShopPurchaseHealthStats asyncShopPurchaseStats() {
@@ -1176,6 +1221,30 @@ public final class RuntimeHealthProbe {
                 asyncCompleted, asyncFailed, maxElapsedMillis, configVersions, resultCodes);
     }
 
+    private EventGatedCommandAuditHealthStats eventGatedCommandAuditStats() {
+        if (eventGatedCommandAudits.isEmpty()) {
+            return EventGatedCommandAuditHealthStats.empty();
+        }
+        EventGatedCommandAuditHealthStats result = EventGatedCommandAuditHealthStats.empty();
+        for (EventGatedCommandAuditView audit : eventGatedCommandAudits) {
+            EventGatedCommandAuditStats stats = audit.stats();
+            result = result.plus(EventGatedCommandAuditHealthStats.from(1, stats));
+        }
+        return result;
+    }
+
+    private BagChangeAuditHealthStats bagChangeAuditStats() {
+        if (bagChangeAudits.isEmpty()) {
+            return BagChangeAuditHealthStats.empty();
+        }
+        BagChangeAuditHealthStats result = BagChangeAuditHealthStats.empty();
+        for (BagChangeAuditView audit : bagChangeAudits) {
+            BagChangeAuditStats stats = audit.stats();
+            result = result.plus(BagChangeAuditHealthStats.from(1, stats));
+        }
+        return result;
+    }
+
     private EventSubscriptionHealthStats eventSubscriptionStats() {
         if (eventSubscriptions.isEmpty()) {
             return EventSubscriptionHealthStats.empty();
@@ -1480,14 +1549,25 @@ public final class RuntimeHealthProbe {
         SceneRuntimeStats stats = sceneRuntimes.stream()
                 .map(SceneRuntimeView::stats)
                 .reduce(SceneRuntimeStats.empty(), SceneRuntimeStats::plus);
-        return SceneRuntimeHealthStats.from(sceneRuntimes.size(), stats);
+        var friendProjection = sceneRuntimes.stream()
+                .map(SceneRuntimeView::friendProjectionStats)
+                .reduce(com.commonbattle.game.scene.SceneProjectionStats.empty(),
+                        com.commonbattle.game.scene.SceneProjectionStats::plus);
+        var allianceProjection = sceneRuntimes.stream()
+                .map(SceneRuntimeView::allianceProjectionStats)
+                .reduce(com.commonbattle.game.scene.SceneProjectionStats.empty(),
+                        com.commonbattle.game.scene.SceneProjectionStats::plus);
+        return SceneRuntimeHealthStats.from(sceneRuntimes.size(), stats, friendProjection, allianceProjection);
     }
 
     private RuntimeHealthStatus status(
             int queuedTasks,
             int pendingEvents,
+            ActorMailboxPressureHealthStats actorMailboxPressureStats,
+            ActorHotspotAdmissionHealthStats actorHotspotAdmissionStats,
             ActorScheduleHealthStats actorScheduleStats,
             PlayerCommandStats commandStats,
+            PlayerBusinessCommandGatewayHealthStats businessCommandGatewayStats,
             PlayerBusinessResponseHealthStats businessResponseStats,
             AsyncShopPurchaseHealthStats asyncShopPurchaseStats,
             ConfigCacheHealthStats configStats,
@@ -1502,6 +1582,7 @@ public final class RuntimeHealthProbe {
             OwnerActorEventSubscriptionHealthStats ownerActorEventSubscriptionStats,
             OwnerEventRepairSchedulerHealthStats ownerEventRepairSchedulerStats,
             OwnerEventRepairDispatcherHealthStats ownerEventRepairDispatcherStats,
+            EventGatedCommandAuditHealthStats eventGatedCommandAuditStats,
             ProfileInterestHealthStats profileInterestStats,
             ProfileRuntimeHealthStats profileRuntimeStats,
             SceneRuntimeHealthStats sceneRuntimeStats,
@@ -1517,10 +1598,16 @@ public final class RuntimeHealthProbe {
         if (!actors.isAccepting()) {
             return RuntimeHealthStatus.DOWN;
         }
+        if (actorMailboxPressureStats.pressureRejected() > 0 || actorHotspotAdmissionStats.hotspotRejected() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
         if (actorScheduleStats.rejectedTimerMessages() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (commandStats.drainingDispatchers() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
+        if (businessCommandGatewayStats.remoteForwardTimedOutResponses() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (businessResponseStats.timedOutResponses() > 0
@@ -1532,6 +1619,7 @@ public final class RuntimeHealthProbe {
         }
         if (asyncShopPurchaseStats.rpcFailures() > 0
                 || asyncShopPurchaseStats.lateCallbacks() > 0
+                || asyncShopPurchaseStats.abandonedPendingCommands() > 0
                 || asyncShopPurchaseStats.releaseFailures() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
@@ -1581,6 +1669,9 @@ public final class RuntimeHealthProbe {
         if (ownerEventRepairDispatcherStats.failedSchedulerRuns() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
+        if (eventGatedCommandAuditStats.failed() > 0) {
+            return RuntimeHealthStatus.DEGRADED;
+        }
         if (profileInterestStats.replayFailures() > 0 || profileInterestStats.repairFailures() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
@@ -1591,7 +1682,9 @@ public final class RuntimeHealthProbe {
                 || exceedsEnabledLimit(sceneRuntimeStats.activePlayers(), policy.maxSceneActivePlayers())
                 || exceedsEnabledLimit(sceneRuntimeStats.maxShardPlayers(), policy.maxSceneShardHotspotPlayers())
                 || sceneRuntimeStats.missingLeaves() > 0
-                || sceneRuntimeStats.projectionStaleViews() > 0) {
+                || sceneRuntimeStats.projectionStaleViews() > 0
+                || sceneRuntimeStats.projectionFreshReadRemoteStale() > 0
+                || sceneRuntimeStats.projectionFreshReadRemoteMisses() > 0) {
             return RuntimeHealthStatus.DEGRADED;
         }
         if (shopRuntimeStats.orderConflicts() > 0 || shopRuntimeStats.reservationReapFailures() > 0) {

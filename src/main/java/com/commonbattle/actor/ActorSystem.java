@@ -216,11 +216,13 @@ public final class ActorSystem implements AutoCloseable {
         ActorTaskCategory category = categoryOf(task);
         long startedAt = System.nanoTime();
         Throwable failure = null;
+        ActorContext previous = ActorContext.installCurrent(context);
         try {
             task.run(context);
         } catch (Throwable error) {
             failure = error;
         } finally {
+            ActorContext.restoreCurrent(previous);
             long elapsedNanos = System.nanoTime() - startedAt;
             metrics.taskExecuted(actor, category, elapsedNanos, config.slowTaskThreshold());
             reportSlowTask(actor, category, elapsedNanos);

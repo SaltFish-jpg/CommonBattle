@@ -12,6 +12,11 @@ import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
+import com.commonbattle.game.bag.BagChangeAuditRecord;
+import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
+import com.commonbattle.game.event.EventGatedCommandAuditRecord;
+import com.commonbattle.game.event.EventGatedCommandBoundary;
+import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.config.GameConfigChangedEvent;
 import com.commonbattle.game.config.GameConfigValidator;
@@ -20,9 +25,14 @@ import com.commonbattle.game.event.OwnerEventInterestControl;
 import com.commonbattle.game.event.OwnerEventRepairDispatcher;
 import com.commonbattle.game.event.OwnerEventRepairScheduler;
 import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.player.PlayerBusinessOperations;
 import com.commonbattle.game.player.event.BattleStageClearedEvent;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
 import com.commonbattle.game.profile.ProfileChangedEvent;
+import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
+import com.commonbattle.game.session.PlayerCommandAuditOutcome;
+import com.commonbattle.game.session.PlayerCommandAuditRecord;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import com.commonbattle.observability.OpsHttpServer;
 import com.commonbattle.runtime.DrainableComponent;
 import org.junit.jupiter.api.Test;
@@ -33,6 +43,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Collection;
@@ -94,6 +105,36 @@ class BootOpsHttpTest {
         outbox.markAttemptFailed(1);
         RecordingDrainable drainable = new RecordingDrainable();
         runtime.observe("commandIngress", drainable);
+        InMemoryBagChangeAuditLog bagAudits = new InMemoryBagChangeAuditLog();
+        bagAudits.record(new BagChangeAuditRecord(10001L, 2, PlayerBusinessOperations.BAG_CONSUME_ITEM,
+                "exp_potion", 3, 1, CLOCK.instant()));
+        runtime.observe("bagAudits", bagAudits);
+        InMemoryPlayerCommandAuditLog commandAudits = new InMemoryPlayerCommandAuditLog();
+        commandAudits.record(new PlayerCommandAuditRecord(
+                10001L,
+                "session-1",
+                1,
+                2,
+                PlayerBusinessOperations.BAG_CONSUME_ITEM,
+                PlayerCommandStatus.ACCEPTED,
+                PlayerCommandAuditOutcome.EXECUTED,
+                7,
+                Duration.ofMillis(4),
+                CLOCK.instant(),
+                "SUCCESS",
+                ""
+        ));
+        runtime.observe("commandAudits", commandAudits);
+        InMemoryEventGatedCommandAuditLog eventGatedAudits = new InMemoryEventGatedCommandAuditLog();
+        eventGatedAudits.record(new EventGatedCommandAuditRecord(
+                "chat.direct.send.afterFriendChanged",
+                "DirectChatSendAfterFriendEventRequest",
+                new EventGatedCommandBoundary("friend.changed", "friend:10001", 3),
+                "completed",
+                "SENT",
+                CLOCK.instant()
+        ));
+        runtime.observe("eventGatedAudits", eventGatedAudits);
         try (OpsHttpServer server = runtime.add("opsHttp", BootOpsHttp.start(
                 config,
                 local,
@@ -111,6 +152,19 @@ class BootOpsHttpTest {
             assertTrue(health.contains("\"configCaches\":{\"cacheCount\":1,\"activeCaches\":1"));
             assertTrue(health.contains("\"eventSubscriptions\":{\"managerCount\":1,\"registered\":1"));
             assertTrue(health.contains("\"outbox\":{\"pendingEvents\":1,\"failedAttempts\":1"));
+            assertTrue(health.contains("\"bagChangeAudits\":{\"auditCount\":1,\"retained\":1"));
+            HttpResult bagAudit = get(server, "/bag-change-audit?playerId=10001");
+            assertEquals(200, bagAudit.statusCode());
+            assertTrue(bagAudit.body().contains("\"reason\":\"bag.consumeItem\""));
+            assertTrue(bagAudit.body().contains("\"itemId\":\"exp_potion\""));
+            HttpResult commandAudit = get(server, "/player-command-audit?playerId=10001");
+            assertEquals(200, commandAudit.statusCode());
+            assertTrue(commandAudit.body().contains("\"operation\":\"bag.consumeItem\""));
+            assertTrue(commandAudit.body().contains("\"configVersion\":7"));
+            HttpResult eventGatedAudit = get(server, "/event-gated-command-audit?ownerKey=friend%3A10001");
+            assertEquals(200, eventGatedAudit.statusCode());
+            assertTrue(eventGatedAudit.body().contains("\"operation\":\"chat.direct.send.afterFriendChanged\""));
+            assertTrue(eventGatedAudit.body().contains("\"result\":\"SENT\""));
             HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/drain"))
                             .POST(HttpRequest.BodyPublishers.noBody())
@@ -189,14 +243,22 @@ class BootOpsHttpTest {
             ))) {
                 HttpResult isolated = get(server, "/owner-repair/isolated");
                 HttpResult release = post(server, "/owner-repair/release?ownerKey=profile%3A10001", null);
+                HttpResult request = post(server,
+                        "/owner-repair/request?target=profileEventRepairs&ownerKey=profile%3A10002&priority=9",
+                        null);
                 HttpResult health = get(server, "/health");
 
                 assertEquals(200, isolated.statusCode());
                 assertTrue(isolated.body().contains("\"ownerKey\":\"" + ownerKey + "\""));
                 assertEquals(200, release.statusCode());
                 assertEquals("{\"released\":1,\"ownerKey\":\"" + ownerKey + "\"}", release.body());
-                assertTrue(health.body().contains("\"ownerRepairOps\":{\"auditCount\":1,\"retainedEntries\":1,"
-                        + "\"recordedEntries\":1,\"releaseOps\":1,\"releaseAllOps\":0,\"releasedOwners\":1"));
+                assertEquals(200, request.statusCode());
+                assertEquals("{\"requested\":1,\"target\":\"profileEventRepairs\","
+                        + "\"ownerKey\":\"profile:10002\",\"priority\":9}", request.body());
+                assertTrue(health.body().contains("\"ownerEventRepairSchedulers\":{\"schedulerCount\":1,"
+                        + "\"pendingOwners\":2"));
+                assertTrue(health.body().contains("\"ownerRepairOps\":{\"auditCount\":1,\"retainedEntries\":2,"
+                        + "\"recordedEntries\":2,\"releaseOps\":1,\"releaseAllOps\":0,\"releasedOwners\":1"));
             }
         } finally {
             runtime.close();

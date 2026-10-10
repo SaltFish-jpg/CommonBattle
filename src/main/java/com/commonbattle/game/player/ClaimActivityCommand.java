@@ -28,6 +28,7 @@ public record ClaimActivityCommand(String activityId) implements PlayerBusinessC
                 execution.activityAccess(),
                 activityId
         );
+        execution.publishBagChanged(operation(), false, result.bagResult());
         execution.pushActivitySnapshot();
         execution.pushBagSnapshot();
         return result;

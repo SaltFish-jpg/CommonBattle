@@ -6,4 +6,12 @@ package com.commonbattle.game.scene;
 @FunctionalInterface
 public interface SceneRuntimeView {
     SceneRuntimeStats stats();
+
+    default SceneProjectionStats friendProjectionStats() {
+        return SceneProjectionStats.empty();
+    }
+
+    default SceneProjectionStats allianceProjectionStats() {
+        return SceneProjectionStats.empty();
+    }
 }

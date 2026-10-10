@@ -2,6 +2,10 @@ package com.commonbattle.game.chat;
 
 import com.commonbattle.cluster.protocol.PayloadCodec;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
+import com.commonbattle.game.social.AllianceMemberAction;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
@@ -33,6 +37,9 @@ public final class ChatPayloadCodecs {
         registry.register(new AllianceLeaveRequestCodec());
         registry.register(new AllianceSendRequestCodec());
         registry.register(new DirectSendRequestCodec());
+        registry.register(new AllianceJoinAfterEventRequestCodec());
+        registry.register(new AllianceSendAfterEventRequestCodec());
+        registry.register(new DirectSendAfterFriendEventRequestCodec());
         return registry;
     }
 
@@ -497,6 +504,140 @@ public final class ChatPayloadCodecs {
         }
     }
 
+    private static final class AllianceJoinAfterEventRequestCodec implements PayloadCodec<AllianceChatJoinAfterEventRequest> {
+        @Override
+        public String typeName() {
+            return AllianceChatJoinAfterEventRequest.class.getName();
+        }
+
+        @Override
+        public Class<AllianceChatJoinAfterEventRequest> javaType() {
+            return AllianceChatJoinAfterEventRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AllianceChatJoinAfterEventRequest payload) {
+            AllianceMemberChangedEvent event = payload.event();
+            AllianceChatJoinRequest request = payload.request();
+            return encodeAllianceJoinAfterEvent(
+                    event.allianceId(),
+                    event.playerId(),
+                    event.action().name(),
+                    event.revision(),
+                    request.allianceId(),
+                    request.playerId()
+            );
+        }
+
+        @Override
+        public AllianceChatJoinAfterEventRequest decode(byte[] bytes) {
+            AllianceJoinAfterEvent decoded = decodeAllianceJoinAfterEvent(bytes);
+            return new AllianceChatJoinAfterEventRequest(
+                    new AllianceMemberChangedEvent(
+                            decoded.eventAllianceId(),
+                            decoded.eventPlayerId(),
+                            AllianceMemberAction.valueOf(decoded.eventAction()),
+                            decoded.eventRevision()
+                    ),
+                    new AllianceChatJoinRequest(decoded.requestAllianceId(), decoded.requestPlayerId())
+            );
+        }
+    }
+
+    private static final class AllianceSendAfterEventRequestCodec implements PayloadCodec<AllianceChatSendAfterEventRequest> {
+        @Override
+        public String typeName() {
+            return AllianceChatSendAfterEventRequest.class.getName();
+        }
+
+        @Override
+        public Class<AllianceChatSendAfterEventRequest> javaType() {
+            return AllianceChatSendAfterEventRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AllianceChatSendAfterEventRequest payload) {
+            AllianceMemberChangedEvent event = payload.event();
+            AllianceChatSendRequest request = payload.request();
+            return encodeAllianceSendAfterEvent(
+                    event.allianceId(),
+                    event.playerId(),
+                    event.action().name(),
+                    event.revision(),
+                    request.allianceId(),
+                    request.senderId(),
+                    request.text(),
+                    request.requiredProfileRevision()
+            );
+        }
+
+        @Override
+        public AllianceChatSendAfterEventRequest decode(byte[] bytes) {
+            AllianceSendAfterEvent decoded = decodeAllianceSendAfterEvent(bytes);
+            return new AllianceChatSendAfterEventRequest(
+                    new AllianceMemberChangedEvent(
+                            decoded.eventAllianceId(),
+                            decoded.eventPlayerId(),
+                            AllianceMemberAction.valueOf(decoded.eventAction()),
+                            decoded.eventRevision()
+                    ),
+                    new AllianceChatSendRequest(
+                            decoded.requestAllianceId(),
+                            decoded.requestSenderId(),
+                            decoded.requestText(),
+                            decoded.requestProfileRevision()
+                    )
+            );
+        }
+    }
+
+    private static final class DirectSendAfterFriendEventRequestCodec implements PayloadCodec<DirectChatSendAfterFriendEventRequest> {
+        @Override
+        public String typeName() {
+            return DirectChatSendAfterFriendEventRequest.class.getName();
+        }
+
+        @Override
+        public Class<DirectChatSendAfterFriendEventRequest> javaType() {
+            return DirectChatSendAfterFriendEventRequest.class;
+        }
+
+        @Override
+        public byte[] encode(DirectChatSendAfterFriendEventRequest payload) {
+            FriendChangedEvent event = payload.event();
+            DirectChatSendRequest request = payload.request();
+            return encodeDirectSendAfterFriendEvent(
+                    event.playerId(),
+                    event.friendId(),
+                    event.action().name(),
+                    event.revision(),
+                    request.senderId(),
+                    request.receiverId(),
+                    request.text(),
+                    request.requiredProfileRevision()
+            );
+        }
+
+        @Override
+        public DirectChatSendAfterFriendEventRequest decode(byte[] bytes) {
+            DirectSendAfterFriendEvent decoded = decodeDirectSendAfterFriendEvent(bytes);
+            return new DirectChatSendAfterFriendEventRequest(
+                    new FriendChangedEvent(
+                            decoded.eventPlayerId(),
+                            decoded.eventFriendId(),
+                            FriendRelationAction.valueOf(decoded.eventAction()),
+                            decoded.eventRevision()
+                    ),
+                    new DirectChatSendRequest(
+                            decoded.requestSenderId(),
+                            decoded.requestReceiverId(),
+                            decoded.requestText(),
+                            decoded.requestProfileRevision()
+                    )
+            );
+        }
+    }
+
     private static byte[] encodeMemberResult(String status, String channelId, long playerId, int members) {
         int size = CodedOutputStream.computeStringSize(1, status)
                 + CodedOutputStream.computeStringSize(2, channelId)
@@ -779,6 +920,222 @@ public final class ChatPayloadCodecs {
         }
     }
 
+    private static byte[] encodeAllianceJoinAfterEvent(
+            long eventAllianceId,
+            long eventPlayerId,
+            String eventAction,
+            long eventRevision,
+            long requestAllianceId,
+            long requestPlayerId
+    ) {
+        int size = CodedOutputStream.computeInt64Size(1, eventAllianceId)
+                + CodedOutputStream.computeInt64Size(2, eventPlayerId)
+                + CodedOutputStream.computeStringSize(3, eventAction)
+                + CodedOutputStream.computeInt64Size(4, eventRevision)
+                + CodedOutputStream.computeInt64Size(5, requestAllianceId)
+                + CodedOutputStream.computeInt64Size(6, requestPlayerId);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, eventAllianceId);
+            output.writeInt64(2, eventPlayerId);
+            output.writeString(3, eventAction);
+            output.writeInt64(4, eventRevision);
+            output.writeInt64(5, requestAllianceId);
+            output.writeInt64(6, requestPlayerId);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode chat payload", e);
+        }
+    }
+
+    private static AllianceJoinAfterEvent decodeAllianceJoinAfterEvent(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long eventAllianceId = 0;
+        long eventPlayerId = 0;
+        String eventAction = AllianceMemberAction.JOIN.name();
+        long eventRevision = 0;
+        long requestAllianceId = 0;
+        long requestPlayerId = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> eventAllianceId = input.readInt64();
+                    case 2 -> eventPlayerId = input.readInt64();
+                    case 3 -> eventAction = input.readString();
+                    case 4 -> eventRevision = input.readInt64();
+                    case 5 -> requestAllianceId = input.readInt64();
+                    case 6 -> requestPlayerId = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new AllianceJoinAfterEvent(
+                    eventAllianceId,
+                    eventPlayerId,
+                    eventAction,
+                    eventRevision,
+                    requestAllianceId,
+                    requestPlayerId
+            );
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode chat payload", e);
+        }
+    }
+
+    private static byte[] encodeAllianceSendAfterEvent(
+            long eventAllianceId,
+            long eventPlayerId,
+            String eventAction,
+            long eventRevision,
+            long requestAllianceId,
+            long requestSenderId,
+            String requestText,
+            long requestProfileRevision
+    ) {
+        int size = CodedOutputStream.computeInt64Size(1, eventAllianceId)
+                + CodedOutputStream.computeInt64Size(2, eventPlayerId)
+                + CodedOutputStream.computeStringSize(3, eventAction)
+                + CodedOutputStream.computeInt64Size(4, eventRevision)
+                + CodedOutputStream.computeInt64Size(5, requestAllianceId)
+                + CodedOutputStream.computeInt64Size(6, requestSenderId)
+                + CodedOutputStream.computeStringSize(7, requestText)
+                + CodedOutputStream.computeInt64Size(8, requestProfileRevision);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, eventAllianceId);
+            output.writeInt64(2, eventPlayerId);
+            output.writeString(3, eventAction);
+            output.writeInt64(4, eventRevision);
+            output.writeInt64(5, requestAllianceId);
+            output.writeInt64(6, requestSenderId);
+            output.writeString(7, requestText);
+            output.writeInt64(8, requestProfileRevision);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode chat payload", e);
+        }
+    }
+
+    private static AllianceSendAfterEvent decodeAllianceSendAfterEvent(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long eventAllianceId = 0;
+        long eventPlayerId = 0;
+        String eventAction = AllianceMemberAction.JOIN.name();
+        long eventRevision = 0;
+        long requestAllianceId = 0;
+        long requestSenderId = 0;
+        String requestText = "";
+        long requestProfileRevision = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> eventAllianceId = input.readInt64();
+                    case 2 -> eventPlayerId = input.readInt64();
+                    case 3 -> eventAction = input.readString();
+                    case 4 -> eventRevision = input.readInt64();
+                    case 5 -> requestAllianceId = input.readInt64();
+                    case 6 -> requestSenderId = input.readInt64();
+                    case 7 -> requestText = input.readString();
+                    case 8 -> requestProfileRevision = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new AllianceSendAfterEvent(
+                    eventAllianceId,
+                    eventPlayerId,
+                    eventAction,
+                    eventRevision,
+                    requestAllianceId,
+                    requestSenderId,
+                    requestText,
+                    requestProfileRevision
+            );
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode chat payload", e);
+        }
+    }
+
+    private static byte[] encodeDirectSendAfterFriendEvent(
+            long eventPlayerId,
+            long eventFriendId,
+            String eventAction,
+            long eventRevision,
+            long requestSenderId,
+            long requestReceiverId,
+            String requestText,
+            long requestProfileRevision
+    ) {
+        int size = CodedOutputStream.computeInt64Size(1, eventPlayerId)
+                + CodedOutputStream.computeInt64Size(2, eventFriendId)
+                + CodedOutputStream.computeStringSize(3, eventAction)
+                + CodedOutputStream.computeInt64Size(4, eventRevision)
+                + CodedOutputStream.computeInt64Size(5, requestSenderId)
+                + CodedOutputStream.computeInt64Size(6, requestReceiverId)
+                + CodedOutputStream.computeStringSize(7, requestText)
+                + CodedOutputStream.computeInt64Size(8, requestProfileRevision);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, eventPlayerId);
+            output.writeInt64(2, eventFriendId);
+            output.writeString(3, eventAction);
+            output.writeInt64(4, eventRevision);
+            output.writeInt64(5, requestSenderId);
+            output.writeInt64(6, requestReceiverId);
+            output.writeString(7, requestText);
+            output.writeInt64(8, requestProfileRevision);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode chat payload", e);
+        }
+    }
+
+    private static DirectSendAfterFriendEvent decodeDirectSendAfterFriendEvent(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long eventPlayerId = 0;
+        long eventFriendId = 0;
+        String eventAction = FriendRelationAction.ADD.name();
+        long eventRevision = 0;
+        long requestSenderId = 0;
+        long requestReceiverId = 0;
+        String requestText = "";
+        long requestProfileRevision = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> eventPlayerId = input.readInt64();
+                    case 2 -> eventFriendId = input.readInt64();
+                    case 3 -> eventAction = input.readString();
+                    case 4 -> eventRevision = input.readInt64();
+                    case 5 -> requestSenderId = input.readInt64();
+                    case 6 -> requestReceiverId = input.readInt64();
+                    case 7 -> requestText = input.readString();
+                    case 8 -> requestProfileRevision = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new DirectSendAfterFriendEvent(
+                    eventPlayerId,
+                    eventFriendId,
+                    eventAction,
+                    eventRevision,
+                    requestSenderId,
+                    requestReceiverId,
+                    requestText,
+                    requestProfileRevision
+            );
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode chat payload", e);
+        }
+    }
+
     private record MemberResult(String status, String channelId, long playerId, int members) {
     }
 
@@ -795,5 +1152,39 @@ public final class ChatPayloadCodecs {
     }
 
     private record LongLongStringLong(long first, long second, String text, long revision) {
+    }
+
+    private record AllianceJoinAfterEvent(
+            long eventAllianceId,
+            long eventPlayerId,
+            String eventAction,
+            long eventRevision,
+            long requestAllianceId,
+            long requestPlayerId
+    ) {
+    }
+
+    private record AllianceSendAfterEvent(
+            long eventAllianceId,
+            long eventPlayerId,
+            String eventAction,
+            long eventRevision,
+            long requestAllianceId,
+            long requestSenderId,
+            String requestText,
+            long requestProfileRevision
+    ) {
+    }
+
+    private record DirectSendAfterFriendEvent(
+            long eventPlayerId,
+            long eventFriendId,
+            String eventAction,
+            long eventRevision,
+            long requestSenderId,
+            long requestReceiverId,
+            String requestText,
+            long requestProfileRevision
+    ) {
     }
 }

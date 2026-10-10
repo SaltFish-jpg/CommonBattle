@@ -4,12 +4,26 @@ import com.commonbattle.cluster.protocol.EncodedPayload;
 import com.commonbattle.cluster.protocol.PayloadCodec;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.protocol.PayloadEncoding;
+import com.commonbattle.battle.log.BattleLogEntry;
+import com.commonbattle.game.achievement.AchievementClaimResult;
+import com.commonbattle.game.activity.ActivityClaimResult;
+import com.commonbattle.game.bag.BagChange;
+import com.commonbattle.game.bag.BagResult;
+import com.commonbattle.game.battle.BattleSettlementResult;
+import com.commonbattle.game.battle.BattleSettlementStatus;
+import com.commonbattle.game.growth.GrowthResult;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
+import com.commonbattle.game.task.TaskClaimResult;
 import com.commonbattle.game.session.PlayerCommand;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
 
 import java.io.IOException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 玩家业务命令 payload codec。
@@ -23,6 +37,7 @@ public final class PlayerBusinessCommandPayloadCodecs {
         registry.register(new PlayerBusinessAckCodec());
         registry.register(new PlayerCommandCodec(registry));
         registry.register(new PlayerBusinessResponseCodec(registry));
+        registry.register(new ConsumeBagItemCommandCodec());
         registry.register(new ActivityProgressCommandCodec());
         registry.register(new ClaimActivityCommandCodec());
         registry.register(new UseExpItemsCommandCodec());
@@ -32,6 +47,13 @@ public final class PlayerBusinessCommandPayloadCodecs {
         registry.register(new BattleStageSweepCommandCodec());
         registry.register(new ClaimTaskCommandCodec());
         registry.register(new ClaimAchievementCommandCodec());
+        registry.register(new BagResultCodec());
+        registry.register(new ActivityClaimResultCodec());
+        registry.register(new GrowthResultCodec());
+        registry.register(new ShopPurchaseResultCodec());
+        registry.register(new BattleSettlementResultCodec());
+        registry.register(new TaskClaimResultCodec());
+        registry.register(new AchievementClaimResultCodec());
         return registry;
     }
 
@@ -247,6 +269,29 @@ public final class PlayerBusinessCommandPayloadCodecs {
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode player business response", e);
             }
+        }
+    }
+
+    private static final class ConsumeBagItemCommandCodec implements PayloadCodec<ConsumeBagItemCommand> {
+        @Override
+        public String typeName() {
+            return ConsumeBagItemCommand.class.getName();
+        }
+
+        @Override
+        public Class<ConsumeBagItemCommand> javaType() {
+            return ConsumeBagItemCommand.class;
+        }
+
+        @Override
+        public byte[] encode(ConsumeBagItemCommand payload) {
+            return encodeStringInt(payload.itemId(), payload.count());
+        }
+
+        @Override
+        public ConsumeBagItemCommand decode(byte[] bytes) {
+            StringInt decoded = decodeStringInt(bytes);
+            return new ConsumeBagItemCommand(decoded.text(), decoded.value());
         }
     }
 
@@ -511,6 +556,364 @@ public final class PlayerBusinessCommandPayloadCodecs {
         }
     }
 
+    private static final class BagResultCodec implements PayloadCodec<BagResult> {
+        @Override
+        public String typeName() {
+            return BagResult.class.getName();
+        }
+
+        @Override
+        public Class<BagResult> javaType() {
+            return BagResult.class;
+        }
+
+        @Override
+        public byte[] encode(BagResult payload) {
+            return encodeBagResult(payload);
+        }
+
+        @Override
+        public BagResult decode(byte[] bytes) {
+            return decodeBagResult(bytes);
+        }
+    }
+
+    private static final class ActivityClaimResultCodec implements PayloadCodec<ActivityClaimResult> {
+        @Override
+        public String typeName() {
+            return ActivityClaimResult.class.getName();
+        }
+
+        @Override
+        public Class<ActivityClaimResult> javaType() {
+            return ActivityClaimResult.class;
+        }
+
+        @Override
+        public byte[] encode(ActivityClaimResult payload) {
+            byte[] bag = encodeBagResult(payload.bagResult());
+            int size = CodedOutputStream.computeStringSize(1, payload.activityId())
+                    + CodedOutputStream.computeInt32Size(2, payload.progress())
+                    + CodedOutputStream.computeByteArraySize(3, bag);
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeString(1, payload.activityId());
+                output.writeInt32(2, payload.progress());
+                output.writeByteArray(3, bag);
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player business result", e);
+            }
+        }
+
+        @Override
+        public ActivityClaimResult decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            String activityId = "";
+            int progress = 0;
+            BagResult bag = new BagResult(List.of());
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> activityId = input.readString();
+                        case 2 -> progress = input.readInt32();
+                        case 3 -> bag = decodeBagResult(input.readByteArray());
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new ActivityClaimResult(activityId, progress, bag);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player business result", e);
+            }
+        }
+    }
+
+    private static final class GrowthResultCodec implements PayloadCodec<GrowthResult> {
+        @Override
+        public String typeName() {
+            return GrowthResult.class.getName();
+        }
+
+        @Override
+        public Class<GrowthResult> javaType() {
+            return GrowthResult.class;
+        }
+
+        @Override
+        public byte[] encode(GrowthResult payload) {
+            int size = CodedOutputStream.computeInt32Size(1, payload.beforeLevel())
+                    + CodedOutputStream.computeInt32Size(2, payload.afterLevel())
+                    + CodedOutputStream.computeInt32Size(3, payload.beforeExp())
+                    + CodedOutputStream.computeInt32Size(4, payload.afterExp());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeInt32(1, payload.beforeLevel());
+                output.writeInt32(2, payload.afterLevel());
+                output.writeInt32(3, payload.beforeExp());
+                output.writeInt32(4, payload.afterExp());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player business result", e);
+            }
+        }
+
+        @Override
+        public GrowthResult decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            int beforeLevel = 0;
+            int afterLevel = 0;
+            int beforeExp = 0;
+            int afterExp = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> beforeLevel = input.readInt32();
+                        case 2 -> afterLevel = input.readInt32();
+                        case 3 -> beforeExp = input.readInt32();
+                        case 4 -> afterExp = input.readInt32();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new GrowthResult(beforeLevel, afterLevel, beforeExp, afterExp);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player business result", e);
+            }
+        }
+    }
+
+    private static final class ShopPurchaseResultCodec implements PayloadCodec<ShopPurchaseResult> {
+        @Override
+        public String typeName() {
+            return ShopPurchaseResult.class.getName();
+        }
+
+        @Override
+        public Class<ShopPurchaseResult> javaType() {
+            return ShopPurchaseResult.class;
+        }
+
+        @Override
+        public byte[] encode(ShopPurchaseResult payload) {
+            byte[] cost = encodeBagResult(payload.cost());
+            byte[] reward = encodeBagResult(payload.reward());
+            int size = CodedOutputStream.computeStringSize(1, payload.status().name())
+                    + CodedOutputStream.computeStringSize(2, payload.sku())
+                    + CodedOutputStream.computeInt32Size(3, payload.quantity())
+                    + CodedOutputStream.computeByteArraySize(4, cost)
+                    + CodedOutputStream.computeByteArraySize(5, reward)
+                    + CodedOutputStream.computeInt32Size(6, payload.lifetimePurchased())
+                    + CodedOutputStream.computeInt32Size(7, payload.dailyPurchased())
+                    + CodedOutputStream.computeBoolSize(8, payload.replayed());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeString(1, payload.status().name());
+                output.writeString(2, payload.sku());
+                output.writeInt32(3, payload.quantity());
+                output.writeByteArray(4, cost);
+                output.writeByteArray(5, reward);
+                output.writeInt32(6, payload.lifetimePurchased());
+                output.writeInt32(7, payload.dailyPurchased());
+                output.writeBool(8, payload.replayed());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player business result", e);
+            }
+        }
+
+        @Override
+        public ShopPurchaseResult decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            ShopPurchaseStatus status = ShopPurchaseStatus.SUCCESS;
+            String sku = "";
+            int quantity = 1;
+            BagResult cost = new BagResult(List.of());
+            BagResult reward = new BagResult(List.of());
+            int lifetimePurchased = 0;
+            int dailyPurchased = 0;
+            boolean replayed = false;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> status = ShopPurchaseStatus.valueOf(input.readString());
+                        case 2 -> sku = input.readString();
+                        case 3 -> quantity = input.readInt32();
+                        case 4 -> cost = decodeBagResult(input.readByteArray());
+                        case 5 -> reward = decodeBagResult(input.readByteArray());
+                        case 6 -> lifetimePurchased = input.readInt32();
+                        case 7 -> dailyPurchased = input.readInt32();
+                        case 8 -> replayed = input.readBool();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new ShopPurchaseResult(status, sku, quantity, cost, reward,
+                        lifetimePurchased, dailyPurchased, replayed);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player business result", e);
+            }
+        }
+    }
+
+    private static final class BattleSettlementResultCodec implements PayloadCodec<BattleSettlementResult> {
+        @Override
+        public String typeName() {
+            return BattleSettlementResult.class.getName();
+        }
+
+        @Override
+        public Class<BattleSettlementResult> javaType() {
+            return BattleSettlementResult.class;
+        }
+
+        @Override
+        public byte[] encode(BattleSettlementResult payload) {
+            byte[] reward = encodeBagResult(payload.rewardResult());
+            List<byte[]> logs = payload.log().stream().map(PlayerBusinessCommandPayloadCodecs::encodeBattleLogEntry).toList();
+            int size = CodedOutputStream.computeStringSize(1, payload.settlementId())
+                    + CodedOutputStream.computeStringSize(2, payload.stageId())
+                    + CodedOutputStream.computeStringSize(3, payload.status().name())
+                    + CodedOutputStream.computeInt32Size(4, payload.rounds())
+                    + CodedOutputStream.computeInt32Size(5, payload.playerHp())
+                    + CodedOutputStream.computeInt32Size(6, payload.enemyHp())
+                    + CodedOutputStream.computeByteArraySize(7, reward)
+                    + CodedOutputStream.computeStringSize(8, payload.progressActivityId())
+                    + CodedOutputStream.computeInt32Size(9, payload.progressDelta())
+                    + CodedOutputStream.computeInt32Size(10, payload.stars())
+                    + CodedOutputStream.computeBoolSize(11, payload.firstClear())
+                    + CodedOutputStream.computeInt32Size(12, payload.clearCount())
+                    + logs.stream().mapToInt(log -> CodedOutputStream.computeByteArraySize(13, log)).sum()
+                    + CodedOutputStream.computeBoolSize(14, payload.swept())
+                    + CodedOutputStream.computeBoolSize(15, payload.replayed());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeString(1, payload.settlementId());
+                output.writeString(2, payload.stageId());
+                output.writeString(3, payload.status().name());
+                output.writeInt32(4, payload.rounds());
+                output.writeInt32(5, payload.playerHp());
+                output.writeInt32(6, payload.enemyHp());
+                output.writeByteArray(7, reward);
+                output.writeString(8, payload.progressActivityId());
+                output.writeInt32(9, payload.progressDelta());
+                output.writeInt32(10, payload.stars());
+                output.writeBool(11, payload.firstClear());
+                output.writeInt32(12, payload.clearCount());
+                for (byte[] log : logs) {
+                    output.writeByteArray(13, log);
+                }
+                output.writeBool(14, payload.swept());
+                output.writeBool(15, payload.replayed());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode player business result", e);
+            }
+        }
+
+        @Override
+        public BattleSettlementResult decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            String settlementId = "";
+            String stageId = "";
+            BattleSettlementStatus status = BattleSettlementStatus.VICTORY;
+            int rounds = 0;
+            int playerHp = 0;
+            int enemyHp = 0;
+            BagResult reward = new BagResult(List.of());
+            String progressActivityId = "";
+            int progressDelta = 0;
+            int stars = 0;
+            boolean firstClear = false;
+            int clearCount = 0;
+            List<BattleLogEntry> logs = new ArrayList<>();
+            boolean swept = false;
+            boolean replayed = false;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> settlementId = input.readString();
+                        case 2 -> stageId = input.readString();
+                        case 3 -> status = BattleSettlementStatus.valueOf(input.readString());
+                        case 4 -> rounds = input.readInt32();
+                        case 5 -> playerHp = input.readInt32();
+                        case 6 -> enemyHp = input.readInt32();
+                        case 7 -> reward = decodeBagResult(input.readByteArray());
+                        case 8 -> progressActivityId = input.readString();
+                        case 9 -> progressDelta = input.readInt32();
+                        case 10 -> stars = input.readInt32();
+                        case 11 -> firstClear = input.readBool();
+                        case 12 -> clearCount = input.readInt32();
+                        case 13 -> logs.add(decodeBattleLogEntry(input.readByteArray()));
+                        case 14 -> swept = input.readBool();
+                        case 15 -> replayed = input.readBool();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new BattleSettlementResult(settlementId, stageId, status, rounds, playerHp, enemyHp,
+                        reward, progressActivityId, progressDelta, stars, firstClear, clearCount, logs,
+                        swept, replayed);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode player business result", e);
+            }
+        }
+    }
+
+    private static final class TaskClaimResultCodec implements PayloadCodec<TaskClaimResult> {
+        @Override
+        public String typeName() {
+            return TaskClaimResult.class.getName();
+        }
+
+        @Override
+        public Class<TaskClaimResult> javaType() {
+            return TaskClaimResult.class;
+        }
+
+        @Override
+        public byte[] encode(TaskClaimResult payload) {
+            return encodeStringIntBag(payload.taskId(), payload.progress(), payload.reward());
+        }
+
+        @Override
+        public TaskClaimResult decode(byte[] bytes) {
+            StringIntBag decoded = decodeStringIntBag(bytes);
+            return new TaskClaimResult(decoded.text(), decoded.value(), decoded.bag());
+        }
+    }
+
+    private static final class AchievementClaimResultCodec implements PayloadCodec<AchievementClaimResult> {
+        @Override
+        public String typeName() {
+            return AchievementClaimResult.class.getName();
+        }
+
+        @Override
+        public Class<AchievementClaimResult> javaType() {
+            return AchievementClaimResult.class;
+        }
+
+        @Override
+        public byte[] encode(AchievementClaimResult payload) {
+            return encodeStringIntBag(payload.achievementId(), payload.progress(), payload.reward());
+        }
+
+        @Override
+        public AchievementClaimResult decode(byte[] bytes) {
+            StringIntBag decoded = decodeStringIntBag(bytes);
+            return new AchievementClaimResult(decoded.text(), decoded.value(), decoded.bag());
+        }
+    }
+
     private static byte[] encodeBattleStageCommand(String stageId, String settlementId) {
         int size = CodedOutputStream.computeStringSize(1, stageId)
                 + CodedOutputStream.computeStringSize(2, settlementId);
@@ -542,6 +945,163 @@ public final class PlayerBusinessCommandPayloadCodecs {
             return new StringString(stageId, settlementId);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to decode player business command", e);
+        }
+    }
+
+    private static byte[] encodeBagResult(BagResult result) {
+        List<byte[]> changes = result.changes().stream()
+                .map(PlayerBusinessCommandPayloadCodecs::encodeBagChange)
+                .toList();
+        int size = changes.stream()
+                .mapToInt(change -> CodedOutputStream.computeByteArraySize(1, change))
+                .sum();
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            for (byte[] change : changes) {
+                output.writeByteArray(1, change);
+            }
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode bag result", e);
+        }
+    }
+
+    private static BagResult decodeBagResult(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        List<BagChange> changes = new ArrayList<>();
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                if (WireFormat.getTagFieldNumber(tag) == 1) {
+                    changes.add(decodeBagChange(input.readByteArray()));
+                } else {
+                    input.skipField(tag);
+                }
+            }
+            return new BagResult(changes);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode bag result", e);
+        }
+    }
+
+    private static byte[] encodeBagChange(BagChange change) {
+        int size = CodedOutputStream.computeStringSize(1, change.itemId())
+                + CodedOutputStream.computeInt32Size(2, change.before())
+                + CodedOutputStream.computeInt32Size(3, change.after());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, change.itemId());
+            output.writeInt32(2, change.before());
+            output.writeInt32(3, change.after());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode bag change", e);
+        }
+    }
+
+    private static BagChange decodeBagChange(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String itemId = "";
+        int before = 0;
+        int after = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> itemId = input.readString();
+                    case 2 -> before = input.readInt32();
+                    case 3 -> after = input.readInt32();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new BagChange(itemId, before, after);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode bag change", e);
+        }
+    }
+
+    private static byte[] encodeBattleLogEntry(BattleLogEntry log) {
+        int size = CodedOutputStream.computeInt64Size(1, log.sequence())
+                + CodedOutputStream.computeInt64Size(2, log.occurredAt().toEpochMilli())
+                + CodedOutputStream.computeStringSize(3, log.type())
+                + CodedOutputStream.computeStringSize(4, log.message());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeInt64(1, log.sequence());
+            output.writeInt64(2, log.occurredAt().toEpochMilli());
+            output.writeString(3, log.type());
+            output.writeString(4, log.message());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode battle log", e);
+        }
+    }
+
+    private static BattleLogEntry decodeBattleLogEntry(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        long sequence = 0;
+        long occurredAtMillis = Instant.EPOCH.toEpochMilli();
+        String type = "";
+        String message = "";
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> sequence = input.readInt64();
+                    case 2 -> occurredAtMillis = input.readInt64();
+                    case 3 -> type = input.readString();
+                    case 4 -> message = input.readString();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new BattleLogEntry(sequence, Instant.ofEpochMilli(occurredAtMillis), type, message);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode battle log", e);
+        }
+    }
+
+    private static byte[] encodeStringIntBag(String text, int value, BagResult bag) {
+        byte[] bagBytes = encodeBagResult(bag);
+        int size = CodedOutputStream.computeStringSize(1, text)
+                + CodedOutputStream.computeInt32Size(2, value)
+                + CodedOutputStream.computeByteArraySize(3, bagBytes);
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeString(1, text);
+            output.writeInt32(2, value);
+            output.writeByteArray(3, bagBytes);
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode player business result", e);
+        }
+    }
+
+    private static StringIntBag decodeStringIntBag(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        String text = "";
+        int value = 0;
+        BagResult bag = new BagResult(List.of());
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> text = input.readString();
+                    case 2 -> value = input.readInt32();
+                    case 3 -> bag = decodeBagResult(input.readByteArray());
+                    default -> input.skipField(tag);
+                }
+            }
+            return new StringIntBag(text, value, bag);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode player business result", e);
         }
     }
 
@@ -642,6 +1202,9 @@ public final class PlayerBusinessCommandPayloadCodecs {
     }
 
     private record StringInt(String text, int value) {
+    }
+
+    private record StringIntBag(String text, int value, BagResult bag) {
     }
 
     private record StringString(String first, String second) {

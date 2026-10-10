@@ -72,6 +72,11 @@ import com.commonbattle.cluster.rpc.ResilientRpcGateway;
 import com.commonbattle.cluster.rpc.RpcRetryPolicy;
 import com.commonbattle.game.GameBusinessErrorCodes;
 import com.commonbattle.game.GameBusinessIllegalStateException;
+import com.commonbattle.game.bag.BagChangeAuditRecord;
+import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
+import com.commonbattle.game.event.EventGatedCommandAuditRecord;
+import com.commonbattle.game.event.EventGatedCommandBoundary;
+import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionStats;
@@ -119,6 +124,7 @@ import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.profile.ProfileReadMode;
 import com.commonbattle.game.profile.ProfileRuntime;
+import com.commonbattle.game.scene.SceneProjectionStats;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneRuntimeView;
 import com.commonbattle.game.shop.ShopPurchaseResult;
@@ -294,6 +300,7 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.actorMailboxPressures().pressureRejected());
         assertEquals(1, snapshot.actorMailboxPressures().rejectedByTargetType().get(AgentIdentity.FRIEND));
         assertEquals(1, snapshot.actorMailboxPressures().rejectedByActorGroup().get("friend"));
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertTrue(json.contains("\"actorMailboxPressures\""));
         assertTrue(json.contains("\"rejectedByTargetType\":{\"friend\":1}"));
         assertTrue(metrics.contains("commonbattle_actor_mailbox_pressure_rejected_total 1"));
@@ -339,6 +346,7 @@ class RuntimeHealthProbeTest {
         assertEquals(1, snapshot.actorHotspotAdmissions().hotspotRejected());
         assertEquals(1, snapshot.actorHotspotAdmissions().throttleRejected());
         assertEquals(1, snapshot.actorHotspotAdmissions().rejectedByTargetType().get(AgentIdentity.PLAYER));
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertTrue(json.contains("\"actorHotspotAdmissions\""));
         assertTrue(json.contains("\"rejectedByReason\":{\"actor_hotspot:throttle\":1}"));
         assertTrue(metrics.contains("commonbattle_actor_hotspot_admission_rejected_total 1"));
@@ -2067,6 +2075,88 @@ class RuntimeHealthProbeTest {
     }
 
     @Test
+    void snapshotAggregatesEventGatedCommandAuditStatsAndDegradesOnFailure() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryEventGatedCommandAuditLog audits = new InMemoryEventGatedCommandAuditLog(2);
+        audits.record(eventGatedAuditRecord("submitted", ""));
+        audits.record(eventGatedAuditRecord("completed", "SENT"));
+        audits.record(eventGatedAuditRecord("failed", "timeout"));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(audits);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.CHAT, "r1", "chat-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(1, snapshot.eventGatedCommandAudits().auditCount());
+        assertEquals(2, snapshot.eventGatedCommandAudits().retained());
+        assertEquals(3, snapshot.eventGatedCommandAudits().recorded());
+        assertEquals(1, snapshot.eventGatedCommandAudits().submitted());
+        assertEquals(1, snapshot.eventGatedCommandAudits().completed());
+        assertEquals(1, snapshot.eventGatedCommandAudits().failed());
+        assertEquals(1, snapshot.eventGatedCommandAudits().dropped());
+        assertTrue(json.contains("\"eventGatedCommandAudits\":{\"auditCount\":1,\"retained\":2"));
+        assertTrue(metrics.contains("commonbattle_event_gated_command_audits 1"));
+        assertTrue(metrics.contains("commonbattle_event_gated_command_audit_failed_total 1"));
+    }
+
+    @Test
+    void snapshotAggregatesBagChangeAuditStats() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        InMemoryBagChangeAuditLog audits = new InMemoryBagChangeAuditLog(2);
+        audits.record(bagChangeAuditRecord(10001L, 1, PlayerBusinessOperations.SHOP_BUY, "gold", 100, 50));
+        audits.record(bagChangeAuditRecord(10001L, 1, PlayerBusinessOperations.SHOP_BUY, "exp_potion", 2, 3));
+        audits.record(bagChangeAuditRecord(10001L, 2, PlayerBusinessOperations.BAG_CONSUME_ITEM, "exp_potion", 3, 1));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(audits);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(1, snapshot.bagChangeAudits().auditCount());
+        assertEquals(2, snapshot.bagChangeAudits().retained());
+        assertEquals(3, snapshot.bagChangeAudits().recorded());
+        assertEquals(1, snapshot.bagChangeAudits().increased());
+        assertEquals(2, snapshot.bagChangeAudits().decreased());
+        assertEquals(0, snapshot.bagChangeAudits().unchanged());
+        assertEquals(1, snapshot.bagChangeAudits().dropped());
+        assertTrue(json.contains("\"bagChangeAudits\":{\"auditCount\":1,\"retained\":2"));
+        assertTrue(metrics.contains("commonbattle_bag_change_audits 1"));
+        assertTrue(metrics.contains("commonbattle_bag_change_audit_recorded_total 3"));
+        assertTrue(metrics.contains("commonbattle_bag_change_audit_dropped_total 1"));
+    }
+
+    @Test
     void shopRuntimeStatsAreReportedAndOrderConflictsDegradeHealth() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
         ShopRuntimeView shops = () -> new ShopRuntimeStats(3, 1, 1, 0, 0, 0, 0, 0, 1, 1,
@@ -2112,7 +2202,7 @@ class RuntimeHealthProbeTest {
     @Test
     void asyncShopPurchaseStatsAreReportedAndChainFailuresDegradeHealth() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
-        AsyncShopPurchaseView purchases = () -> new AsyncShopPurchaseStats(4, 1, 3, 1, 1, 1, 1, 2, 2, 1, 1);
+        AsyncShopPurchaseView purchases = () -> new AsyncShopPurchaseStats(5, 1, 4, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1);
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
         registry.register(purchases);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -2136,21 +2226,31 @@ class RuntimeHealthProbeTest {
 
         assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
         assertEquals(1, snapshot.asyncShopPurchases().viewCount());
-        assertEquals(4, snapshot.asyncShopPurchases().startedPurchases());
-        assertEquals(3, snapshot.asyncShopPurchases().stockReservations());
+        assertEquals(5, snapshot.asyncShopPurchases().startedPurchases());
+        assertEquals(4, snapshot.asyncShopPurchases().stockReservations());
+        assertEquals(1, snapshot.asyncShopPurchases().currentPendingCommands());
         assertEquals(1, snapshot.asyncShopPurchases().rpcFailures());
         assertEquals(1, snapshot.asyncShopPurchases().lateCallbacks());
+        assertEquals(1, snapshot.asyncShopPurchases().abandonedPendingCommands());
         assertEquals(1, snapshot.asyncShopPurchases().releaseFailures());
-        assertTrue(json.contains("\"asyncShopPurchases\":{\"viewCount\":1,\"startedPurchases\":4"));
-        assertTrue(metrics.contains("commonbattle_async_shop_purchase_started_total 4"));
+        assertEquals(0, snapshot.asyncShopPurchases().stockReservationCallbackGap());
+        assertEquals(2, snapshot.asyncShopPurchases().compensationAttempts());
+        assertTrue(json.contains("\"asyncShopPurchases\":{\"viewCount\":1,\"startedPurchases\":5"));
+        assertTrue(json.contains("\"currentPendingCommands\":1"));
+        assertTrue(json.contains("\"abandonedPendingCommands\":1"));
+        assertTrue(json.contains("\"compensationAttempts\":2"));
+        assertTrue(metrics.contains("commonbattle_async_shop_purchase_started_total 5"));
+        assertTrue(metrics.contains("commonbattle_async_shop_purchase_current_pending 1"));
         assertTrue(metrics.contains("commonbattle_async_shop_purchase_late_callbacks_total 1"));
+        assertTrue(metrics.contains("commonbattle_async_shop_purchase_abandoned_pending_commands_total 1"));
         assertTrue(metrics.contains("commonbattle_async_shop_purchase_release_failures_total 1"));
+        assertTrue(metrics.contains("commonbattle_async_shop_purchase_compensation_attempts_total 2"));
     }
 
     @Test
     void asyncShopPurchaseBusinessRejectsDoNotDegradeHealth() {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
-        AsyncShopPurchaseView purchases = () -> new AsyncShopPurchaseStats(2, 0, 2, 0, 2, 0, 0, 0, 2, 0, 0);
+        AsyncShopPurchaseView purchases = () -> new AsyncShopPurchaseStats(2, 0, 2, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0);
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
         registry.register(purchases);
         RuntimeHealthProbe probe = new RuntimeHealthProbe(
@@ -2360,9 +2460,11 @@ class RuntimeHealthProbeTest {
         assertEquals(3, snapshot.sceneRuntimes().projectionAppliedSnapshots());
         assertEquals(3, snapshot.sceneRuntimes().projectionIgnoredSnapshots());
         assertEquals(0, snapshot.sceneRuntimes().projectionStaleViews());
+        assertEquals(0, snapshot.sceneRuntimes().projectionFreshReadRequests());
         assertTrue(json.contains("\"sceneRuntimes\":{\"runtimeCount\":2,\"activeScenes\":3,\"activePlayers\":40"));
         assertTrue(json.contains("\"projectionGapEvents\":1"));
         assertTrue(json.contains("\"projectionIgnoredSnapshots\":3"));
+        assertTrue(json.contains("\"projectionFreshReadRequests\":0"));
         assertTrue(metrics.contains("commonbattle_scene_runtimes 2"));
         assertTrue(metrics.contains("commonbattle_scene_active_scenes 3"));
         assertTrue(metrics.contains("commonbattle_scene_active_players 40"));
@@ -2373,6 +2475,73 @@ class RuntimeHealthProbeTest {
         assertTrue(metrics.contains("commonbattle_scene_projection_received_events_total 8"));
         assertTrue(metrics.contains("commonbattle_scene_projection_gap_events_total 1"));
         assertTrue(metrics.contains("commonbattle_scene_projection_ignored_snapshots_total 3"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_fresh_read_requests_total 0"));
+    }
+
+    @Test
+    void sceneProjectionFreshReadStatsAreReportedAndFailuresDegradeHealth() {
+        ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        SceneRuntimeView scenes = new SceneRuntimeView() {
+            @Override
+            public SceneRuntimeStats stats() {
+                return new SceneRuntimeStats(1, 2, 1, 2, 0, 0, 0, 0,
+                        2, 2, 0, 1, 1, 1, 0, 0,
+                        4, 1, 1, 1, 1);
+            }
+
+            @Override
+            public SceneProjectionStats friendProjectionStats() {
+                return new SceneProjectionStats(1, 1, 0, 1, 1, 1, 0, 0,
+                        2, 1, 1, 0, 0);
+            }
+
+            @Override
+            public SceneProjectionStats allianceProjectionStats() {
+                return new SceneProjectionStats(1, 1, 0, 0, 0, 0, 0, 0,
+                        2, 0, 0, 1, 1);
+            }
+        };
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(scenes);
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(
+                        ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                        actors,
+                        new InMemoryAgentDirectory(),
+                        CLOCK
+                ),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+
+        RuntimeHealthSnapshot snapshot = probe.snapshot();
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+
+        assertEquals(RuntimeHealthStatus.DEGRADED, snapshot.status());
+        assertEquals(4, snapshot.sceneRuntimes().projectionFreshReadRequests());
+        assertEquals(1, snapshot.sceneRuntimes().projectionFreshReadLocalHits());
+        assertEquals(1, snapshot.sceneRuntimes().projectionFreshReadRefreshes());
+        assertEquals(1, snapshot.sceneRuntimes().projectionFreshReadRemoteStale());
+        assertEquals(1, snapshot.sceneRuntimes().projectionFreshReadRemoteMisses());
+        assertEquals(2, snapshot.sceneRuntimes().friendProjection().freshReadRequests());
+        assertEquals(1, snapshot.sceneRuntimes().friendProjection().freshReadLocalHits());
+        assertEquals(1, snapshot.sceneRuntimes().friendProjection().freshReadRefreshes());
+        assertEquals(2, snapshot.sceneRuntimes().allianceProjection().freshReadRequests());
+        assertEquals(1, snapshot.sceneRuntimes().allianceProjection().freshReadRemoteStale());
+        assertEquals(1, snapshot.sceneRuntimes().allianceProjection().freshReadRemoteMisses());
+        assertTrue(json.contains("\"projectionFreshReadRemoteStale\":1"));
+        assertTrue(json.contains("\"friendProjection\":{\"receivedEvents\":1"));
+        assertTrue(json.contains("\"allianceProjection\":{\"receivedEvents\":1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_fresh_read_refreshes_total 1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_fresh_read_remote_misses_total 1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_source_fresh_read_refreshes_total{source=\"friend\"} 1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_source_fresh_read_remote_stale_total{source=\"alliance\"} 1"));
+        assertTrue(metrics.contains("commonbattle_scene_projection_source_fresh_read_remote_misses_total{source=\"alliance\"} 1"));
     }
 
     @Test
@@ -2708,6 +2877,36 @@ class RuntimeHealthProbeTest {
 
     private static OwnerRepairOpsAuditRecord ownerRepairOpsRecord(String action, String ownerKey, int released) {
         return new OwnerRepairOpsAuditRecord(action, ownerKey, released, CLOCK.instant(), "/127.0.0.1:10000");
+    }
+
+    private static EventGatedCommandAuditRecord eventGatedAuditRecord(String outcome, String result) {
+        return new EventGatedCommandAuditRecord(
+                "chat.direct.send.after_friend_event",
+                "com.commonbattle.game.chat.DirectChatSendRequest",
+                new EventGatedCommandBoundary("friend.changed", "friend:10001", 3),
+                outcome,
+                result,
+                CLOCK.instant()
+        );
+    }
+
+    private static BagChangeAuditRecord bagChangeAuditRecord(
+            long playerId,
+            long eventRevision,
+            String reason,
+            String itemId,
+            int before,
+            int after
+    ) {
+        return new BagChangeAuditRecord(
+                playerId,
+                eventRevision,
+                reason,
+                itemId,
+                before,
+                after,
+                CLOCK.instant()
+        );
     }
 
     private static PlayerCommand businessCommand(long sequence) {

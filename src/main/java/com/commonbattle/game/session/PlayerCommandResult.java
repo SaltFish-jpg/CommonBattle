@@ -44,6 +44,11 @@ public record PlayerCommandResult(
                 Optional.empty(), Optional.of(status), Duration.ZERO);
     }
 
+    public static PlayerCommandResult duplicateWithoutCachedResponse() {
+        return new PlayerCommandResult(PlayerCommandStatus.DUPLICATE, "duplicate:WATERMARK_ONLY",
+                Optional.empty(), Optional.empty(), Duration.ZERO);
+    }
+
     public static PlayerCommandResult reject(PlayerCommandStatus status, String reason) {
         return reject(status, reason, Duration.ZERO);
     }
@@ -58,6 +63,7 @@ public record PlayerCommandResult(
 
     public boolean waitForExistingResponse() {
         return status == PlayerCommandStatus.DUPLICATE
-                && originalStatus.orElse(PlayerCommandStatus.ACCEPTED) == PlayerCommandStatus.ACCEPTED;
+                && originalStatus.isPresent()
+                && originalStatus.orElseThrow() == PlayerCommandStatus.ACCEPTED;
     }
 }

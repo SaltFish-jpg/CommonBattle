@@ -1,5 +1,6 @@
 package com.commonbattle.game.scene;
 
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.event.OwnerEventInterestControl;
@@ -9,6 +10,7 @@ import com.commonbattle.game.social.AllianceOwnerKeyParser;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import com.commonbattle.game.social.AllianceSnapshot;
+import com.commonbattle.game.social.AllianceSnapshotReader;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -25,6 +27,7 @@ import java.util.function.Consumer;
 public final class SceneAllianceAwarenessAgent {
     private final AgentMessagePort messages;
     private final ActorRef self;
+    private final AllianceSnapshotReader snapshotReader;
     private OwnerEventInterestControl interests;
     private AllianceMembershipChangeListener membershipChanges = AllianceMembershipChangeListener.noop();
     private final Set<Long> onlinePlayers = new HashSet<>();
@@ -39,6 +42,11 @@ public final class SceneAllianceAwarenessAgent {
     private long repairRequests;
     private long appliedSnapshots;
     private long ignoredSnapshots;
+    private long freshReadRequests;
+    private long freshReadLocalHits;
+    private long freshReadRefreshes;
+    private long freshReadRemoteStale;
+    private long freshReadRemoteMisses;
 
     public SceneAllianceAwarenessAgent(AgentMessagePort messages, ActorRef self) {
         this(messages, self, OwnerEventInterestControl.noop());
@@ -49,9 +57,19 @@ public final class SceneAllianceAwarenessAgent {
             ActorRef self,
             OwnerEventInterestControl interests
     ) {
+        this(messages, self, interests, ignored -> Optional.empty());
+    }
+
+    public SceneAllianceAwarenessAgent(
+            AgentMessagePort messages,
+            ActorRef self,
+            OwnerEventInterestControl interests,
+            AllianceSnapshotReader snapshotReader
+    ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.self = Objects.requireNonNull(self, "self");
         this.interests = Objects.requireNonNull(interests, "interests");
+        this.snapshotReader = Objects.requireNonNull(snapshotReader, "snapshotReader");
     }
 
     public void attachInterests(OwnerEventInterestControl interests) {
@@ -152,7 +170,32 @@ public final class SceneAllianceAwarenessAgent {
         });
     }
 
+    public void onAllianceChangedAndReadFreshMembership(
+            AllianceMemberChangedEvent event,
+            Consumer<AllianceMembershipDecision> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleAllianceChanged(event);
+            callback.accept(freshMembershipOf(event.allianceId(), event.playerId(), event.revision()));
+        });
+    }
+
+    public void onAllianceChangedAndReadFreshMembershipResult(
+            AllianceMemberChangedEvent event,
+            Consumer<SceneAllianceReadResult> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> {
+            handleAllianceChanged(event);
+            callback.accept(readFreshMembershipOf(event.allianceId(), event.playerId(), event.revision()));
+        });
+    }
+
     public synchronized void handleAllianceChanged(AllianceMemberChangedEvent event) {
+        ActorContext.requireCurrent(self);
         apply(event);
     }
 
@@ -161,6 +204,7 @@ public final class SceneAllianceAwarenessAgent {
     }
 
     public synchronized void handleSnapshot(AllianceSnapshot snapshot) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(snapshot, "snapshot");
         if (!watchedAlliances.containsKey(snapshot.allianceId())) {
             ignoredSnapshots++;
@@ -207,6 +251,53 @@ public final class SceneAllianceAwarenessAgent {
                 : AllianceMembershipDecision.NOT_MEMBER;
     }
 
+    public synchronized AllianceMembershipDecision freshMembershipOf(
+            long allianceId,
+            long playerId,
+            long minimumRevision
+    ) {
+        ActorContext.requireCurrent(self);
+        SceneAllianceReadResult result = readFreshMembershipOf(allianceId, playerId, minimumRevision);
+        return result.fresh() ? result.membership() : AllianceMembershipDecision.STALE;
+    }
+
+    public synchronized SceneAllianceReadResult readFreshMembershipOf(
+            long allianceId,
+            long playerId,
+            long minimumRevision
+    ) {
+        ActorContext.requireCurrent(self);
+        if (minimumRevision < 0) {
+            throw new IllegalArgumentException("minimumRevision must not be negative");
+        }
+        freshReadRequests++;
+        AllianceMembershipDecision local = membershipOf(allianceId, playerId);
+        if (local != AllianceMembershipDecision.STALE
+                && checkpoint.revisionOf(AllianceOwnerKeyParser.ownerKey(allianceId)) >= minimumRevision) {
+            freshReadLocalHits++;
+            return new SceneAllianceReadResult(local, SceneAllianceReadStatus.LOCAL_HIT);
+        }
+        Optional<AllianceSnapshot> snapshot = snapshotReader.find(allianceId);
+        if (snapshot.isPresent() && snapshot.orElseThrow().revision() >= minimumRevision) {
+            handleSnapshot(snapshot.orElseThrow());
+            AllianceMembershipDecision refreshed = membershipOf(allianceId, playerId);
+            if (refreshed != AllianceMembershipDecision.STALE
+                    && checkpoint.revisionOf(AllianceOwnerKeyParser.ownerKey(allianceId)) >= minimumRevision) {
+                freshReadRefreshes++;
+                return new SceneAllianceReadResult(refreshed, SceneAllianceReadStatus.REFRESHED);
+            }
+            freshReadRemoteStale++;
+            return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_STALE);
+        }
+        if (snapshot.isPresent()) {
+            freshReadRemoteStale++;
+            return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_STALE);
+        } else {
+            freshReadRemoteMisses++;
+            return new SceneAllianceReadResult(AllianceMembershipDecision.STALE, SceneAllianceReadStatus.REMOTE_MISS);
+        }
+    }
+
     public synchronized long revisionOf(long allianceId) {
         return checkpoint.revisionOf("alliance:" + allianceId);
     }
@@ -226,7 +317,12 @@ public final class SceneAllianceAwarenessAgent {
                 repairRequests,
                 appliedSnapshots,
                 ignoredSnapshots,
-                staleViews
+                staleViews,
+                freshReadRequests,
+                freshReadLocalHits,
+                freshReadRefreshes,
+                freshReadRemoteStale,
+                freshReadRemoteMisses
         );
     }
 

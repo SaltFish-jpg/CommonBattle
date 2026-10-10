@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneProfileAwarenessAgentTest {
@@ -120,7 +121,7 @@ class SceneProfileAwarenessAgentTest {
     }
 
     @Test
-    void freshProfileOfRefreshesAfterGapEventBeforeSceneUsesSnapshot() {
+    void mailboxFreshProfileReadRefreshesAfterGapEventBeforeSceneUsesSnapshot() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem actors = new ActorSystem(executor, 64);
         var cache = new com.commonbattle.game.profile.LocalProfileCache();
@@ -139,8 +140,12 @@ class SceneProfileAwarenessAgentTest {
         executor.runNext();
         scene.onProfileChanged(event(10001L, 3, "hero", "avatar_gap"));
         executor.runNext();
+        AtomicReference<Optional<CachedProfile>> callback = new AtomicReference<>();
 
-        PlayerProfileSnapshot snapshot = scene.freshProfileOf(10001L, 3).orElseThrow().snapshot();
+        scene.readFreshProfileAtLeast(event(10001L, 3, "hero", "avatar_gap"), callback::set);
+        executor.runNext();
+
+        PlayerProfileSnapshot snapshot = callback.get().orElseThrow().snapshot();
         assertEquals("avatar_3", snapshot.appearance().avatar());
         assertFalse(scene.profileOf(10001L).orElseThrow().stale());
     }
@@ -191,6 +196,55 @@ class SceneProfileAwarenessAgentTest {
         executor.runNext();
 
         assertTrue(callback.get().isEmpty());
+        assertTrue(scene.profileOf(10001L).isEmpty());
+    }
+
+    @Test
+    void directProfileEventHandlingCannotBypassSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneProfileAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class,
+                () -> scene.handleProfileChanged(event(10001L, 1, "hero", "avatar_2")));
+        assertTrue(scene.profileOf(10001L).isEmpty());
+    }
+
+    @Test
+    void directProfileSnapshotRefreshCannotBypassSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        SceneProfileAwarenessAgent scene = createScene(executor);
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class,
+                () -> scene.handleSnapshot(event(10001L, 1, "hero", "avatar_2").snapshot()));
+        assertTrue(scene.profileOf(10001L).isEmpty());
+    }
+
+    @Test
+    void directFreshProfileReadCannotRefreshOutsideSceneMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        var cache = new com.commonbattle.game.profile.LocalProfileCache();
+        ProfileRuntime runtime = new ProfileRuntime(
+                cache,
+                ProfileInterestControl.noop(),
+                playerId -> java.util.Optional.of(event(playerId, 1, "hero", "avatar_2").snapshot())
+        );
+        SceneProfileAwarenessAgent scene = new SceneProfileAwarenessAgent(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                actors.actor("scene-profile"),
+                runtime
+        );
+
+        scene.enter(10001L);
+        executor.runNext();
+
+        assertThrows(IllegalStateException.class, () -> scene.freshProfileOf(10001L, 1));
         assertTrue(scene.profileOf(10001L).isEmpty());
     }
 

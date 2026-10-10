@@ -41,6 +41,8 @@ class ClusterDescriptorsTest {
         );
 
         assertTrue(descriptor.supports(SceneOperations.ENTER));
+        assertTrue(descriptor.supports(SceneOperations.MOVE));
+        assertTrue(descriptor.supports(SceneOperations.COMBAT_DAMAGE));
         assertTrue(descriptor.supports(BusinessAgentRpcOperations.DISPATCH));
     }
 

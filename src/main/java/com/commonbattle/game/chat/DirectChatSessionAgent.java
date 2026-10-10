@@ -105,12 +105,29 @@ public final class DirectChatSessionAgent {
         messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(sendNow(request)));
     }
 
+    public void sendAfterAccessStatus(
+            DirectChatSendRequest request,
+            ChatSendStatus accessStatus,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureParticipant(request.senderId());
+        ensureParticipant(request.receiverId());
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> callback.accept(sendNow(request, accessStatus)));
+    }
+
     public ChatChannelSnapshot snapshotNow() {
         return new ChatChannelSnapshot(sessionId, java.util.Set.of(firstPlayerId, secondPlayerId), history, revision);
     }
 
     private ChatSendResult sendNow(DirectChatSendRequest request) {
-        ChatSendStatus accessStatus = accessPolicy.inspect(request);
+        return sendNow(request, accessPolicy.inspect(request));
+    }
+
+    private ChatSendResult sendNow(DirectChatSendRequest request, ChatSendStatus accessStatus) {
         if (accessStatus != ChatSendStatus.SENT) {
             return ChatSendResult.rejected(accessStatus);
         }

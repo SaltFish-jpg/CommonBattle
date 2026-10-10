@@ -4,6 +4,7 @@ package com.commonbattle.battle.context;
 
 import com.commonbattle.battle.command.Command;
 import com.commonbattle.battle.command.CommandQueue;
+import com.commonbattle.battle.effect.Effect;
 import com.commonbattle.battle.effect.EffectResolver;
 import com.commonbattle.battle.event.EventBus;
 import com.commonbattle.battle.log.BattleLog;
@@ -14,6 +15,7 @@ import com.commonbattle.battle.state.BattleState;
 import com.commonbattle.battle.trigger.TriggerSystem;
 import com.commonbattle.battle.trigger.TriggerTiming;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -81,6 +83,10 @@ public final class BattleContext {
         }
     }
 
+    public void resolveEffects(List<Effect> effects) {
+        effectResolver.resolve(this, effects);
+    }
+
     public <T> Optional<T> find(Class<T> type) {
         return Optional.ofNullable(type.cast(scoped.get(type)));
     }
@@ -113,7 +119,7 @@ public final class BattleContext {
         withScoped(Command.class, command, () -> {
             ruleSet.validate(this, command);
             triggerSystem.fire(TriggerTiming.BEFORE_COMMAND, this);
-            effectResolver.resolve(this, command.effects(this));
+            resolveEffects(command.effects(this));
             triggerSystem.fire(TriggerTiming.AFTER_COMMAND, this);
             log.add("command.completed", command.getClass().getSimpleName() + " completed");
         });

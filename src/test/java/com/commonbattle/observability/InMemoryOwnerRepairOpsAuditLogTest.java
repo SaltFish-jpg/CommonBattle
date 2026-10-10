@@ -87,6 +87,10 @@ class InMemoryOwnerRepairOpsAuditLogTest {
         assertThrows(IllegalArgumentException.class, () -> new OwnerRepairOpsAuditConfig(0, true));
         assertThrows(IllegalArgumentException.class,
                 () -> record("release", "friend:10001", -1));
+        InMemoryOwnerRepairOpsAuditLog audit = new InMemoryOwnerRepairOpsAuditLog(8);
+        assertThrows(IllegalArgumentException.class,
+                () -> audit.record(record("unknown", "friend:10001", 0)));
+        assertEquals(0, audit.size());
         assertThrows(IllegalArgumentException.class,
                 () -> new OwnerRepairOpsAuditQuery(null, null, -1, 1));
         assertThrows(IllegalArgumentException.class,

@@ -1,5 +1,6 @@
 package com.commonbattle.game.scene;
 
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.profile.CachedProfile;
@@ -117,6 +118,7 @@ public final class SceneProfileAwarenessAgent {
     }
 
     public void handleProfileChanged(ProfileChangedEvent event) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(event, "event");
         if (onlineInterests.containsKey(event.playerId())) {
             SubscriptionDecision decision = profiles.apply(event);
@@ -131,6 +133,7 @@ public final class SceneProfileAwarenessAgent {
     }
 
     public void handleSnapshot(PlayerProfileSnapshot snapshot) {
+        ActorContext.requireCurrent(self);
         Objects.requireNonNull(snapshot, "snapshot");
         if (!onlineInterests.containsKey(snapshot.playerId())) {
             return;
@@ -146,6 +149,7 @@ public final class SceneProfileAwarenessAgent {
     }
 
     public Optional<CachedProfile> freshProfileOf(long playerId, long minimumRevision) {
+        ActorContext.requireCurrent(self);
         ProfileReadResult result = profiles.readAtLeast(playerId, minimumRevision);
         return result.fresh() ? result.profile() : Optional.empty();
     }

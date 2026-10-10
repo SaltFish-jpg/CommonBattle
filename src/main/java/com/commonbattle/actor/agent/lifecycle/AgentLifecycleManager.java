@@ -95,11 +95,17 @@ public final class AgentLifecycleManager {
         Objects.requireNonNull(onPassivate, "onPassivate");
         AgentLifecycleRecord active = transitionFromActive(identity, AgentLifecycleState.PASSIVATING);
         actors.send(active.location().actorRef(), context -> {
-            // 钝化边界：保存和释放在旧 owner 邮箱内串行完成，完成后再从目录解绑。
-            onPassivate.run(context);
-            directory.unbind(identity, active.location());
-            records.put(identity, new AgentLifecycleRecord(identity, active.location(),
-                    AgentLifecycleState.PASSIVATED, clock.instant()));
+            try {
+                // 钝化边界：保存和释放在旧 owner 邮箱内串行完成，完成后再从目录解绑。
+                onPassivate.run(context);
+                directory.unbind(identity, active.location());
+                records.put(identity, new AgentLifecycleRecord(identity, active.location(),
+                        AgentLifecycleState.PASSIVATED, clock.instant()));
+            } catch (RuntimeException e) {
+                records.put(identity, new AgentLifecycleRecord(identity, active.location(),
+                        AgentLifecycleState.ACTIVE, clock.instant()));
+                throw e;
+            }
         });
         return true;
     }

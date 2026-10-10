@@ -20,6 +20,9 @@ import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.config.GameConfigRuntime;
 import com.commonbattle.game.config.GameConfigView;
+import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -27,6 +30,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,22 +44,23 @@ class PlayerAgentMigrationAdapterTest {
         Fixture fixture = new Fixture(ServiceId.of(ServiceKind.GAME, "r1", "game-1"));
         PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
         agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("gold", 88)));
+        fixture.commandSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
         PlayerAgentMigrationStatePacker packer = new PlayerAgentMigrationStatePacker(
                 fixture.manager,
-                fixture.serializer
+                fixture.serializer,
+                fixture.commandSequencer
         );
 
-        AgentMigrationSnapshot migration = packer.pack(
-                AgentIdentity.player(10001L),
-                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"), new ActorRef("player-10001")),
-                null
-        );
+        AgentMigrationSnapshot migration = packInPlayerMailbox(fixture, packer, AgentIdentity.player(10001L),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"), new ActorRef("player-10001")));
         PlayerStateSnapshot snapshot = fixture.serializer.deserialize(migration.stateBytes());
 
         assertEquals(PlayerAgentMigrationStatePacker.STATE_TYPE, migration.stateType());
         assertEquals(10001L, snapshot.playerId());
         assertEquals(88, snapshot.bag().itemCounts().get("gold"));
         assertEquals(1, snapshot.revision());
+        assertEquals(1, snapshot.commandSequencer().watermarks().size());
+        assertEquals(2, snapshot.commandSequencer().watermarks().getFirst().lastSequence());
     }
 
     @Test
@@ -78,7 +83,8 @@ class PlayerAgentMigrationAdapterTest {
         );
         PlayerAgentMigrationRestoreHandler handler = new PlayerAgentMigrationRestoreHandler(
                 fixture.manager,
-                fixture.serializer
+                fixture.serializer,
+                fixture.commandSequencer
         );
 
         fixture.lifecycles.acceptMigrated(player, actor.id(), context -> handler.restore(request, context));
@@ -86,6 +92,38 @@ class PlayerAgentMigrationAdapterTest {
         assertTrue(fixture.manager.get(10001L).isPresent());
         assertEquals(120, fixture.manager.getOrCreate(10001L).profile().bag().count("gold"));
         assertEquals(8, fixture.repository.load(10001L).orElseThrow().revision());
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.commandSequencer.inspect(command(1)));
+    }
+
+    @Test
+    void restoreHandlerRestoresMigratedCommandWatermark() {
+        Fixture fixture = new Fixture(ServiceId.of(ServiceKind.GAME, "r1", "game-2"));
+        AgentIdentity player = AgentIdentity.player(10001L);
+        ActorRef actor = new ActorRef("player-10001");
+        fixture.directory.claim(player, new AgentLocation(fixture.localService, actor));
+        PlayerCommandSequencer sourceSequencer = new PlayerCommandSequencer();
+        sourceSequencer.commit(command(1), PlayerCommandStatus.ACCEPTED);
+        sourceSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
+        PlayerStateSnapshot state = new PlayerProfile(10001L, SERVER_OPEN_TIME)
+                .snapshot(8, 3, CLOCK.instant())
+                .withCommandSequencer(sourceSequencer.snapshotForPlayer(10001L));
+        AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                player,
+                actor.id(),
+                PlayerAgentMigrationStatePacker.STATE_TYPE,
+                fixture.serializer.serialize(state)
+        );
+        PlayerAgentMigrationRestoreHandler handler = new PlayerAgentMigrationRestoreHandler(
+                fixture.manager,
+                fixture.serializer,
+                fixture.commandSequencer
+        );
+
+        fixture.lifecycles.acceptMigrated(player, actor.id(), context -> handler.restore(request, context));
+
+        assertEquals(PlayerCommandStatus.DUPLICATE, fixture.commandSequencer.inspect(command(2)));
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.commandSequencer.inspect(command(3)));
+        assertEquals(PlayerCommandStatus.GAP, fixture.commandSequencer.inspect(command(4)));
     }
 
     @Test
@@ -95,12 +133,14 @@ class PlayerAgentMigrationAdapterTest {
         agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("gold", 66)));
         PlayerAgentMigrationStatePacker packer = new PlayerAgentMigrationStatePacker(
                 fixture.manager,
-                fixture.serializer
+                fixture.serializer,
+                fixture.commandSequencer
         );
+        fixture.commandSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
         AgentLocation source = new AgentLocation(fixture.localService, new ActorRef("player-10001"));
         AgentLocation target = new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"),
                 new ActorRef("player-10001"));
-        AgentMigrationSnapshot snapshot = packer.pack(AgentIdentity.player(10001L), target, null);
+        AgentMigrationSnapshot snapshot = packInPlayerMailbox(fixture, packer, AgentIdentity.player(10001L), target);
         AgentMigrationTask task = new AgentMigrationTask(
                 "task-1",
                 AgentIdentity.player(10001L),
@@ -113,17 +153,31 @@ class PlayerAgentMigrationAdapterTest {
         );
         PlayerAgentMigrationSourceHook hook = new PlayerAgentMigrationSourceHook(
                 fixture.manager,
-                fixture.serializer
+                fixture.serializer,
+                fixture.commandSequencer
         );
 
         hook.sourceMoved(task);
 
         assertTrue(fixture.manager.get(10001L).isEmpty());
+        assertEquals(PlayerCommandStatus.GAP, fixture.commandSequencer.inspect(command(3)));
 
         hook.rollbackRestored(task);
 
         assertTrue(fixture.manager.get(10001L).isPresent());
         assertEquals(66, fixture.manager.getOrCreate(10001L).profile().bag().count("gold"));
+        assertEquals(PlayerCommandStatus.DUPLICATE, fixture.commandSequencer.inspect(command(2)));
+    }
+
+    private static PlayerCommand command(long sequence) {
+        return new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                sequence,
+                PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                new ActivityProgressCommand("kill-3", 1)
+        );
     }
 
     private static final class Fixture {
@@ -133,6 +187,7 @@ class PlayerAgentMigrationAdapterTest {
         private final InMemoryPlayerStateRepository repository = new InMemoryPlayerStateRepository();
         private final ProtostuffPlayerStateSnapshotSerializer serializer =
                 new ProtostuffPlayerStateSnapshotSerializer();
+        private final PlayerCommandSequencer commandSequencer = new PlayerCommandSequencer();
         private final AgentLifecycleManager lifecycles;
         private final PlayerGameAgentManager manager;
 
@@ -149,6 +204,18 @@ class PlayerAgentMigrationAdapterTest {
                     SERVER_OPEN_TIME
             );
         }
+    }
+
+    private static AgentMigrationSnapshot packInPlayerMailbox(
+            Fixture fixture,
+            PlayerAgentMigrationStatePacker packer,
+            AgentIdentity identity,
+            AgentLocation target
+    ) {
+        AtomicReference<AgentMigrationSnapshot> snapshot = new AtomicReference<>();
+        fixture.actors.send(new ActorRef("player-" + identity.key()),
+                context -> snapshot.set(packer.pack(identity, target, context)));
+        return snapshot.get();
     }
 
     private record FixedGameConfigView(GameConfigRuntime runtime) implements GameConfigView {

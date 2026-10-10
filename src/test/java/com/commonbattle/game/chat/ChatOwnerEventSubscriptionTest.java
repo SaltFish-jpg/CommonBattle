@@ -56,6 +56,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChatOwnerEventSubscriptionTest {
     @Test
@@ -78,6 +79,27 @@ class ChatOwnerEventSubscriptionTest {
             assertEquals(1, fixture.profileInterests().stats().watchedOwners());
             assertEquals(1, fixture.friendInterests().stats().watchedOwners());
             assertEquals(1, fixture.allianceInterests().stats().watchedOwners());
+        }
+    }
+
+    @Test
+    void publishedFriendAndAllianceEventsOnlyChangeChatStateAfterActorMailboxesRun() throws Exception {
+        try (Fixture fixture = Fixture.create()) {
+            fixture.manager().join(new ChatJoinRequest("world", 10001L, 900L), ignored -> {
+            });
+            fixture.executor().runAll();
+
+            fixture.gameEvents().publish(new FriendChangedEvent(10001L, 20002L, FriendRelationAction.ADD, 1));
+            fixture.gameEvents().publish(new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 1));
+
+            assertTrue(fixture.executor().pending() >= 2);
+            assertTrue(fixture.friendAwareness().friendsOf(10001L).isEmpty());
+            assertTrue(fixture.allianceAwareness().allianceOf(10001L).isEmpty());
+
+            fixture.executor().runAll();
+
+            assertEquals(Set.of(20002L), fixture.friendAwareness().friendsOf(10001L).orElseThrow().friends());
+            assertEquals(900L, fixture.allianceAwareness().allianceOf(10001L).orElseThrow().allianceId());
         }
     }
 
@@ -281,6 +303,10 @@ class ChatOwnerEventSubscriptionTest {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
+        }
+
+        private int pending() {
+            return commands.size();
         }
     }
 

@@ -44,6 +44,7 @@ class ClusterNodeConfigTest {
         properties.setProperty("scene.mode", "UNKNOWN");
         properties.setProperty("scene.capacity", "0");
         properties.setProperty("scene.shards", "-1");
+        properties.setProperty("scene.shard.chunk.size", "0");
         properties.setProperty("scene.tick.enabled", "maybe");
         properties.setProperty("scene.tick.initial.delay.millis", "-1");
         properties.setProperty("scene.tick.interval.millis", "0");
@@ -58,6 +59,7 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("scene.mode"));
         assertTrue(keys.contains("scene.capacity"));
         assertTrue(keys.contains("scene.shards"));
+        assertTrue(keys.contains("scene.shard.chunk.size"));
         assertTrue(keys.contains("scene.tick.enabled"));
         assertTrue(keys.contains("scene.tick.initial.delay.millis"));
         assertTrue(keys.contains("scene.tick.interval.millis"));

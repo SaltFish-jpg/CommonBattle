@@ -108,6 +108,19 @@ public final class ChatChannelAgent {
         messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(joinNow(request)));
     }
 
+    public void joinAfterAccessStatus(
+            ChatJoinRequest request,
+            ChatJoinStatus accessStatus,
+            Consumer<ChatJoinResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> callback.accept(joinNow(request, accessStatus)));
+    }
+
     public void leave(ChatLeaveRequest request, Consumer<ChatLeaveResult> callback) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
@@ -120,6 +133,19 @@ public final class ChatChannelAgent {
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
         messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(sendNow(request)));
+    }
+
+    public void sendAfterAccessStatus(
+            ChatSendRequest request,
+            ChatSendStatus accessStatus,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> callback.accept(sendNow(request, accessStatus)));
     }
 
     public void snapshot(Consumer<ChatChannelSnapshot> callback) {
@@ -151,7 +177,10 @@ public final class ChatChannelAgent {
     }
 
     private ChatJoinResult joinNow(ChatJoinRequest request) {
-        ChatJoinStatus accessStatus = accessPolicy.inspectJoin(request);
+        return joinNow(request, accessPolicy.inspectJoin(request));
+    }
+
+    private ChatJoinResult joinNow(ChatJoinRequest request, ChatJoinStatus accessStatus) {
         if (accessStatus != ChatJoinStatus.JOINED) {
             return new ChatJoinResult(accessStatus, channelId, request.playerId(), members.size());
         }
@@ -193,7 +222,13 @@ public final class ChatChannelAgent {
         if (!members.contains(request.senderId())) {
             return ChatSendResult.rejected(ChatSendStatus.NOT_IN_CHANNEL);
         }
-        ChatSendStatus accessStatus = accessPolicy.inspectSend(request);
+        return sendNow(request, accessPolicy.inspectSend(request));
+    }
+
+    private ChatSendResult sendNow(ChatSendRequest request, ChatSendStatus accessStatus) {
+        if (!members.contains(request.senderId())) {
+            return ChatSendResult.rejected(ChatSendStatus.NOT_IN_CHANNEL);
+        }
         if (accessStatus != ChatSendStatus.SENT) {
             return ChatSendResult.rejected(accessStatus);
         }

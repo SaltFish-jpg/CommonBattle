@@ -32,8 +32,22 @@ import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.bag.BagSnapshot;
+import com.commonbattle.game.bag.ItemDefinition;
+import com.commonbattle.game.bag.ItemStack;
+import com.commonbattle.game.bag.Reward;
+import com.commonbattle.game.config.GameConfigPackage;
 import com.commonbattle.game.config.GameConfigRuntime;
 import com.commonbattle.game.config.GameConfigView;
+import com.commonbattle.game.config.GrowthTuning;
+import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerCommandStatus;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.shop.ShopStockAsyncClient;
+import com.commonbattle.game.shop.ShopStockCallback;
+import com.commonbattle.game.shop.ShopStockReleaseResponse;
+import com.commonbattle.game.shop.ShopStockRemainingResponse;
+import com.commonbattle.game.shop.ShopStockReserveResponse;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -59,12 +73,17 @@ class PlayerAgentMigrationEndToEndTest {
             AgentIdentity player = AgentIdentity.player(playerId);
             PlayerGameAgent sourceAgent = harness.sourcePlayers.getOrCreate(playerId);
             sourceAgent.profile().bag().restore(new BagSnapshot(Map.of("gold", 77, "exp", 5)));
+            harness.sourceSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
 
             AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
             boolean submitted = harness.coordinator.migrate(
                     player,
                     harness.targetLocation(player),
-                    new PlayerAgentMigrationStatePacker(harness.sourcePlayers, harness.serializer),
+                    new PlayerAgentMigrationStatePacker(
+                            harness.sourcePlayers,
+                            harness.serializer,
+                            harness.sourceSequencer
+                    ),
                     result::set
             );
 
@@ -79,6 +98,9 @@ class PlayerAgentMigrationEndToEndTest {
             assertTrue(harness.targetPlayers.get(playerId).isPresent());
             assertEquals(77, harness.targetPlayers.getOrCreate(playerId).profile().bag().count("gold"));
             assertEquals(5, harness.targetRepository.load(playerId).orElseThrow().bag().itemCounts().get("exp"));
+            assertEquals(PlayerCommandStatus.GAP, harness.sourceSequencer.inspect(command(3)));
+            assertEquals(PlayerCommandStatus.DUPLICATE, harness.targetSequencer.inspect(command(2)));
+            assertEquals(PlayerCommandStatus.ACCEPTED, harness.targetSequencer.inspect(command(3)));
             assertEquals(new AgentMigrationTaskStoreStats(1, 1, 0, 0, 1, 0, 0),
                     harness.taskStore.stats(CLOCK.instant()));
             assertEquals(new AgentMigrationCoordinatorStats(1, 1, 0, 1, 0, 0, 0, 0, 0, 0),
@@ -98,7 +120,11 @@ class PlayerAgentMigrationEndToEndTest {
             boolean submitted = harness.coordinator.migrate(
                     player,
                     harness.targetLocation(player),
-                    new PlayerAgentMigrationStatePacker(harness.sourcePlayers, harness.serializer),
+                    new PlayerAgentMigrationStatePacker(
+                            harness.sourcePlayers,
+                            harness.serializer,
+                            harness.sourceSequencer
+                    ),
                     result::set
             );
 
@@ -112,6 +138,47 @@ class PlayerAgentMigrationEndToEndTest {
             assertTrue(harness.targetPlayers.get(playerId).isEmpty());
             assertTrue(harness.targetLifecycles.record(player).isEmpty());
             assertEquals(new AgentMigrationCoordinatorStats(1, 1, 0, 0, 1, 0, 0, 0, 1, 0),
+                    harness.coordinator.stats());
+        }
+    }
+
+    @Test
+    void pendingAsyncShopCommandPreventsPlayerMigrationAndKeepsSourceActive() {
+        try (Harness harness = new Harness()) {
+            long playerId = 10001L;
+            AgentIdentity player = AgentIdentity.player(playerId);
+            PlayerGameAgent sourceAgent = harness.sourcePlayers.getOrCreate(playerId);
+            sourceAgent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+            harness.sourceActors.send(new ActorRef("player-10001"), ignored -> sourceAgent.buyShopItemAsync(
+                    command(1),
+                    "order-10001-pending",
+                    "limited_pack",
+                    1,
+                    PlayerBusinessResultSink.NOOP
+            ));
+
+            AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
+            boolean submitted = harness.coordinator.migrate(
+                    player,
+                    harness.targetLocation(player),
+                    new PlayerAgentMigrationStatePacker(
+                            harness.sourcePlayers,
+                            harness.serializer,
+                            harness.sourceSequencer
+                    ),
+                    result::set
+            );
+
+            assertTrue(submitted);
+            assertEquals(AgentMigrationResultStatus.SOURCE_MOVE_FAILED, result.get().status());
+            assertEquals("player 10001 has pending async commands: 1", result.get().reason());
+            assertEquals(harness.sourceGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
+            assertEquals(AgentLifecycleState.ACTIVE,
+                    harness.sourceLifecycles.record(player).orElseThrow().state());
+            assertTrue(harness.sourcePlayers.get(playerId).isPresent());
+            assertTrue(harness.targetPlayers.get(playerId).isEmpty());
+            assertEquals("order-10001-pending", harness.sourceStocks.reserveReservationId);
+            assertEquals(new AgentMigrationCoordinatorStats(1, 0, 1, 0, 0, 0, 0, 0, 0, 0),
                     harness.coordinator.stats());
         }
     }
@@ -131,8 +198,11 @@ class PlayerAgentMigrationEndToEndTest {
         private final InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
         private final InMemoryPlayerStateRepository sourceRepository = new InMemoryPlayerStateRepository();
         private final InMemoryPlayerStateRepository targetRepository = new InMemoryPlayerStateRepository();
+        private final RecordingShopStockAsyncClient sourceStocks = new RecordingShopStockAsyncClient();
         private final ProtostuffPlayerStateSnapshotSerializer serializer =
                 new ProtostuffPlayerStateSnapshotSerializer();
+        private final PlayerCommandSequencer sourceSequencer = new PlayerCommandSequencer();
+        private final PlayerCommandSequencer targetSequencer = new PlayerCommandSequencer();
         private final InMemoryAgentMigrationTaskStore taskStore = new InMemoryAgentMigrationTaskStore();
         private final AgentLifecycleManager sourceLifecycles =
                 new AgentLifecycleManager(sourceGame.id(), sourceActors, agents, CLOCK);
@@ -153,9 +223,7 @@ class PlayerAgentMigrationEndToEndTest {
             targetDirectory.watch(ServiceKind.GAME);
             sourceGateway = new ClusterRpcGateway(sourceGame, sourceDirectory, topology, transport);
             targetGateway = new ClusterRpcGateway(targetGame, targetDirectory, topology, transport);
-            GameConfigView configView = new FixedGameConfigView(
-                    GameConfigRuntime.from(ExampleGameConfigs.basic(1, CLOCK.instant()))
-            );
+            GameConfigView configView = new FixedGameConfigView(GameConfigRuntime.from(config()));
             sourcePlayers = new PlayerGameAgentManager(
                     sourceActors,
                     new DefaultAgentMessagePort(sourceActors, new NoopRpcGateway()),
@@ -163,7 +231,11 @@ class PlayerAgentMigrationEndToEndTest {
                     configView,
                     sourceLifecycles,
                     CLOCK,
-                    SERVER_OPEN_TIME
+                    SERVER_OPEN_TIME,
+                    null,
+                    null,
+                    PlayerStateSaveListener.ignore(),
+                    sourceStocks
             );
             targetPlayers = new PlayerGameAgentManager(
                     targetActors,
@@ -180,7 +252,7 @@ class PlayerAgentMigrationEndToEndTest {
                             ? (request, context) -> {
                                 throw new IllegalStateException("restore failed");
                             }
-                            : new PlayerAgentMigrationRestoreHandler(targetPlayers, serializer)
+                            : new PlayerAgentMigrationRestoreHandler(targetPlayers, serializer, targetSequencer)
             ).bind(targetGateway);
             coordinator = new AgentMigrationCoordinator(
                     sourceLifecycles,
@@ -191,7 +263,7 @@ class PlayerAgentMigrationEndToEndTest {
                     taskStore,
                     AgentMigrationTaskIdGenerator.defaultGenerator(),
                     CLOCK,
-                    new PlayerAgentMigrationSourceHook(sourcePlayers, serializer)
+                    new PlayerAgentMigrationSourceHook(sourcePlayers, serializer, sourceSequencer)
             );
         }
 
@@ -220,6 +292,44 @@ class PlayerAgentMigrationEndToEndTest {
         );
     }
 
+    private static GameConfigPackage config() {
+        GameConfigPackage basic = ExampleGameConfigs.basic(1, CLOCK.instant());
+        return new GameConfigPackage(
+                1,
+                List.of(
+                        new ItemDefinition("gold", "currency", 999999),
+                        new ItemDefinition("exp_potion", "growth", 999),
+                        new ItemDefinition("gem", "currency", 999999),
+                        new ItemDefinition("ticket", "ticket", 999999)
+                ),
+                basic.activities(),
+                List.of(new ShopItemDefinition(
+                        "limited_pack",
+                        new ItemStack("gold", 50),
+                        Reward.of(new ItemStack("ticket", 1)),
+                        0,
+                        0,
+                        1
+                )),
+                basic.battles(),
+                basic.tasks(),
+                basic.achievements(),
+                new GrowthTuning("exp_potion", 60, 100),
+                CLOCK.instant()
+        );
+    }
+
+    private static PlayerCommand command(long sequence) {
+        return new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                sequence,
+                PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                new ActivityProgressCommand("kill-3", 1)
+        );
+    }
+
     private record FixedGameConfigView(GameConfigRuntime runtime) implements GameConfigView {
         @Override
         public GameConfigRuntime active() {
@@ -245,6 +355,36 @@ class PlayerAgentMigrationEndToEndTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class RecordingShopStockAsyncClient implements ShopStockAsyncClient {
+        private String reserveReservationId;
+        private ShopStockCallback<ShopStockReserveResponse> reserveCallback;
+
+        @Override
+        public void reserve(
+                String reservationId,
+                String sku,
+                int count,
+                ShopStockCallback<ShopStockReserveResponse> callback
+        ) {
+            reserveReservationId = reservationId;
+            reserveCallback = callback;
+        }
+
+        @Override
+        public void release(
+                String reservationId,
+                String sku,
+                int count,
+                ShopStockCallback<ShopStockReleaseResponse> callback
+        ) {
+            callback.success(new ShopStockReleaseResponse(1));
+        }
+
+        @Override
+        public void remaining(String sku, ShopStockCallback<ShopStockRemainingResponse> callback) {
         }
     }
 }

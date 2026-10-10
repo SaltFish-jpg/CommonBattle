@@ -2,6 +2,7 @@ package com.commonbattle.game.agent;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorOverflowStrategy;
+import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorSystemConfig;
 import com.commonbattle.actor.agent.AgentIdentity;
@@ -145,6 +146,7 @@ class DefaultBusinessAgentMessagePortTest {
                     new com.commonbattle.actor.message.LocalAskCallback<>() {
                         @Override
                         public void success(com.commonbattle.actor.ActorContext context, String result) {
+                            assertEquals(requester, ActorContext.requireCurrent(requester).self());
                             callbackActor.set(context.self().id());
                             response.set(result);
                         }
@@ -224,6 +226,7 @@ class DefaultBusinessAgentMessagePortTest {
                     new com.commonbattle.actor.message.LocalAskCallback<>() {
                         @Override
                         public void success(com.commonbattle.actor.ActorContext context, String result) {
+                            assertEquals(requester, ActorContext.requireCurrent(requester).self());
                             callbackActor.set(context.self().id());
                             response.set(result);
                         }

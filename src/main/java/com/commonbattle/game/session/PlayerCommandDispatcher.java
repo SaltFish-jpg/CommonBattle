@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongUnaryOperator;
@@ -60,6 +61,10 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
 
     public void handle(String operation, PlayerCommandHandler handler) {
         handlers.put(Objects.requireNonNull(operation, "operation"), Objects.requireNonNull(handler, "handler"));
+    }
+
+    public Set<String> registeredOperations() {
+        return Set.copyOf(handlers.keySet());
     }
 
     public PlayerCommandStats stats() {
@@ -112,11 +117,20 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         }
         PlayerCommandStatus sequenceStatus = sequencer.inspect(command);
         if (sequenceStatus == PlayerCommandStatus.DUPLICATE) {
-            PlayerCommandStatus originalStatus = sequencer.committedStatus(command)
-                    .orElse(PlayerCommandStatus.ACCEPTED);
-            String reason = "duplicate:" + originalStatus.name();
-            return result(command, PlayerCommandResult.duplicateOf(originalStatus), PlayerCommandAuditOutcome.REJECTED,
-                    0, Duration.ZERO, reason);
+            return sequencer.committedStatus(command)
+                    .map(originalStatus -> {
+                        String reason = "duplicate:" + originalStatus.name();
+                        return result(command, PlayerCommandResult.duplicateOf(originalStatus),
+                                PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, reason);
+                    })
+                    .orElseGet(() -> result(
+                            command,
+                            PlayerCommandResult.duplicateWithoutCachedResponse(),
+                            PlayerCommandAuditOutcome.REJECTED,
+                            0,
+                            Duration.ZERO,
+                            "duplicate:WATERMARK_ONLY"
+                    ));
         }
         if (sequenceStatus == PlayerCommandStatus.GAP) {
             return result(command, PlayerCommandResult.reject(PlayerCommandStatus.GAP, "command_gap"),
@@ -173,10 +187,10 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         if ("rate_limited".equals(reason)) {
             return PlayerCommandStatus.RATE_LIMITED;
         }
-        if (reason != null && reason.startsWith("mailbox_pressure")) {
+        if (reason != null && (reason.startsWith("mailbox_pressure") || reason.startsWith("actor_hotspot"))) {
             return PlayerCommandStatus.BACKPRESSURED;
         }
-        if ("agent_migrating".equals(reason)) {
+        if ("agent_migrating".equals(reason) || "agent_passivating".equals(reason)) {
             return PlayerCommandStatus.AGENT_MIGRATING;
         }
         return PlayerCommandStatus.AGENT_MISSING;

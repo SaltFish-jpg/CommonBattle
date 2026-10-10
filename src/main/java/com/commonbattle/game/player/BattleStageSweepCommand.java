@@ -40,6 +40,7 @@ public record BattleStageSweepCommand(String settlementId, String stageId) imple
                 stageId
         );
         execution.publish(BattleStageClearedEvent.from(execution.profile().playerId(), result));
+        execution.publishBagChanged(operation(), result.replayed(), result.rewardResult());
         if (!result.replayed()) {
             execution.pushBattleSettlementSnapshots(result);
         }

@@ -6,6 +6,7 @@ import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.profile.ProfileReadPort;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
 
 import java.time.Clock;
 import java.util.Objects;
@@ -130,6 +131,30 @@ public final class ChatChannelManager implements ChatRuntimeView {
         channel(request.channelId()).join(request, callback);
     }
 
+    public void joinAfterAllianceChanged(
+            AllianceMemberChangedEvent event,
+            ChatJoinRequest request,
+            Consumer<ChatJoinResult> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        joinRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
+                ChatOperations.JOIN_CHANNEL);
+        if (!admission.accepted()) {
+            callback.accept(new ChatJoinResult(ChatJoinStatus.BACKPRESSURED, request.channelId(), request.playerId(), 0));
+            return;
+        }
+        ChatChannelAgent channel = channel(request.channelId());
+        if (!(accessPolicy instanceof EventAwareChatChannelAccessPolicy eventAware)) {
+            channel.joinAfterAccessStatus(request, ChatJoinStatus.STALE_ALLIANCE, callback);
+            return;
+        }
+        eventAware.inspectJoinAfterAllianceChanged(event, request,
+                status -> channel.joinAfterAccessStatus(request, status, callback));
+    }
+
     public void leave(ChatLeaveRequest request, Consumer<ChatLeaveResult> callback) {
         leaveRequests.incrementAndGet();
         AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
@@ -150,6 +175,30 @@ public final class ChatChannelManager implements ChatRuntimeView {
             return;
         }
         channel(request.channelId()).send(request, callback);
+    }
+
+    public void sendAfterAllianceChanged(
+            AllianceMemberChangedEvent event,
+            ChatSendRequest request,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        sendRequests.incrementAndGet();
+        AdmissionDecision admission = admissions.admit(ChatActorIds.channelIdentity(request.channelId()),
+                ChatOperations.SEND_CHANNEL);
+        if (!admission.accepted()) {
+            callback.accept(ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED));
+            return;
+        }
+        ChatChannelAgent channel = channel(request.channelId());
+        if (!(accessPolicy instanceof EventAwareChatChannelAccessPolicy eventAware)) {
+            channel.sendAfterAccessStatus(request, ChatSendStatus.STALE_ALLIANCE, callback);
+            return;
+        }
+        eventAware.inspectSendAfterAllianceChanged(event, request,
+                status -> channel.sendAfterAccessStatus(request, status, callback));
     }
 
     public void removeAllianceMember(long allianceId, long playerId) {

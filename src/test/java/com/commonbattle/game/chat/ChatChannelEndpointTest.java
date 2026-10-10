@@ -17,12 +17,20 @@ import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcStructuredException;
+import com.commonbattle.game.event.EventGatedCommandAuditStats;
+import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.profile.ProfileInterestControl;
 import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
 import com.commonbattle.game.scene.SceneFriendAwarenessAgent;
 import com.commonbattle.game.scene.ScenePlayerDomainEventAgent;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
 import com.commonbattle.game.scene.SceneProfileAwarenessAgent;
+import com.commonbattle.game.social.AllianceMemberAction;
+import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.social.AllianceSnapshot;
+import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.game.social.FriendRelationAction;
+import com.commonbattle.game.social.FriendSnapshot;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -164,6 +172,51 @@ class ChatChannelEndpointTest {
         }
     }
 
+    @Test
+    void remoteEventAwareChatRequestsOnlyCompleteAfterAwarenessAndBusinessMailboxesRun() {
+        try (RelationFixture fixture = RelationFixture.create()) {
+            fixture.friendAwareness.enter(10001L);
+            fixture.allianceAwareness.enter(10001L);
+            fixture.allianceAwareness.watchAlliance(900L);
+            fixture.chatExecutor.runAll();
+            RecordingCallback<ChatSendResult> direct = new RecordingCallback<>();
+            RecordingCallback<ChatJoinResult> joined = new RecordingCallback<>();
+
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT,
+                    new DirectChatSendAfterFriendEventRequest(
+                            new FriendChangedEvent(10001L, 10002L, FriendRelationAction.ADD, 3),
+                            new DirectChatSendRequest(10001L, 10002L, "direct", 0)
+                    ),
+                    ChatSendResult.class
+            ), direct);
+            fixture.gameGateway.call(new RpcRequest<>(
+                    ServiceKind.CHAT.name(),
+                    ChatOperations.JOIN_ALLIANCE_AFTER_EVENT,
+                    new AllianceChatJoinAfterEventRequest(
+                            new AllianceMemberChangedEvent(900L, 10001L, AllianceMemberAction.JOIN, 3),
+                            new AllianceChatJoinRequest(900L, 10001L)
+                    ),
+                    ChatJoinResult.class
+            ), joined);
+
+            assertNull(direct.response.get());
+            assertNull(joined.response.get());
+            assertEquals(new EventGatedCommandAuditStats(2, 2, 2, 0, 0, 0), fixture.eventGatedAudits.stats());
+
+            fixture.chatExecutor.runAll();
+
+            assertEquals(ChatSendStatus.SENT, direct.response.get().status());
+            assertEquals(ChatJoinStatus.JOINED, joined.response.get().status());
+            assertEquals(new EventGatedCommandAuditStats(4, 4, 2, 2, 0, 0), fixture.eventGatedAudits.stats());
+            assertEquals("completed", fixture.eventGatedAudits.recent().get(2).outcome());
+            assertEquals("SENT", fixture.eventGatedAudits.recent().get(2).result());
+            assertEquals("completed", fixture.eventGatedAudits.recent().get(3).outcome());
+            assertEquals("JOINED", fixture.eventGatedAudits.recent().get(3).result());
+        }
+    }
+
     private record Fixture(
             LocalClusterTransport transport,
             RecordingExecutor chatExecutor,
@@ -190,7 +243,10 @@ class ChatChannelEndpointTest {
                     ChatOperations.JOIN_ALLIANCE,
                     ChatOperations.LEAVE_ALLIANCE,
                     ChatOperations.SEND_ALLIANCE,
-                    ChatOperations.SEND_DIRECT
+                    ChatOperations.SEND_DIRECT,
+                    ChatOperations.JOIN_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT
             ));
             registry.register(game);
             registry.register(chat);
@@ -243,6 +299,112 @@ class ChatChannelEndpointTest {
             new ChatChannelEndpoint(manager).bind(chatGateway);
             new RoutedChatEndpoint(routedChat).bind(chatGateway);
             return new Fixture(transport, chatExecutor, actors, gameGateway, chatGateway, routedChat);
+        }
+
+        @Override
+        public void close() {
+            gameGateway.close();
+            chatGateway.close();
+            actors.close();
+            transport.close();
+        }
+    }
+
+    private record RelationFixture(
+            LocalClusterTransport transport,
+            RecordingExecutor chatExecutor,
+            ActorSystem actors,
+            ClusterRpcGateway gameGateway,
+            ClusterRpcGateway chatGateway,
+            SceneFriendAwarenessAgent friendAwareness,
+            SceneAllianceAwarenessAgent allianceAwareness,
+            InMemoryEventGatedCommandAuditLog eventGatedAudits
+    ) implements AutoCloseable {
+        private static RelationFixture create() {
+            InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+            LocalClusterTransport transport = new LocalClusterTransport();
+            ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9101, Set.of());
+            ServiceDescriptor chat = descriptor(ServiceKind.CHAT, "chat-1", 9106, Set.of(
+                    ChatOperations.JOIN_WORLD,
+                    ChatOperations.LEAVE_WORLD,
+                    ChatOperations.SEND_WORLD,
+                    ChatOperations.JOIN_ALLIANCE,
+                    ChatOperations.LEAVE_ALLIANCE,
+                    ChatOperations.SEND_ALLIANCE,
+                    ChatOperations.SEND_DIRECT,
+                    ChatOperations.JOIN_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_ALLIANCE_AFTER_EVENT,
+                    ChatOperations.SEND_DIRECT_AFTER_FRIEND_EVENT
+            ));
+            registry.register(game);
+            registry.register(chat);
+            ClusterTopology topology = new ClusterTopology()
+                    .allow(ServiceKind.GAME, ServiceKind.CHAT)
+                    .allow(ServiceKind.CHAT, ServiceKind.GAME);
+            ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, directory(registry), topology, transport);
+            ClusterRpcGateway chatGateway = new ClusterRpcGateway(chat, directory(registry), topology, transport);
+            RecordingExecutor chatExecutor = new RecordingExecutor();
+            ActorSystem actors = new ActorSystem(chatExecutor, 64);
+            DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, chatGateway);
+            SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
+                    messages,
+                    actors.actor("chat-friend-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    playerId -> java.util.Optional.of(new FriendSnapshot(playerId, 3, Set.of(10002L)))
+            );
+            SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
+                    messages,
+                    actors.actor("chat-alliance-awareness"),
+                    com.commonbattle.game.event.OwnerEventInterestControl.noop(),
+                    allianceId -> java.util.Optional.of(new AllianceSnapshot(allianceId, 3, Set.of(10001L)))
+            );
+            ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
+                    new SceneProfileAwarenessAgent(
+                            messages,
+                            actors.actor("chat-profile-awareness"),
+                            ProfileInterestControl.noop()
+                    ),
+                    friendAwareness,
+                    new ScenePlayerDomainEventAgent(messages, actors.actor("chat-domain-awareness")),
+                    allianceAwareness
+            );
+            ChatMessagePolicy policy = request ->
+                    ChatMessageDecision.sent("player-" + request.senderId(), request.text().trim());
+            ChatChannelManager manager = new ChatChannelManager(
+                    actors,
+                    messages,
+                    interests,
+                    new AllianceAwareChatChannelAccessPolicy(allianceAwareness),
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    (target, operation) -> AdmissionDecision.accept()
+            );
+            DirectChatSessionManager directSessions = new DirectChatSessionManager(
+                    actors,
+                    messages,
+                    new FriendAwareDirectChatAccessPolicy(friendAwareness),
+                    policy,
+                    ChatDeliverySink.noop(),
+                    CLOCK,
+                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                    (target, operation) -> AdmissionDecision.accept()
+            );
+            allianceAwareness.attachMembershipChanges(new ChatAllianceMembershipProjector(manager));
+            RoutedChatService routedChat = new RoutedChatService(manager, directSessions, new ChatRouteConfig(4));
+            InMemoryEventGatedCommandAuditLog eventGatedAudits = new InMemoryEventGatedCommandAuditLog();
+            new RoutedChatEndpoint(routedChat, eventGatedAudits, CLOCK).bind(chatGateway);
+            return new RelationFixture(
+                    transport,
+                    chatExecutor,
+                    actors,
+                    gameGateway,
+                    chatGateway,
+                    friendAwareness,
+                    allianceAwareness,
+                    eventGatedAudits
+            );
         }
 
         @Override
