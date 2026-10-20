@@ -50,6 +50,7 @@ public final class ActorHotspotAdmissionController implements InboundAdmissionCo
     private final Map<String, LongAdder> rejectedByTargetType = new ConcurrentHashMap<>();
     private final Map<String, LongAdder> rejectedByActorGroup = new ConcurrentHashMap<>();
     private final Map<String, LongAdder> rejectedByReason = new ConcurrentHashMap<>();
+    private final Map<String, LongAdder> rejectedByHotspotReason = new ConcurrentHashMap<>();
     private final Map<String, ActorHotspotOverride> overrides = new ConcurrentHashMap<>();
 
     public ActorHotspotAdmissionController(
@@ -130,7 +131,8 @@ public final class ActorHotspotAdmissionController implements InboundAdmissionCo
                 migrationCandidateRejected.sum(),
                 snapshot(rejectedByTargetType),
                 snapshot(rejectedByActorGroup),
-                snapshot(rejectedByReason)
+                snapshot(rejectedByReason),
+                snapshot(rejectedByHotspotReason)
         );
     }
 
@@ -216,6 +218,7 @@ public final class ActorHotspotAdmissionController implements InboundAdmissionCo
         increment(rejectedByTargetType, target.type());
         increment(rejectedByActorGroup, candidate.group());
         increment(rejectedByReason, reason);
+        candidate.reasons().forEach(hotspotReason -> increment(rejectedByHotspotReason, hotspotReason.name()));
         return AdmissionDecision.reject(reason, retryAfter);
     }
 

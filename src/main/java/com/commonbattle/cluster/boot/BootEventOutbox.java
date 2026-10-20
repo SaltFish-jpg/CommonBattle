@@ -8,6 +8,7 @@ import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.SerializedVersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEventOutboxReplayScheduler;
+import com.commonbattle.game.event.VersionedEventRetryPolicy;
 
 import java.time.Clock;
 import java.util.Objects;
@@ -50,6 +51,16 @@ final class BootEventOutbox {
         );
         scheduler.start();
         return scheduler;
+    }
+
+    static VersionedEventRetryPolicy retryPolicy(ClusterNodeConfig config) {
+        Objects.requireNonNull(config, "config");
+        return new VersionedEventRetryPolicy(
+                config.eventOutboxRetryMaxAttempts(),
+                config.eventOutboxRetryInitialBackoff(),
+                config.eventOutboxRetryMaxBackoff(),
+                config.eventOutboxReplayBatchSize()
+        );
     }
 
     private static com.commonbattle.game.event.VersionedEventOutboxBytesStore bytesStore(ClusterNodeConfig config) {

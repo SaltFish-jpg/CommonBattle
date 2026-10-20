@@ -27,7 +27,15 @@ public final class ClusterDirectory implements AutoCloseable {
     }
 
     public void watch(ServiceKind kind) {
-        subscriptions.add(registry.subscribe(kind, this::onEvent));
+        watch(kind, registry);
+    }
+
+    /**
+     * 从指定注册中心订阅并把事件写入当前本地目录。
+     * 远程注册中心与本地镜像分离时，由节点启动流程使用该入口建立真实的跨服订阅。
+     */
+    public void watch(ServiceKind kind, ServiceRegistry source) {
+        subscriptions.add(Objects.requireNonNull(source, "source").subscribe(kind, this::onEvent));
     }
 
     public List<ServiceDescriptor> list(ServiceKind kind) {

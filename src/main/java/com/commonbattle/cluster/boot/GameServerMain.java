@@ -2,6 +2,8 @@ package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorScheduleRegistry;
+import com.commonbattle.actor.message.DefaultAgentMessagePort;
+import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationPlanner;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationSubmitService;
 import com.commonbattle.actor.agent.migration.AgentMigrationCoordinator;
@@ -22,6 +24,7 @@ import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.registry.RemoteServiceRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
+import com.commonbattle.cluster.rpc.ClusterRpcDeliveryFailureMapper;
 import com.commonbattle.example.cross.scene.SceneEnterTargetSelector;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
@@ -32,6 +35,7 @@ import com.commonbattle.game.config.GameConfigWarmupService;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.config.RemoteGameConfigRecoveryClient;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
+import com.commonbattle.game.event.ActorMailboxEventSubscriber;
 import com.commonbattle.game.event.VersionedEventOutbox;
 import com.commonbattle.game.profile.InMemoryProfileSnapshotRepository;
 import com.commonbattle.game.profile.ProfileSnapshotEndpoint;
@@ -39,9 +43,12 @@ import com.commonbattle.game.profile.ProfileSnapshotRepository;
 import com.commonbattle.game.profile.ReliableProfileEventPublisher;
 import com.commonbattle.game.player.NettyPlayerGatewayServer;
 import com.commonbattle.game.player.PlayerAgentMigrationRestoreHandler;
+import com.commonbattle.game.player.PlayerAgentMigrationRetryService;
+import com.commonbattle.game.player.PlayerAgentMigrationRetryScheduler;
 import com.commonbattle.game.player.PlayerAgentMigrationStatePacker;
 import com.commonbattle.game.player.PlayerAgentMigrationSourceHook;
 import com.commonbattle.game.player.PlayerClientAuthenticator;
+import com.commonbattle.game.player.PlayerMutationReplayScheduler;
 import com.commonbattle.game.player.ProtostuffPlayerStateSnapshotSerializer;
 import com.commonbattle.game.player.event.PlayerDomainProjectionSnapshotEndpoint;
 import com.commonbattle.game.player.event.PlayerStateDomainProjectionSnapshotReader;
@@ -75,10 +82,13 @@ public final class GameServerMain {
             PayloadCodecRegistry codecs = BootPayloadCodecs.gameServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
-                    codecs
+                    codecs,
+                    config.nettyTransportConfig()
             ));
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
-                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport,
+                            true, config.rpcGovernanceConfig(),
+                            BootRpcIdempotencyStore.configure(config, codecs, Clock.systemUTC())));
             gateway.addTargetSelector(new SceneEnterTargetSelector());
             ProfileSnapshotRepository profileSnapshots = new InMemoryProfileSnapshotRepository();
             new ProfileSnapshotEndpoint(profileSnapshots).bind(gateway);
@@ -125,19 +135,51 @@ public final class GameServerMain {
                     "eventSubscriptions",
                     new ClusterEventSubscriptionManager(eventBus)
             );
-            VersionedEventOutbox playerEventOutbox = BootEventOutbox.configure(runtime, config, Clock.systemUTC());
+            Clock eventClock = Clock.systemUTC();
+            var eventRetryPolicy = BootEventOutbox.retryPolicy(config);
+            VersionedEventOutbox playerEventOutbox = BootEventOutbox.configure(runtime, config, eventClock);
             ReliableVersionedEventPublisher playerDomainEvents = new ReliableVersionedEventPublisher(
                     playerEventOutbox,
-                    eventBus
+                    eventBus,
+                    eventRetryPolicy,
+                    eventClock
             );
+            runtime.observe("reliablePlayerDomainEvents", playerDomainEvents);
+            Clock eventInboxClock = Clock.systemUTC();
+            var eventInbox = BootEventInbox.configure(runtime, config);
+            var eventInboxRetryPolicy = BootEventInbox.retryPolicy(config);
+            DefaultAgentMessagePort configEventMessages = runtime.add(
+                    "configEventMessages",
+                    new DefaultAgentMessagePort(
+                            actors,
+                            gateway,
+                            new ExecutorAskTimeoutScheduler(),
+                            new ClusterRpcDeliveryFailureMapper()
+                    )
+            );
+            ActorMailboxEventSubscriber configEventSubscriber = new ActorMailboxEventSubscriber(
+                    configEventMessages,
+                    actors.actor("game-config-events:" + local.id().node()),
+                    (context, event) -> configCache.onEvent(event),
+                    GameConfigChangedEvent.TOPIC,
+                    eventInbox,
+                    eventInboxRetryPolicy,
+                    eventInboxClock
+            );
+            runtime.observe("configActorEventSubscriber", configEventSubscriber);
+            BootEventInbox.startReplayScheduler(runtime, config, List.of(configEventSubscriber));
             ReliableProfileEventPublisher profileEvents = new ReliableProfileEventPublisher(
                     profileSnapshots,
                     playerEventOutbox,
-                    eventBus
+                    eventBus,
+                    eventRetryPolicy,
+                    eventClock
             );
             ReliableVersionedEventPublisher friendEvents = new ReliableVersionedEventPublisher(
                     playerEventOutbox,
-                    eventBus
+                    eventBus,
+                    eventRetryPolicy,
+                    eventClock
             );
             BootEventOutbox.configureReplayScheduler(runtime, config, playerDomainEvents);
             RemoteGameConfigRecoveryClient configRecovery = new RemoteGameConfigRecoveryClient(gateway, configCache);
@@ -146,7 +188,7 @@ public final class GameServerMain {
             configCache.attachRecoveryTrigger(configAutoRecovery);
             eventSubscriptions.register(
                     GameConfigChangedEvent.TOPIC,
-                    configCache,
+                    configEventSubscriber,
                     () -> java.util.Map.of(GameConfigChangedEvent.OWNER_KEY, configCache.appliedEventRevision()),
                     new GameConfigEventReplayRepairer(configAutoRecovery, configCache::appliedEventRevision, configCache::stale)
             );
@@ -174,6 +216,13 @@ public final class GameServerMain {
                     actorSchedules,
                     Clock.systemUTC()
             );
+            if (config.eventOutboxReplayEnabled()) {
+                PlayerMutationReplayScheduler mutationReplay = runtime.add(
+                        "playerMutationReplayScheduler",
+                        new PlayerMutationReplayScheduler(playerRuntime.agents(), config.eventOutboxReplayInterval())
+                );
+                mutationReplay.start();
+            }
             new PlayerDomainProjectionSnapshotEndpoint(
                     new PlayerStateDomainProjectionSnapshotReader(playerRuntime.stateRepository())
             ).bind(gateway);
@@ -184,6 +233,7 @@ public final class GameServerMain {
                     gateway,
                     directory,
                     config,
+                    codecs,
                     Clock.systemUTC()
             );
             if (config.clientGatewayEnabled()) {
@@ -197,7 +247,7 @@ public final class GameServerMain {
                         config.playerGatewayConfig()
                 )).start();
             }
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime));
             System.out.println("Game server started: " + local.id().wireName()
                     + ", config=" + configCache.active().version()
                     + ", players=" + playerRuntime.agents().loadedAgents()
@@ -205,6 +255,9 @@ public final class GameServerMain {
                     + ", actors=" + actors);
             new CountDownLatch(1).await();
         } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        } catch (Error e) {
             runtime.closeSuppressing(e);
             throw e;
         }
@@ -217,6 +270,7 @@ public final class GameServerMain {
             ClusterRpcGateway gateway,
             ClusterDirectory directory,
             ClusterNodeConfig config,
+            PayloadCodecRegistry codecs,
             Clock clock
     ) {
         ProtostuffPlayerStateSnapshotSerializer serializer = new ProtostuffPlayerStateSnapshotSerializer();
@@ -236,7 +290,13 @@ public final class GameServerMain {
                 client,
                 executor,
                 clock,
-                new PlayerAgentMigrationSourceHook(playerRuntime.agents(), serializer, playerRuntime.commandSequencer())
+                new PlayerAgentMigrationSourceHook(
+                        playerRuntime.agents(),
+                        serializer,
+                        playerRuntime.commandSequencer(),
+                        playerRuntime.businessResponses(),
+                        codecs
+                )
         );
         runtime.observe("agentMigrationCoordinator", coordinator);
         BootAgentMigrationTasks.configureRecovery(
@@ -258,22 +318,33 @@ public final class GameServerMain {
                 new PlayerAgentMigrationRestoreHandler(
                         playerRuntime.agents(),
                         serializer,
-                        playerRuntime.commandSequencer()
+                        playerRuntime.commandSequencer(),
+                        playerRuntime.businessResponses(),
+                        codecs
                 ),
                 BootAgentMigrationTargetReceipts.configure(runtime, config, clock)
         ).bind(gateway);
+        PlayerAgentMigrationRetryService playerMigrationRetries = new PlayerAgentMigrationRetryService(coordinator);
+        runtime.observe("playerMigrationRetries", playerMigrationRetries);
+        runtime.add("playerMigrationRetryScheduler",
+                new PlayerAgentMigrationRetryScheduler(
+                        playerMigrationRetries,
+                        config.migrationRecoveryScanInterval()
+                )).start();
         ActorHotspotMigrationPlanner planner = new ActorHotspotMigrationPlanner(
                 agentDirectory,
                 directory,
                 migrationRuntime.taskStore(),
-                coordinator
+                playerMigrationRetries
         );
         runtime.observe("playerHotspotMigrations", new ActorHotspotMigrationSubmitService(
                 planner,
                 new PlayerAgentMigrationStatePacker(
                         playerRuntime.agents(),
                         serializer,
-                        playerRuntime.commandSequencer()
+                        playerRuntime.commandSequencer(),
+                        playerRuntime.businessResponses(),
+                        codecs
                 )
         ));
     }

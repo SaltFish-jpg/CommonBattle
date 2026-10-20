@@ -14,15 +14,35 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class LocalProfileCache {
     private final Map<Long, CachedProfile> profiles = new ConcurrentHashMap<>();
     private final SubscriptionCheckpoint checkpoint = new SubscriptionCheckpoint();
+    private final ProfileProjectionStore store;
 
-    public SubscriptionDecision apply(ProfileChangedEvent event) {
+    public LocalProfileCache() {
+        this(new SerializedProfileProjectionStore(new InMemoryProfileProjectionBytesStore(), "default"));
+    }
+
+    public LocalProfileCache(ProfileProjectionStore store) {
+        this.store = java.util.Objects.requireNonNull(store, "store");
+        for (CachedProfile profile : store.loadAll()) {
+            PlayerProfileSnapshot snapshot = profile.snapshot();
+            CachedProfile current = profiles.get(snapshot.playerId());
+            if (current == null || current.snapshot().revision() < snapshot.revision()) {
+                profiles.put(snapshot.playerId(), profile);
+                checkpoint.reset(ProfileChangedEvent.ownerKey(snapshot.playerId()), snapshot.revision());
+            }
+        }
+    }
+
+    public synchronized SubscriptionDecision apply(ProfileChangedEvent event) {
         SubscriptionDecision decision = checkpoint.inspect(event);
         if (decision == SubscriptionDecision.DUPLICATE_OR_OLD) {
             return decision;
         }
         boolean stale = decision == SubscriptionDecision.GAP;
         // Profile cache 更新边界：事件按 revision 去重后才更新本地快照；跳号快照可展示但必须标脏。
-        profiles.put(event.playerId(), new CachedProfile(event.snapshot(), stale));
+        CachedProfile updated = new CachedProfile(event.snapshot(), stale);
+        // 投影提交边界：完整快照与 revision 先原子落盘，成功后才推进内存 checkpoint。
+        store.save(updated);
+        profiles.put(event.playerId(), updated);
         checkpoint.markApplied(event);
         return decision;
     }
@@ -35,12 +55,14 @@ public final class LocalProfileCache {
         return get(playerId).map(CachedProfile::stale).orElse(true);
     }
 
-    public void refresh(PlayerProfileSnapshot snapshot) {
+    public synchronized void refresh(PlayerProfileSnapshot snapshot) {
         long currentRevision = revisionOf(snapshot.playerId());
         if (snapshot.revision() < currentRevision) {
             return;
         }
-        profiles.put(snapshot.playerId(), new CachedProfile(snapshot, false));
+        CachedProfile updated = new CachedProfile(snapshot, false);
+        store.save(updated);
+        profiles.put(snapshot.playerId(), updated);
         checkpoint.markApplied(new ProfileChangedEvent(snapshot.playerId(), SetOf.all(), snapshot));
     }
 

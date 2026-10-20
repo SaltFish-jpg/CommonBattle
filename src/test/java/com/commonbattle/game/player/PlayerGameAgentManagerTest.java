@@ -290,6 +290,7 @@ class PlayerGameAgentManagerTest {
         Fixture fixture = Fixture.create();
         PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
         fixture.executor.runAll();
+        fixture.commandSequencer.commit(command(1), PlayerCommandStatus.ACCEPTED);
         agent.clearBattleStage("settle-10001-1", "forest-1", ignored -> {
         });
         AtomicReference<PlayerStateSnapshot> saved = new AtomicReference<>();
@@ -303,6 +304,17 @@ class PlayerGameAgentManagerTest {
         assertTrue(fixture.directory.locate(AgentIdentity.player(10001L)).isEmpty());
         assertEquals(AgentLifecycleState.PASSIVATED,
                 fixture.lifecycles.record(AgentIdentity.player(10001L)).orElseThrow().state());
+        assertEquals(0, fixture.actors.stats().registeredMailboxes());
+        assertEquals(PlayerCommandStatus.GAP, fixture.commandSequencer.inspect(command(2)));
+
+        fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+
+        assertEquals(1, fixture.manager.loadedAgents());
+        assertEquals(1, fixture.actors.stats().registeredMailboxes());
+        assertEquals(1, fixture.actors.stats().retiredMailboxes());
+        assertEquals(PlayerCommandStatus.DUPLICATE, fixture.commandSequencer.inspect(command(1)));
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.commandSequencer.inspect(command(2)));
     }
 
     @Test
@@ -341,12 +353,74 @@ class PlayerGameAgentManagerTest {
         fixture.executor.runAll();
 
         assertEquals(PlayerCommandStatus.ACCEPTED, accepted.status());
-        assertInstanceOf(PendingAsyncPlayerCommandException.class, failure.get());
+        PendingAsyncPlayerCommandException pending = assertInstanceOf(
+                PendingAsyncPlayerCommandException.class,
+                failure.get()
+        );
+        assertEquals(10001L, pending.playerId());
+        assertEquals(1, pending.pendingCommands());
+        assertEquals(1, pending.pendingByOperation().get(PlayerBusinessOperations.SHOP_BUY));
         assertTrue(fixture.manager.get(10001L).isPresent());
         assertTrue(fixture.directory.locate(AgentIdentity.player(10001L)).isPresent());
         assertEquals(AgentLifecycleState.ACTIVE,
                 fixture.lifecycles.record(AgentIdentity.player(10001L)).orElseThrow().state());
         assertTrue(fixture.repository.load(10001L).isEmpty());
+    }
+
+    @Test
+    void autoSaveCountsPendingAsyncCommandAsLifecycleBlockedSave() {
+        RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+        Fixture fixture = Fixture.create(null, limitedStockConfig(), stocks, new InMemoryPlayerCommandAuditLog());
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        long epoch = sessions.bind(10001L, "session-1").epoch();
+        PlayerCommandDispatcher dispatcher = dispatcher(
+                fixture,
+                sessions,
+                new InMemoryPlayerCommandAuditLog(),
+                new RecordingResultSink()
+        );
+        PlayerAutoSaveScheduler autoSaves = new PlayerAutoSaveScheduler(
+                fixture.manager,
+                Duration.ZERO,
+                Duration.ofSeconds(60)
+        );
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(fixture.manager);
+        registry.register(autoSaves);
+
+        try {
+            dispatcher.dispatch(new PlayerCommand(
+                    10001L,
+                    "session-1",
+                    epoch,
+                    1,
+                    PlayerBusinessOperations.SHOP_BUY,
+                    new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+            ));
+            fixture.executor.runAll();
+
+            assertEquals(1, autoSaves.runOnce());
+            fixture.executor.runAll();
+
+            RuntimeHealthSnapshot snapshot = playerHealthSnapshot(fixture, registry);
+            String json = RuntimeHealthJsonFormatter.format(snapshot);
+            String metrics = RuntimeMetricsFormatter.format(snapshot);
+            assertEquals(1, autoSaves.stats().failedSaves());
+            assertEquals(1, autoSaves.stats().pendingAsyncBlockedSaves());
+            assertEquals(1, snapshot.playerAgents().autoSavePendingAsyncBlockedSaves());
+            assertTrue(json.contains("\"autoSavePendingAsyncBlockedSaves\":1"));
+            assertTrue(metrics.contains("commonbattle_player_autosave_pending_async_blocked_saves_total 1"));
+            assertTrue(snapshot.issues().contains(com.commonbattle.observability.RuntimeHealthIssue.degraded(
+                    "playerAgents",
+                    "auto_save_pending_async_blocked_saves",
+                    1
+            )));
+        } finally {
+            autoSaves.close();
+        }
     }
 
     @Test
@@ -592,6 +666,97 @@ class PlayerGameAgentManagerTest {
     }
 
     @Test
+    void drainServiceCountsPendingAsyncCommandAsLifecycleBlockedSave() {
+        RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+        Fixture fixture = Fixture.create(null, limitedStockConfig(), stocks, new InMemoryPlayerCommandAuditLog());
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        long epoch = sessions.bind(10001L, "session-1").epoch();
+        PlayerCommandDispatcher dispatcher = dispatcher(
+                fixture,
+                sessions,
+                new InMemoryPlayerCommandAuditLog(),
+                new RecordingResultSink()
+        );
+        PlayerAgentDrainService drain = new PlayerAgentDrainService(fixture.manager);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(fixture.manager);
+        registry.register(drain);
+
+        dispatcher.dispatch(new PlayerCommand(
+                10001L,
+                "session-1",
+                epoch,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+        ));
+        fixture.executor.runAll();
+        drain.beginDrain();
+        fixture.executor.runAll();
+
+        RuntimeHealthSnapshot snapshot = playerHealthSnapshot(fixture, registry);
+        String json = RuntimeHealthJsonFormatter.format(snapshot);
+        String metrics = RuntimeMetricsFormatter.format(snapshot);
+        assertEquals(1, drain.failedSaves());
+        assertEquals(1, drain.pendingAsyncBlockedSaves());
+        assertEquals(1, snapshot.playerAgents().drainPendingAsyncBlockedSaves());
+        assertTrue(fixture.manager.get(10001L).isPresent());
+        assertTrue(json.contains("\"drainPendingAsyncBlockedSaves\":1"));
+        assertTrue(metrics.contains("commonbattle_player_agent_drain_pending_async_blocked_saves_total 1"));
+        assertTrue(snapshot.issues().contains(com.commonbattle.observability.RuntimeHealthIssue.degraded(
+                "playerAgents",
+                "drain_pending_async_blocked_saves",
+                1
+        )));
+    }
+
+    @Test
+    void drainServiceRetriesPendingAsyncBlockedPlayerOnPoll() {
+        RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+        Fixture fixture = Fixture.create(null, limitedStockConfig(), stocks, new InMemoryPlayerCommandAuditLog());
+        PlayerGameAgent agent = fixture.manager.getOrCreate(10001L);
+        fixture.executor.runAll();
+        agent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+        InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
+        long epoch = sessions.bind(10001L, "session-1").epoch();
+        PlayerCommandDispatcher dispatcher = dispatcher(
+                fixture,
+                sessions,
+                new InMemoryPlayerCommandAuditLog(),
+                new RecordingResultSink()
+        );
+        PlayerAgentDrainService drain = new PlayerAgentDrainService(fixture.manager);
+
+        dispatcher.dispatch(new PlayerCommand(
+                10001L,
+                "session-1",
+                epoch,
+                1,
+                PlayerBusinessOperations.SHOP_BUY,
+                new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+        ));
+        fixture.executor.runAll();
+        drain.beginDrain();
+        fixture.executor.runAll();
+        assertEquals(1, drain.failedSaves());
+        assertEquals(1, drain.pendingAsyncBlockedSaves());
+
+        stocks.reserveCallback.success(new ShopStockReserveResponse(true, 0));
+        fixture.executor.runAll();
+        drain.onDrainPoll();
+        fixture.executor.runAll();
+
+        assertEquals(1, drain.completed());
+        assertEquals(0, drain.failedSaves());
+        assertEquals(0, drain.pendingAsyncBlockedSaves());
+        assertEquals(0, fixture.manager.loadedAgents());
+        assertEquals(50, fixture.repository.load(10001L).orElseThrow().bag().itemCounts().get("gold"));
+    }
+
+    @Test
     void staleLogoutDoesNotPassivateReconnectedPlayer() {
         Fixture fixture = Fixture.create();
         InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
@@ -627,6 +792,18 @@ class PlayerGameAgentManagerTest {
         fixture.executor.runAll();
         assertEquals(1, login.session().epoch());
         assertEquals(1, fixture.manager.loadedAgents());
+    }
+
+    private static RuntimeHealthSnapshot playerHealthSnapshot(Fixture fixture, RuntimeHealthRegistry registry) {
+        return new RuntimeHealthProbe(
+                CLOCK,
+                fixture.actors,
+                fixture.lifecycles,
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        ).snapshot();
     }
 
     private record Fixture(

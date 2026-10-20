@@ -1,6 +1,10 @@
 package com.commonbattle.cluster.event;
 
 import com.commonbattle.actor.rpc.RpcCallback;
+import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.message.DefaultAgentMessagePort;
+import com.commonbattle.actor.rpc.RpcGateway;
+import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
@@ -18,8 +22,18 @@ import com.commonbattle.game.profile.LocalProfileCache;
 import com.commonbattle.game.profile.PlayerProfileSnapshot;
 import com.commonbattle.game.profile.ProfileChangedEvent;
 import com.commonbattle.game.profile.ProfileField;
+import com.commonbattle.game.profile.InMemoryProfileProjectionBytesStore;
+import com.commonbattle.game.profile.SerializedProfileProjectionStore;
 import com.commonbattle.game.social.AllianceMemberAction;
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
+import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
+import com.commonbattle.game.event.InMemoryVersionedEventInboxBytesStore;
+import com.commonbattle.game.event.SerializedVersionedEventInbox;
+import com.commonbattle.game.event.ActorMailboxEventSubscriber;
+import com.commonbattle.game.event.EventInboxRetryPolicy;
+import com.commonbattle.game.event.ReliableVersionedEventPublisher;
+import com.commonbattle.game.event.VersionedEventRetryPolicy;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -33,6 +47,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Executor;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -142,6 +159,30 @@ class ClusterVersionedEventBusTest {
     }
 
     @Test
+    void replayReportsOwnerWhenItsEntireHistoryWasTrimmed() {
+        Fixture fixture = fixture(1);
+        AtomicReference<EventReplayResult> result = new AtomicReference<>();
+        fixture.gameEvents().publish(profileEvent(10001L, 1, "avatar_1"));
+        fixture.gameEvents().publish(profileEvent(20002L, 1, "avatar_2"));
+
+        fixture.sceneEvents().replay(ProfileChangedEvent.TOPIC, Map.of("profile:10001", 0L), new RpcCallback<>() {
+            @Override
+            public void success(EventReplayResult response) {
+                result.set(response);
+            }
+
+            @Override
+            public void failure(Throwable error) {
+                throw new AssertionError(error);
+            }
+        });
+
+        assertNotNull(result.get());
+        assertEquals(0, result.get().delivered());
+        assertEquals(Set.of("profile:10001"), result.get().unavailableOwnerKeys());
+    }
+
+    @Test
     void eventCenterUsesTopicSpecificHistoryLimit() {
         Fixture fixture = fixture(new ClusterEventHistoryPolicy(
                 1,
@@ -236,6 +277,220 @@ class ClusterVersionedEventBusTest {
         assertEquals(1, stats.deliveryFailures());
     }
 
+    @Test
+    void reliablePublisherCommitsOnCenterAckAndRetainsTransportFailure() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+        Fixture healthy = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        InMemoryVersionedEventOutbox deliveredOutbox = new InMemoryVersionedEventOutbox(clock);
+        ReliableVersionedEventPublisher delivered = new ReliableVersionedEventPublisher(
+                deliveredOutbox,
+                healthy.gameEvents(),
+                new VersionedEventRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                clock
+        );
+
+        delivered.publish(profileEvent(1, "avatar_2"));
+
+        assertEquals(0, deliveredOutbox.pending().size());
+        assertEquals(1, healthy.center().historySize(ProfileChangedEvent.TOPIC));
+
+        Fixture unavailable = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        InMemoryVersionedEventOutbox retainedOutbox = new InMemoryVersionedEventOutbox(clock);
+        ReliableVersionedEventPublisher retained = new ReliableVersionedEventPublisher(
+                retainedOutbox,
+                unavailable.gameEvents(),
+                new VersionedEventRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                clock
+        );
+        unavailable.transport().close();
+
+        retained.publish(profileEvent(1, "avatar_2"));
+
+        assertEquals(1, retainedOutbox.pending().size());
+        assertEquals(1, retainedOutbox.pending().getFirst().attempts());
+        assertEquals(0, unavailable.center().historySize(ProfileChangedEvent.TOPIC));
+    }
+
+    @Test
+    void duplicatePublishIsAcknowledgedWithoutDuplicateFanoutOrHistory() {
+        Fixture fixture = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        AtomicInteger delivered = new AtomicInteger();
+        fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, event -> delivered.incrementAndGet());
+        ProfileChangedEvent event = profileEvent(1, "avatar_2");
+
+        fixture.gameEvents().publish(event);
+        fixture.gameEvents().publish(event);
+
+        ClusterEventTopicStats stats = fixture.center().stats().topics().get(ProfileChangedEvent.TOPIC);
+        assertEquals(1, delivered.get());
+        assertEquals(1, fixture.center().historySize(ProfileChangedEvent.TOPIC));
+        assertEquals(1, stats.publishedEvents());
+        assertEquals(1, stats.duplicatePublishes());
+    }
+
+    @Test
+    void restoredCenterReplaysEventsFromSharedJournal() {
+        InMemoryClusterEventJournal journal = new InMemoryClusterEventJournal();
+        Fixture first = fixture(ClusterEventHistoryPolicy.fixed(10), Clock.systemUTC(),
+                Duration.ofSeconds(15), journal);
+        first.gameEvents().publish(profileEvent(1, "avatar_2"));
+        first.gameEvents().publish(profileEvent(2, "avatar_3"));
+
+        Fixture restored = fixture(ClusterEventHistoryPolicy.fixed(10), Clock.systemUTC(),
+                Duration.ofSeconds(15), journal);
+        LocalProfileCache cache = new LocalProfileCache();
+        AtomicReference<EventReplayResult> replay = new AtomicReference<>();
+        restored.sceneEvents().subscribe(ProfileChangedEvent.TOPIC,
+                event -> cache.apply((ProfileChangedEvent) event), Map.of("profile:10001", 0L));
+        restored.sceneEvents().replay(ProfileChangedEvent.TOPIC, Map.of("profile:10001", 0L),
+                new RpcCallback<>() {
+                    @Override
+                    public void success(EventReplayResult response) {
+                        replay.set(response);
+                    }
+
+                    @Override
+                    public void failure(Throwable error) {
+                        throw new AssertionError(error);
+                    }
+                });
+
+        assertNotNull(replay.get());
+        assertEquals(2, replay.get().delivered());
+        assertEquals(2, restored.center().historySize(ProfileChangedEvent.TOPIC));
+        assertEquals("avatar_3", cache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+    }
+
+    @Test
+    void journalFailurePreventsCenterAckAndRetainsSourceOutbox() {
+        ClusterEventJournal failedJournal = new ClusterEventJournal() {
+            @Override
+            public ClusterEventJournalAppendResult appendAndTrim(
+                    com.commonbattle.game.event.VersionedEvent event,
+                    int historyLimit
+            ) {
+                throw new IllegalStateException("journal unavailable");
+            }
+
+            @Override
+            public List<com.commonbattle.game.event.VersionedEvent> retained(String topic) {
+                return List.of();
+            }
+
+            @Override
+            public long highWaterMark(String topic, String ownerKey) {
+                return 0;
+            }
+
+            @Override
+            public Set<String> topics() {
+                return Set.of();
+            }
+        };
+        Fixture fixture = fixture(ClusterEventHistoryPolicy.fixed(10), Clock.systemUTC(),
+                Duration.ofSeconds(15), failedJournal);
+        InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(Clock.systemUTC());
+        ReliableVersionedEventPublisher publisher = new ReliableVersionedEventPublisher(
+                outbox,
+                fixture.gameEvents(),
+                new VersionedEventRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                Clock.systemUTC()
+        );
+
+        publisher.publish(profileEvent(1, "avatar_2"));
+
+        assertEquals(1, outbox.pending().size());
+        assertEquals(1, fixture.center().stats().topics().get(ProfileChangedEvent.TOPIC).journalFailures());
+    }
+
+    @Test
+    void durableActorInboxRecoversClusterEventAfterConsumerRestart() {
+        Fixture fixture = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        Clock clock = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+        InMemoryVersionedEventInboxBytesStore inboxStore = new InMemoryVersionedEventInboxBytesStore();
+        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        SerializedVersionedEventInbox firstInbox = new SerializedVersionedEventInbox(inboxStore, codecs);
+        RecordingExecutor firstExecutor = new RecordingExecutor();
+        ActorSystem firstActors = new ActorSystem(firstExecutor, 64);
+        ActorMailboxEventSubscriber firstSubscriber = durableProfileSubscriber(
+                firstActors,
+                firstInbox,
+                new LocalProfileCache(),
+                clock
+        );
+        fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, firstSubscriber);
+        InMemoryVersionedEventOutbox sourceOutbox = new InMemoryVersionedEventOutbox(clock);
+        ReliableVersionedEventPublisher publisher = new ReliableVersionedEventPublisher(
+                sourceOutbox,
+                fixture.gameEvents(),
+                new VersionedEventRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                clock
+        );
+
+        publisher.publish(profileEvent(1, "avatar_2"));
+
+        assertEquals(0, sourceOutbox.pending().size());
+        assertEquals(1, firstInbox.pending(ProfileChangedEvent.TOPIC).size());
+
+        RecordingExecutor restoredExecutor = new RecordingExecutor();
+        ActorSystem restoredActors = new ActorSystem(restoredExecutor, 64);
+        LocalProfileCache restoredCache = new LocalProfileCache();
+        ActorMailboxEventSubscriber restoredSubscriber = durableProfileSubscriber(
+                restoredActors,
+                new SerializedVersionedEventInbox(inboxStore, codecs),
+                restoredCache,
+                clock
+        );
+
+        restoredSubscriber.replayPending();
+        restoredExecutor.runAll();
+
+        assertEquals("avatar_2", restoredCache.get(10001L).orElseThrow().snapshot().appearance().avatar());
+        assertEquals(0, new SerializedVersionedEventInbox(inboxStore, codecs)
+                .pending(ProfileChangedEvent.TOPIC).size());
+    }
+
+    @Test
+    void persistedProfileProjectionRestoresSnapshotAndPreventsReplayAfterRestart() {
+        Fixture fixture = fixture(ClusterEventCenter.DEFAULT_HISTORY_LIMIT);
+        Clock clock = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+        InMemoryVersionedEventInboxBytesStore inboxBytes = new InMemoryVersionedEventInboxBytesStore();
+        InMemoryProfileProjectionBytesStore projectionBytes = new InMemoryProfileProjectionBytesStore();
+        PayloadCodecRegistry codecs = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        LocalProfileCache firstCache = new LocalProfileCache(
+                new SerializedProfileProjectionStore(projectionBytes, "SCENE:r1:scene-1")
+        );
+        ActorSystem firstActors = new ActorSystem(Runnable::run, 64);
+        ActorMailboxEventSubscriber firstSubscriber = durableProfileSubscriber(
+                firstActors,
+                new SerializedVersionedEventInbox(inboxBytes, codecs, "SCENE:r1:scene-1"),
+                firstCache,
+                clock
+        );
+        fixture.sceneEvents().subscribe(ProfileChangedEvent.TOPIC, firstSubscriber);
+
+        fixture.gameEvents().publish(profileEvent(1, "avatar_2"));
+
+        LocalProfileCache restored = new LocalProfileCache(
+                new SerializedProfileProjectionStore(projectionBytes, "SCENE:r1:scene-1")
+        );
+        AtomicInteger replayed = new AtomicInteger();
+        fixture.sceneEvents().subscribe(
+                ProfileChangedEvent.TOPIC,
+                event -> {
+                    replayed.incrementAndGet();
+                    restored.apply((ProfileChangedEvent) event);
+                },
+                Map.of(ProfileChangedEvent.ownerKey(10001L), restored.revisionOf(10001L))
+        );
+
+        assertEquals(1, restored.revisionOf(10001L));
+        assertEquals("avatar_2", restored.get(10001L).orElseThrow().snapshot().appearance().avatar());
+        assertEquals(0, replayed.get());
+        assertEquals(0, new SerializedVersionedEventInbox(inboxBytes, codecs, "SCENE:r1:scene-1")
+                .pending(ProfileChangedEvent.TOPIC).size());
+    }
+
     private static Fixture fixture(int historyLimit) {
         return fixture(ClusterEventHistoryPolicy.fixed(historyLimit));
     }
@@ -245,6 +500,15 @@ class ClusterVersionedEventBusTest {
     }
 
     private static Fixture fixture(ClusterEventHistoryPolicy historyPolicy, Clock clock, Duration subscriptionLeaseTtl) {
+        return fixture(historyPolicy, clock, subscriptionLeaseTtl, new InMemoryClusterEventJournal());
+    }
+
+    private static Fixture fixture(
+            ClusterEventHistoryPolicy historyPolicy,
+            Clock clock,
+            Duration subscriptionLeaseTtl,
+            ClusterEventJournal journal
+    ) {
         LocalClusterTransport transport = new LocalClusterTransport();
         ClusterTopology topology = ClusterTopology.defaultCrossServer();
         InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
@@ -271,7 +535,8 @@ class ClusterVersionedEventBusTest {
                 centerGateway,
                 historyPolicy,
                 clock,
-                subscriptionLeaseTtl
+                subscriptionLeaseTtl,
+                journal
         );
         ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
         ClusterRpcGateway sceneGateway = new ClusterRpcGateway(scene, sceneDirectory, topology, transport);
@@ -318,6 +583,23 @@ class ClusterVersionedEventBusTest {
         );
     }
 
+    private static ActorMailboxEventSubscriber durableProfileSubscriber(
+            ActorSystem actors,
+            SerializedVersionedEventInbox inbox,
+            LocalProfileCache cache,
+            Clock clock
+    ) {
+        return new ActorMailboxEventSubscriber(
+                new DefaultAgentMessagePort(actors, new NoopRpcGateway()),
+                actors.actor("scene-profile-durable"),
+                (context, event) -> cache.apply((ProfileChangedEvent) event),
+                ProfileChangedEvent.TOPIC,
+                inbox,
+                new EventInboxRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                clock
+        );
+    }
+
     private record Fixture(
             ClusterEventCenter center,
             ClusterVersionedEventBus gameEvents,
@@ -325,6 +607,27 @@ class ClusterVersionedEventBusTest {
             ServiceId sceneId,
             LocalClusterTransport transport
     ) {
+    }
+
+    private static final class RecordingExecutor implements Executor {
+        private final List<Runnable> commands = new ArrayList<>();
+
+        @Override
+        public void execute(Runnable command) {
+            commands.add(command);
+        }
+
+        private void runAll() {
+            while (!commands.isEmpty()) {
+                commands.removeFirst().run();
+            }
+        }
+    }
+
+    private static final class NoopRpcGateway implements RpcGateway {
+        @Override
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
     }
 
     private static final class MutableClock extends Clock {

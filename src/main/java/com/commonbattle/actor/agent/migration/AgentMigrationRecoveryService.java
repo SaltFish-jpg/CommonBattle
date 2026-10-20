@@ -159,7 +159,7 @@ public final class AgentMigrationRecoveryService {
             taskStore.mark(task.taskId(), AgentMigrationTaskStatus.MOVED, "", clock.instant());
             return task.withStatus(AgentMigrationTaskStatus.MOVED, "", clock.instant());
         }
-        if (directory.move(task.identity(), task.source(), task.target())) {
+        if (sourceLifecycles.recoverMigrationMove(task.identity(), task.source(), task.target())) {
             taskStore.mark(task.taskId(), AgentMigrationTaskStatus.MOVED, "", clock.instant());
             return task.withStatus(AgentMigrationTaskStatus.MOVED, "", clock.instant());
         }
@@ -185,8 +185,7 @@ public final class AgentMigrationRecoveryService {
     }
 
     private boolean rollback(AgentMigrationTask task) {
-        if (directory.move(task.identity(), task.target(), task.source())) {
-            sourceLifecycles.resumeAfterMigrationRollback(task.identity(), task.source());
+        if (sourceLifecycles.rollbackMigration(task.identity(), task.target(), task.source())) {
             metrics.rollbackSucceeded();
             taskStore.mark(task.taskId(), AgentMigrationTaskStatus.ROLLED_BACK, "", clock.instant());
             return true;

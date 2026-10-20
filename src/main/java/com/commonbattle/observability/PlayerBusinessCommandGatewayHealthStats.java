@@ -12,10 +12,18 @@ public record PlayerBusinessCommandGatewayHealthStats(
         long remoteForwardFailureResponses,
         long remoteForwardTimedOutResponses,
         long lateRemoteForwardResponses,
-        long remoteForwardMigrationProtectedResponses
+        long remoteForwardMigrationProtectedResponses,
+        long remoteForwardRedirectResponses,
+        long remoteForwardRedirectRetries,
+        long remoteForwardRedirectRouteRefreshes,
+        long remoteForwardRedirectRouteRefreshFailures,
+        long remoteForwardTimeoutRecoveryQueries,
+        long remoteForwardTimeoutRecoveryHits,
+        long remoteForwardTimeoutRecoveryMisses,
+        long remoteForwardTimeoutRecoveryFailures
 ) {
     public static PlayerBusinessCommandGatewayHealthStats empty() {
-        return new PlayerBusinessCommandGatewayHealthStats(0, 0, 0, 0, 0, 0, 0);
+        return new PlayerBusinessCommandGatewayHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static PlayerBusinessCommandGatewayHealthStats from(int gatewayCount, PlayerBusinessCommandGatewayStats stats) {
@@ -26,7 +34,15 @@ public record PlayerBusinessCommandGatewayHealthStats(
                 stats.remoteForwardFailureResponses(),
                 stats.remoteForwardTimedOutResponses(),
                 stats.lateRemoteForwardResponses(),
-                stats.remoteForwardMigrationProtectedResponses()
+                stats.remoteForwardMigrationProtectedResponses(),
+                stats.remoteForwardRedirectResponses(),
+                stats.remoteForwardRedirectRetries(),
+                stats.remoteForwardRedirectRouteRefreshes(),
+                stats.remoteForwardRedirectRouteRefreshFailures(),
+                stats.remoteForwardTimeoutRecoveryQueries(),
+                stats.remoteForwardTimeoutRecoveryHits(),
+                stats.remoteForwardTimeoutRecoveryMisses(),
+                stats.remoteForwardTimeoutRecoveryFailures()
         );
     }
 }

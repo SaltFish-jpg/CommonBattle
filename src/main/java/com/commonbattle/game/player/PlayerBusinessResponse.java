@@ -37,6 +37,7 @@ public record PlayerBusinessResponse(
     public static final String REMOTE_REJECTED = "REMOTE_REJECTED";
     public static final String REMOTE_DRAINING = "REMOTE_DRAINING";
     public static final String REMOTE_CIRCUIT_OPEN = "REMOTE_CIRCUIT_OPEN";
+    public static final String RESULT_NOT_FOUND = "RESULT_NOT_FOUND";
 
     public PlayerBusinessResponse {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -106,6 +107,21 @@ public record PlayerBusinessResponse(
                 failureCode(error),
                 error == null || error.getMessage() == null ? "" : error.getMessage(),
                 retryAfterMillis(error),
+                failurePayload(error)
+        );
+    }
+
+    public static PlayerBusinessResponse resultNotFound(PlayerBusinessResponseQuery query) {
+        return new PlayerBusinessResponse(
+                query.playerId(),
+                query.sessionId(),
+                query.sessionEpoch(),
+                query.sequence(),
+                query.operation(),
+                PlayerBusinessResponseStatus.FAILED,
+                RESULT_NOT_FOUND,
+                "player business response not found",
+                0,
                 null
         );
     }
@@ -161,5 +177,12 @@ public record PlayerBusinessResponse(
             return failure.retryAfterMillis();
         }
         return 0;
+    }
+
+    private static Object failurePayload(Throwable error) {
+        if (error instanceof PlayerCommandDispatchException dispatch) {
+            return dispatch.redirect().orElse(null);
+        }
+        return null;
     }
 }

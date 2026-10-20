@@ -5,5 +5,6 @@ package com.commonbattle.cluster.rpc;
  */
 public enum RpcCircuitState {
     CLOSED,
-    OPEN
+    OPEN,
+    HALF_OPEN
 }

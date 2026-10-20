@@ -3,6 +3,9 @@ package com.commonbattle.example.cross.scene;
 import com.commonbattle.actor.ActorContext;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
+import com.commonbattle.actor.agent.migration.AgentMigrationOperations;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
@@ -13,6 +16,7 @@ import com.commonbattle.game.scene.SceneRuntimeStats;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -28,6 +32,7 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
     private final Map<String, ActorRef> scenes = new ConcurrentHashMap<>();
     private final Map<String, Set<Long>> playersByScene = new ConcurrentHashMap<>();
     private final Object sceneCreationLock = new Object();
+    private volatile AgentLifecycleManager lifecycles;
 
     public MultiSmallSceneService(ActorSystem actors, ServiceId serviceId, ServiceEndpoint endpoint, int capacity) {
         this.actors = actors;
@@ -36,7 +41,7 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
                 serviceId,
                 endpoint,
                 Set.of(SceneOperations.ENTER, SceneOperations.LEAVE, SceneOperations.MOVE,
-                        SceneOperations.COMBAT_DAMAGE, SceneOperations.MESSAGE),
+                        SceneOperations.COMBAT_DAMAGE, SceneOperations.MESSAGE, AgentMigrationOperations.ACCEPT),
                 Map.of(
                         "scene.mode", SceneHostingMode.MULTI_SMALL_SCENE.name(),
                         "scene.capacity", String.valueOf(capacity)
@@ -65,6 +70,19 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
     }
 
     @Override
+    public void attachLifecycles(AgentLifecycleManager lifecycles) {
+        this.lifecycles = Objects.requireNonNull(lifecycles, "lifecycles");
+        lifecycles.addInvalidationListener(record -> {
+            if (!AgentIdentity.SCENE.equals(record.identity().type())) {
+                return;
+            }
+            String sceneId = record.identity().key();
+            scenes.remove(sceneId, record.location().actorRef());
+            playersByScene.remove(sceneId);
+        });
+    }
+
+    @Override
     public SceneRuntimeStats stats() {
         int activePlayers = playersByScene.values().stream()
                 .mapToInt(Set::size)
@@ -82,7 +100,10 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
                     if (scenes.size() >= capacity) {
                         throw new SceneCapacityExceededException(baseDescriptor.id().node(), capacity);
                     }
-                    actor = actors.actor(actorId(sceneId));
+                    AgentLifecycleManager lifecycle = lifecycles;
+                    actor = lifecycle == null
+                            ? actors.actor(actorId(sceneId))
+                            : lifecycle.activate(AgentIdentity.scene(sceneId), actorId(sceneId)).actorRef();
                     scenes.put(sceneId, actor);
                 }
             }
@@ -96,6 +117,25 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
             throw new IllegalArgumentException("sceneId must not be blank");
         }
         return "scene:" + baseDescriptor.id().node() + ":" + sceneId;
+    }
+
+    @Override
+    public Optional<AgentIdentity> identityOfActor(String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return Optional.empty();
+        }
+        return scenes.entrySet().stream()
+                .filter(entry -> entry.getValue().id().equals(actorId))
+                .map(entry -> AgentIdentity.scene(entry.getKey()))
+                .findFirst();
+    }
+
+    @Override
+    public String migrationTargetActorId(AgentIdentity identity, ServiceId targetServiceId) {
+        if (!AgentIdentity.SCENE.equals(identity.type())) {
+            throw new IllegalArgumentException("unsupported small scene identity: " + identity.type());
+        }
+        return "scene:" + targetServiceId.node() + ":" + identity.key();
     }
 
     public Set<Long> scenePlayers(String sceneId) {
@@ -134,6 +174,7 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
         if (removed == null) {
             throw new IllegalStateException("scene agent not loaded: " + sceneId);
         }
+        actors.retire(removed);
         return new SmallSceneAgentSnapshot(sceneId, players == null ? Set.of() : Set.copyOf(players));
     }
 
@@ -177,7 +218,10 @@ public final class MultiSmallSceneService implements SceneServiceStrategy {
         boolean removed = players.remove(playerId);
         if (players.isEmpty()) {
             playersByScene.remove(sceneId, players);
-            scenes.remove(sceneId);
+            ActorRef retired = scenes.remove(sceneId);
+            if (retired != null) {
+                actors.retire(retired);
+            }
         }
         return removed;
     }

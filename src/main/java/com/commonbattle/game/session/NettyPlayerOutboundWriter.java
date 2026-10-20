@@ -12,11 +12,17 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class NettyPlayerOutboundWriter implements PlayerOutboundWriter {
     private final Channel channel;
+    private final NettyPlayerWriteTracker writeTracker;
     private final AtomicLong acceptedWrites = new AtomicLong();
     private final AtomicLong failedWrites = new AtomicLong();
 
     public NettyPlayerOutboundWriter(Channel channel) {
+        this(channel, new NettyPlayerWriteTracker());
+    }
+
+    public NettyPlayerOutboundWriter(Channel channel, NettyPlayerWriteTracker writeTracker) {
         this.channel = Objects.requireNonNull(channel, "channel");
+        this.writeTracker = Objects.requireNonNull(writeTracker, "writeTracker");
     }
 
     @Override
@@ -27,7 +33,7 @@ public final class NettyPlayerOutboundWriter implements PlayerOutboundWriter {
             return false;
         }
         try {
-            channel.writeAndFlush(PlayerClientEnvelope.from(message)).addListener((ChannelFutureListener) future -> {
+            writeTracker.writeAndFlush(channel, PlayerClientEnvelope.from(message)).addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
                     acceptedWrites.incrementAndGet();
                     return;

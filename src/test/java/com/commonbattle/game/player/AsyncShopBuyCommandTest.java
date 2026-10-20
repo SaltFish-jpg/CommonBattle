@@ -62,6 +62,8 @@ import java.util.Optional;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -140,7 +142,9 @@ class AsyncShopBuyCommandTest {
         ClusterRpcGateway centerGateway = new ClusterRpcGateway(center, centerDirectory, topology, transport);
         InMemoryShopStockRepository centerStocks = new InMemoryShopStockRepository(CLOCK, java.time.Duration.ZERO);
         centerStocks.set("limited_pack", 1);
-        new ShopStockEndpoint(centerStocks).bind(centerGateway);
+        RecordingExecutor centerExecutor = new RecordingExecutor();
+        ActorSystem centerActors = new ActorSystem(centerExecutor, 1);
+        new ShopStockEndpoint(centerStocks, centerActors, "center-shop-stock").bind(centerGateway);
         DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, gameGateway);
         InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
         ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
@@ -195,6 +199,7 @@ class AsyncShopBuyCommandTest {
                 new BuyShopItemAsyncCommand("order-10001-rpc", "limited_pack", 1)
         ));
         executor.runNext();
+        centerExecutor.runNext();
 
         assertEquals(PlayerCommandStatus.ACCEPTED, dispatch.status());
         assertEquals(0, centerStocks.remaining("limited_pack"));
@@ -217,6 +222,10 @@ class AsyncShopBuyCommandTest {
                 .anyMatch(event -> ShopItemPurchasedEvent.TYPE.equals(event.eventType())));
         assertEquals(PlayerCommandAuditOutcome.ASYNC_COMPLETED, audit.last().outcome());
         assertEquals(0, gameGateway.stats().pendingRequests());
+        centerActors.close();
+        gameGateway.close();
+        centerGateway.close();
+        transport.close();
     }
 
     @Test
@@ -620,7 +629,7 @@ class AsyncShopBuyCommandTest {
     }
 
     private static final class RecordingExecutor implements Executor {
-        private final List<Runnable> commands = new ArrayList<>();
+        private final LinkedBlockingQueue<Runnable> commands = new LinkedBlockingQueue<>();
 
         @Override
         public void execute(Runnable command) {
@@ -628,7 +637,16 @@ class AsyncShopBuyCommandTest {
         }
 
         private void runNext() {
-            commands.removeFirst().run();
+            try {
+                Runnable command = commands.poll(1, TimeUnit.SECONDS);
+                if (command == null) {
+                    throw new AssertionError("actor task was not enqueued within timeout");
+                }
+                command.run();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for actor task", e);
+            }
         }
     }
 

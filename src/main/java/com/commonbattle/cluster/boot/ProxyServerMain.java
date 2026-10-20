@@ -36,15 +36,23 @@ public final class ProxyServerMain {
             PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
-                    codecs
+                    codecs,
+                    config.nettyTransportConfig()
             ));
-            ForwardingProxy forwarder = new ForwardingProxy(transport);
+            ForwardingProxy forwarder = runtime.add(
+                    "forwardingProxy",
+                    new ForwardingProxy(transport, local, config.forwardingProxyConfig())
+            );
             ClusterRpcGateway gateway = runtime.add(
                     "rpcGateway",
-                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport, false)
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport, false,
+                            config.rpcGovernanceConfig(),
+                            BootRpcIdempotencyStore.configure(config, codecs, Clock.systemUTC()))
             );
             transport.bind(local, envelope -> {
-                if (envelope.target().equals(local.id())) {
+                if (com.commonbattle.cluster.network.ClusterDeliveryProtocol.isAcknowledgment(envelope)) {
+                    forwarder.onMessage(envelope);
+                } else if (envelope.target().equals(local.id())) {
                     gateway.onMessage(envelope);
                 } else {
                     forwarder.onMessage(envelope);
@@ -64,11 +72,14 @@ public final class ProxyServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime));
             System.out.println("Proxy server started: " + local.id().wireName()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
             new CountDownLatch(1).await();
         } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        } catch (Error e) {
             runtime.closeSuppressing(e);
             throw e;
         }

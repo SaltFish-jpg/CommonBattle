@@ -4,8 +4,6 @@ import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.message.LocalAskCallback;
 import com.commonbattle.actor.message.AgentMessagePort;
-import com.commonbattle.actor.rpc.RpcCallback;
-import com.commonbattle.game.player.PlayerBusinessResponse;
 import com.commonbattle.game.session.PlayerCommand;
 
 /**
@@ -33,10 +31,6 @@ public interface BusinessAgentMessagePort extends AgentMessagePort {
     ) {
         requestAgent(requester, target, operation, payload, responseType, BusinessAgentCallOptions.defaults(), callback);
     }
-
-    void sendPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback);
-
-    void sendLocalPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback);
 
     <T> void requestPlayerCommand(
             ActorRef requester,

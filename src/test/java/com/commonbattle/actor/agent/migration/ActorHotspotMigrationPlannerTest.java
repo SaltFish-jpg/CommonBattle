@@ -118,9 +118,56 @@ class ActorHotspotMigrationPlannerTest {
                 ActorHotspotMigrationPlanner.identityOf("alliance-7"));
         assertEquals(Optional.of(AgentIdentity.scene("world-1")),
                 ActorHotspotMigrationPlanner.identityOf("scene:world-1"));
-        assertEquals(Optional.of(AgentIdentity.scene("world-1:0")),
+        assertEquals(Optional.of(AgentIdentity.sceneShard("world-1", 0)),
                 ActorHotspotMigrationPlanner.identityOf("scene-shard:world-1:0"));
         assertTrue(ActorHotspotMigrationPlanner.identityOf("chat-world").isEmpty());
+    }
+
+    @Test
+    void customResolverMigratesSceneShardToSceneService() {
+        InMemoryAgentDirectory agents = new InMemoryAgentDirectory();
+        ClusterDirectory services = new ClusterDirectory(new InMemoryServiceRegistry());
+        services.watch(ServiceKind.SCENE);
+        ServiceDescriptor source = new ServiceDescriptor(
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-1"),
+                new ServiceEndpoint("127.0.0.1", 9101),
+                Set.of(AgentMigrationOperations.ACCEPT),
+                Map.of()
+        );
+        ServiceDescriptor target = new ServiceDescriptor(
+                ServiceId.of(ServiceKind.SCENE, "r1", "scene-2"),
+                new ServiceEndpoint("127.0.0.1", 9102),
+                Set.of(AgentMigrationOperations.ACCEPT),
+                Map.of()
+        );
+        services.seed(source);
+        services.seed(target);
+        AgentIdentity shard = AgentIdentity.sceneShard("world-1", 2);
+        String actorId = "scene:scene-1:world-1:shard-2";
+        agents.claim(shard, new AgentLocation(source.id(), new ActorRef(actorId)));
+        List<Submission> submissions = new ArrayList<>();
+        ActorHotspotMigrationPlanner planner = new ActorHotspotMigrationPlanner(
+                agents,
+                services,
+                new InMemoryAgentMigrationTaskStore(),
+                (identity, location, packer) -> {
+                    submissions.add(new Submission(identity, location));
+                    return true;
+                },
+                candidateActorId -> actorId.equals(candidateActorId) ? Optional.of(shard) : Optional.empty(),
+                (sourceActorId, identity, targetService) ->
+                        "scene:" + targetService.id().node() + ":world-1:shard-2"
+        );
+
+        ActorHotspotMigrationResult result = planner.submitCandidate(
+                candidate(actorId, ActorHotspotAction.MIGRATION_CANDIDATE),
+                snapshotPacker()
+        );
+
+        assertEquals(ActorHotspotMigrationStatus.SUBMITTED, result.status());
+        assertEquals(target.id(), result.target().orElseThrow().serviceId());
+        assertEquals("scene:scene-2:world-1:shard-2", result.target().orElseThrow().actorRef().id());
+        assertEquals(shard, submissions.getFirst().identity());
     }
 
     private static ActorHotspotCandidate candidate(String actorId, ActorHotspotAction action) {

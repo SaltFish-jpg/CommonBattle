@@ -64,6 +64,7 @@ public record PlayerCommandResult(
     public boolean waitForExistingResponse() {
         return status == PlayerCommandStatus.DUPLICATE
                 && originalStatus.isPresent()
-                && originalStatus.orElseThrow() == PlayerCommandStatus.ACCEPTED;
+                && (originalStatus.orElseThrow() == PlayerCommandStatus.ACCEPTED
+                || originalStatus.orElseThrow() == PlayerCommandStatus.ROUTED_REMOTE);
     }
 }

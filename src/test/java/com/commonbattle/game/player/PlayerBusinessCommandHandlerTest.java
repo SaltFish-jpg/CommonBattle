@@ -18,8 +18,13 @@ import com.commonbattle.game.GameBusinessErrorCodes;
 import com.commonbattle.game.activity.ActivityCatalog;
 import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityDefinition;
+import com.commonbattle.game.activity.ActivityEligibilityAsyncClient;
+import com.commonbattle.game.activity.ActivityEligibilityCallback;
+import com.commonbattle.game.activity.ActivityEligibilityDecision;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.activity.AsyncActivityClaimResult;
+import com.commonbattle.game.activity.AsyncActivityClaimStatus;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.BagResult;
 import com.commonbattle.game.bag.BagSnapshot;
@@ -262,6 +267,34 @@ class PlayerBusinessCommandHandlerTest {
     }
 
     @Test
+    void asyncActivityClaimCommandResumesThroughPlayerMailboxAfterEligibilityCallback() {
+        RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
+        RecordingActivityEligibilityClient eligibility = new RecordingActivityEligibilityClient();
+        Fixture fixture = Fixture.create(results, null, eligibility);
+        fixture.dispatch(new ActivityProgressCommand("kill-3", 3));
+        fixture.executor.runNext();
+
+        PlayerCommandResult accepted = fixture.dispatch(new ClaimActivityAsyncCommand("kill-3"));
+        fixture.executor.runNext();
+
+        assertEquals(PlayerCommandStatus.ACCEPTED, accepted.status());
+        assertEquals(10001L, eligibility.playerId);
+        assertEquals("kill-3", eligibility.activityId);
+        assertEquals(1, results.envelopes.size());
+        assertEquals(0, fixture.agent.profile().bag().count("gem"));
+
+        eligibility.callback.success(ActivityEligibilityDecision.allow());
+        assertEquals(1, results.envelopes.size());
+        fixture.executor.runNext();
+
+        PlayerBusinessResponse response = results.envelopes.getLast();
+        AsyncActivityClaimResult result = assertInstanceOf(AsyncActivityClaimResult.class, response.payload());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status());
+        assertEquals(AsyncActivityClaimStatus.CLAIMED, result.status());
+        assertEquals(5, fixture.agent.profile().bag().count("gem"));
+    }
+
+    @Test
     void growthCommandReportsStableDomainCodeWhenExpItemIsNotEnough() {
         RecordingUnifiedResultSink results = new RecordingUnifiedResultSink();
         Fixture fixture = Fixture.create(results);
@@ -310,6 +343,14 @@ class PlayerBusinessCommandHandlerTest {
             return create(results, null);
         }
 
+        private static Fixture create(
+                RecordingResultSink results,
+                GameConfigRegistry configRegistry,
+                ActivityEligibilityAsyncClient activityEligibility
+        ) {
+            return createInternal(results, configRegistry, activityEligibility);
+        }
+
         private static Fixture createWithConfigRuntime() {
             return createWithConfigRuntime(new RecordingResultSink());
         }
@@ -330,6 +371,14 @@ class PlayerBusinessCommandHandlerTest {
         }
 
         private static Fixture create(RecordingResultSink results, GameConfigRegistry configRegistry) {
+            return createInternal(results, configRegistry, null);
+        }
+
+        private static Fixture createInternal(
+                RecordingResultSink results,
+                GameConfigRegistry configRegistry,
+                ActivityEligibilityAsyncClient activityEligibility
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef self = actors.actor("player-10001");
@@ -363,7 +412,11 @@ class PlayerBusinessCommandHandlerTest {
             InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
             sessions.bind(10001L, "session-1");
             InMemoryPlayerCommandAuditLog audit = new InMemoryPlayerCommandAuditLog();
-            PlayerBusinessCommandHandler handler = new PlayerBusinessCommandHandler(playerId -> agent, results);
+            PlayerBusinessCommandHandler handler = new PlayerBusinessCommandHandler(
+                    playerId -> agent,
+                    results,
+                    activityEligibility
+            );
             PlayerCommandDispatcher dispatcher = new PlayerCommandDispatcher(
                     sessions,
                     new PlayerCommandSequencer(),
@@ -475,6 +528,19 @@ class PlayerBusinessCommandHandlerTest {
             } else {
                 failed(command, new PlayerBusinessResponseException(response));
             }
+        }
+    }
+
+    private static final class RecordingActivityEligibilityClient implements ActivityEligibilityAsyncClient {
+        private long playerId;
+        private String activityId;
+        private ActivityEligibilityCallback callback;
+
+        @Override
+        public void check(long playerId, String activityId, ActivityEligibilityCallback callback) {
+            this.playerId = playerId;
+            this.activityId = activityId;
+            this.callback = callback;
         }
     }
 

@@ -4,6 +4,7 @@ import com.commonbattle.actor.ActorOverflowStrategy;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.player.AsyncBusinessCommandPolicy;
 import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +37,119 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void productionGameRejectsVolatileStoresAndUnprotectedOpsEndpoint() {
+        Properties properties = base();
+        properties.setProperty("cluster.environment", "PRODUCTION");
+        properties.setProperty("cluster.ops.port", "19001");
+        properties.setProperty("cluster.player.state.store", "MEMORY");
+        properties.setProperty("cluster.event.outbox.store", "MEMORY");
+        properties.setProperty("cluster.event.inbox.store", "MEMORY");
+        properties.setProperty("cluster.migration.task.store", "MEMORY");
+        properties.setProperty("cluster.migration.target.receipt.store", "MEMORY");
+        properties.setProperty("cluster.agent.lease.enabled", "false");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.GAME);
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+
+        assertFalse(validation.valid());
+        assertTrue(keys.contains("cluster.ops.admin.token"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.store"));
+        assertTrue(keys.contains("cluster.player.state.store"));
+        assertTrue(keys.contains("cluster.event.outbox.store"));
+        assertTrue(keys.contains("cluster.event.inbox.store"));
+        assertTrue(keys.contains("cluster.migration.task.store"));
+        assertTrue(keys.contains("cluster.migration.target.receipt.store"));
+        assertTrue(keys.contains("cluster.agent.lease.enabled"));
+    }
+
+    @Test
+    void productionGameAcceptsExplicitDurableStoresAndOpsToken() {
+        Properties properties = base();
+        properties.setProperty("cluster.environment", "PRODUCTION");
+        properties.setProperty("cluster.ops.port", "19001");
+        properties.setProperty("cluster.ops.admin.token", "test-production-token");
+        properties.setProperty("cluster.rpc.idempotency.store", "JDBC");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.url", "jdbc:h2:mem:rpc-idempotency");
+        properties.setProperty("cluster.player.state.store", "JDBC");
+        properties.setProperty("cluster.player.state.jdbc.url", "jdbc:h2:mem:player-state");
+        properties.setProperty("cluster.event.outbox.store", "JDBC");
+        properties.setProperty("cluster.event.outbox.jdbc.url", "jdbc:h2:mem:outbox");
+        properties.setProperty("cluster.event.inbox.store", "JDBC");
+        properties.setProperty("cluster.event.inbox.jdbc.url", "jdbc:h2:mem:inbox");
+        properties.setProperty("cluster.migration.task.store", "JDBC");
+        properties.setProperty("cluster.migration.task.jdbc.url", "jdbc:h2:mem:migrations");
+        properties.setProperty("cluster.migration.target.receipt.store", "FILE");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(ClusterEnvironment.PRODUCTION, config.environment());
+        assertDoesNotThrow(() -> config.validate(ServiceKind.GAME).throwIfInvalid());
+    }
+
+    @Test
+    void productionCenterRequiresDurableGlobalStock() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CENTER");
+        properties.setProperty("cluster.environment", "PRODUCTION");
+        properties.setProperty("cluster.rpc.idempotency.store", "JDBC");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.url", "jdbc:vendor://center/rpc-idempotency");
+        properties.setProperty("cluster.event.outbox.store", "JDBC");
+        properties.setProperty("cluster.event.outbox.jdbc.url", "jdbc:vendor://center/outbox");
+        properties.setProperty("cluster.event.journal.store", "JDBC");
+        properties.setProperty("cluster.event.journal.jdbc.url", "jdbc:vendor://center/events");
+        properties.setProperty("cluster.shop.stock.store", "MEMORY");
+        properties.setProperty("cluster.game.config.store", "MEMORY");
+        properties.setProperty("cluster.agent.directory.store", "MEMORY");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.CENTER);
+
+        assertFalse(validation.valid());
+        assertTrue(validation.issues().stream().anyMatch(issue ->
+                "cluster.shop.stock.store".equals(issue.key())));
+        assertTrue(validation.issues().stream().anyMatch(issue ->
+                "cluster.game.config.store".equals(issue.key())));
+        assertTrue(validation.issues().stream().anyMatch(issue ->
+                "cluster.agent.directory.store".equals(issue.key())));
+    }
+
+    @Test
+    void productionCenterAcceptsJdbcGlobalStock() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CENTER");
+        properties.setProperty("cluster.environment", "PRODUCTION");
+        properties.setProperty("cluster.rpc.idempotency.store", "JDBC");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.url", "jdbc:vendor://center/rpc-idempotency");
+        properties.setProperty("cluster.event.outbox.store", "JDBC");
+        properties.setProperty("cluster.event.outbox.jdbc.url", "jdbc:vendor://center/outbox");
+        properties.setProperty("cluster.event.journal.store", "JDBC");
+        properties.setProperty("cluster.event.journal.jdbc.url", "jdbc:vendor://center/events");
+        properties.setProperty("cluster.shop.stock.store", "JDBC");
+        properties.setProperty("cluster.shop.stock.jdbc.url", "jdbc:vendor://center/shop");
+        properties.setProperty("cluster.game.config.store", "JDBC");
+        properties.setProperty("cluster.game.config.jdbc.url", "jdbc:vendor://center/config");
+        properties.setProperty("cluster.agent.directory.store", "JDBC");
+        properties.setProperty("cluster.agent.directory.jdbc.url", "jdbc:vendor://center/agents");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertDoesNotThrow(() -> config.validate(ServiceKind.CENTER).throwIfInvalid());
+    }
+
+    @Test
+    void validationRejectsUnknownEnvironment() {
+        Properties properties = base();
+        properties.setProperty("cluster.environment", "STAGING");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.GAME);
+
+        assertTrue(validation.issues().stream().anyMatch(issue ->
+                "cluster.environment".equals(issue.key())));
+    }
+
+    @Test
     void validationCollectsAllObviousConfigIssues() {
         Properties properties = base();
         properties.setProperty("cluster.kind", "GAME");
@@ -48,6 +162,10 @@ class ClusterNodeConfigTest {
         properties.setProperty("scene.tick.enabled", "maybe");
         properties.setProperty("scene.tick.initial.delay.millis", "-1");
         properties.setProperty("scene.tick.interval.millis", "0");
+        properties.setProperty("scene.shard.transfer.repair.enabled", "maybe");
+        properties.setProperty("scene.shard.transfer.repair.initial.delay.millis", "-1");
+        properties.setProperty("scene.shard.transfer.repair.interval.millis", "0");
+        properties.setProperty("scene.shard.transfer.repair.timeout.millis", "0");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.SCENE);
 
@@ -63,6 +181,26 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("scene.tick.enabled"));
         assertTrue(keys.contains("scene.tick.initial.delay.millis"));
         assertTrue(keys.contains("scene.tick.interval.millis"));
+        assertTrue(keys.contains("scene.shard.transfer.repair.enabled"));
+        assertTrue(keys.contains("scene.shard.transfer.repair.initial.delay.millis"));
+        assertTrue(keys.contains("scene.shard.transfer.repair.interval.millis"));
+        assertTrue(keys.contains("scene.shard.transfer.repair.timeout.millis"));
+    }
+
+    @Test
+    void sceneShardTransferRepairConfigCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("scene.shard.transfer.repair.enabled", "false");
+        properties.setProperty("scene.shard.transfer.repair.initial.delay.millis", "250");
+        properties.setProperty("scene.shard.transfer.repair.interval.millis", "750");
+        properties.setProperty("scene.shard.transfer.repair.timeout.millis", "3000");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(false, config.sceneShardTransferRepairEnabled());
+        assertEquals(250, config.sceneShardTransferRepairInitialDelay().toMillis());
+        assertEquals(750, config.sceneShardTransferRepairInterval().toMillis());
+        assertEquals(3000, config.sceneShardTransferRepairTimeout().toMillis());
     }
 
     @Test
@@ -87,6 +225,191 @@ class ClusterNodeConfigTest {
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
 
         org.junit.jupiter.api.Assertions.assertEquals(2500, config.configWarmupTimeout().toMillis());
+    }
+
+    @Test
+    void nettyTransportGovernanceCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.network.connect.timeout.millis", "750");
+        properties.setProperty("cluster.network.reconnect.backoff.millis", "25");
+        properties.setProperty("cluster.network.pending.writes.per.target", "32");
+        properties.setProperty("cluster.proxy.delivery.ack.timeout.millis", "120");
+        properties.setProperty("cluster.proxy.pending.forwards.max", "64");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(750, config.nettyTransportConfig().connectTimeout().toMillis());
+        assertEquals(25, config.nettyTransportConfig().reconnectBackoff().toMillis());
+        assertEquals(32, config.nettyTransportConfig().maxPendingWritesPerTarget());
+        assertEquals(120, config.forwardingProxyConfig().deliveryAckTimeout().toMillis());
+        assertEquals(64, config.forwardingProxyConfig().maxPendingForwards());
+        assertTrue(config.validate(ServiceKind.GAME).valid());
+
+        properties.setProperty("cluster.network.connect.timeout.millis", "0");
+        properties.setProperty("cluster.network.reconnect.backoff.millis", "-1");
+        properties.setProperty("cluster.network.pending.writes.per.target", "0");
+        properties.setProperty("cluster.proxy.delivery.ack.timeout.millis", "0");
+        properties.setProperty("cluster.proxy.pending.forwards.max", "0");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME)
+                .issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.network.connect.timeout.millis"));
+        assertTrue(keys.contains("cluster.network.reconnect.backoff.millis"));
+        assertTrue(keys.contains("cluster.network.pending.writes.per.target"));
+        assertTrue(keys.contains("cluster.proxy.delivery.ack.timeout.millis"));
+        assertTrue(keys.contains("cluster.proxy.pending.forwards.max"));
+    }
+
+    @Test
+    void rpcGovernanceBudgetCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.rpc.default.timeout.millis", "1500");
+        properties.setProperty("cluster.rpc.max.pending.requests", "2048");
+        properties.setProperty("cluster.rpc.slow.call.threshold.millis", "75");
+        properties.setProperty("cluster.rpc.idempotency.cache.capacity", "4096");
+        properties.setProperty("cluster.rpc.idempotency.cache.ttl.millis", "90000");
+        properties.setProperty("cluster.rpc.idempotency.lease.millis", "12000");
+        properties.setProperty("cluster.rpc.idempotency.poll.interval.millis", "40");
+
+        var governance = ClusterNodeConfig.fromProperties(properties).rpcGovernanceConfig();
+
+        assertEquals(1500, governance.defaultTimeout().toMillis());
+        assertEquals(2048, governance.maxPendingRequests());
+        assertEquals(75, governance.slowCallThreshold().toMillis());
+        assertEquals(4096, governance.idempotencyCacheCapacity());
+        assertEquals(90000, governance.idempotencyCacheTtl().toMillis());
+        assertEquals(12000, governance.idempotencyLeaseDuration().toMillis());
+        assertEquals(40, governance.idempotencyPollInterval().toMillis());
+
+        properties.setProperty("cluster.rpc.default.timeout.millis", "0");
+        properties.setProperty("cluster.rpc.max.pending.requests", "0");
+        properties.setProperty("cluster.rpc.slow.call.threshold.millis", "-1");
+        properties.setProperty("cluster.rpc.idempotency.cache.capacity", "-1");
+        properties.setProperty("cluster.rpc.idempotency.cache.ttl.millis", "0");
+        properties.setProperty("cluster.rpc.idempotency.lease.millis", "0");
+        properties.setProperty("cluster.rpc.idempotency.poll.interval.millis", "-1");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.GAME).issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.rpc.default.timeout.millis"));
+        assertTrue(keys.contains("cluster.rpc.max.pending.requests"));
+        assertTrue(keys.contains("cluster.rpc.slow.call.threshold.millis"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.cache.capacity"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.cache.ttl.millis"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.lease.millis"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.poll.interval.millis"));
+    }
+
+    @Test
+    void jdbcRpcIdempotencyStoreCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.rpc.idempotency.store", "JDBC");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.url", "jdbc:vendor://shared/rpc");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.user", "rpc");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.password", "secret");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.table", "rpc_dedup");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(RpcIdempotencyStoreKind.JDBC, config.rpcIdempotencyStoreKind());
+        assertEquals("org.example.Driver", config.rpcIdempotencyJdbcDriver());
+        assertEquals("jdbc:vendor://shared/rpc", config.rpcIdempotencyJdbcUrl());
+        assertEquals("rpc", config.rpcIdempotencyJdbcUser());
+        assertEquals("secret", config.rpcIdempotencyJdbcPassword());
+        assertEquals("rpc_dedup", config.rpcIdempotencyJdbcTable());
+        assertFalse(config.rpcIdempotencyJdbcInitializeSchema());
+        assertTrue(config.validate(ServiceKind.GAME).valid());
+
+        properties.setProperty("cluster.rpc.idempotency.jdbc.table", "rpc;drop");
+        properties.setProperty("cluster.rpc.idempotency.jdbc.initialize.schema", "maybe");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME)
+                .issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.rpc.idempotency.jdbc.table"));
+        assertTrue(keys.contains("cluster.rpc.idempotency.jdbc.initialize.schema"));
+    }
+
+    @Test
+    void jdbcGameConfigCenterStoreCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.game.config.store", "JDBC");
+        properties.setProperty("cluster.game.config.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.game.config.jdbc.url", "jdbc:vendor://center/config");
+        properties.setProperty("cluster.game.config.jdbc.user", "config");
+        properties.setProperty("cluster.game.config.jdbc.password", "secret");
+        properties.setProperty("cluster.game.config.jdbc.table", "game_config_state");
+        properties.setProperty("cluster.game.config.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(GameConfigCenterStoreKind.JDBC, config.gameConfigCenterStoreKind());
+        assertEquals("org.example.Driver", config.gameConfigCenterJdbcDriver());
+        assertEquals("jdbc:vendor://center/config", config.gameConfigCenterJdbcUrl());
+        assertEquals("config", config.gameConfigCenterJdbcUser());
+        assertEquals("secret", config.gameConfigCenterJdbcPassword());
+        assertEquals("game_config_state", config.gameConfigCenterJdbcTable());
+        assertFalse(config.gameConfigCenterJdbcInitializeSchema());
+        assertTrue(config.validate(ServiceKind.CENTER).issues().stream().noneMatch(issue ->
+                issue.key().startsWith("cluster.game.config")));
+
+        properties.setProperty("cluster.game.config.jdbc.table", "config;drop");
+        properties.setProperty("cluster.game.config.jdbc.initialize.schema", "maybe");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CENTER)
+                .issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.game.config.jdbc.table"));
+        assertTrue(keys.contains("cluster.game.config.jdbc.initialize.schema"));
+    }
+
+    @Test
+    void jdbcAgentDirectoryCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.agent.directory.store", "JDBC");
+        properties.setProperty("cluster.agent.directory.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.agent.directory.jdbc.url", "jdbc:vendor://center/agents");
+        properties.setProperty("cluster.agent.directory.jdbc.user", "agent");
+        properties.setProperty("cluster.agent.directory.jdbc.password", "secret");
+        properties.setProperty("cluster.agent.directory.jdbc.table", "agent_directory_state");
+        properties.setProperty("cluster.agent.directory.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(AgentDirectoryStoreKind.JDBC, config.agentDirectoryStoreKind());
+        assertEquals("org.example.Driver", config.agentDirectoryJdbcDriver());
+        assertEquals("jdbc:vendor://center/agents", config.agentDirectoryJdbcUrl());
+        assertEquals("agent", config.agentDirectoryJdbcUser());
+        assertEquals("secret", config.agentDirectoryJdbcPassword());
+        assertEquals("agent_directory_state", config.agentDirectoryJdbcTable());
+        assertFalse(config.agentDirectoryJdbcInitializeSchema());
+        assertTrue(config.validate(ServiceKind.CENTER).issues().stream().noneMatch(issue ->
+                issue.key().startsWith("cluster.agent.directory")));
+
+        properties.setProperty("cluster.agent.directory.jdbc.table", "agents;drop");
+        properties.setProperty("cluster.agent.directory.jdbc.initialize.schema", "maybe");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CENTER)
+                .issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.agent.directory.jdbc.table"));
+        assertTrue(keys.contains("cluster.agent.directory.jdbc.initialize.schema"));
+    }
+
+    @Test
+    void agentLeasePolicyCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.agent.lease.enabled", "true");
+        properties.setProperty("cluster.agent.lease.ttl.millis", "30000");
+        properties.setProperty("cluster.agent.lease.renew.interval.millis", "8000");
+
+        com.commonbattle.actor.agent.AgentLeaseConfig policy = ClusterNodeConfig.fromProperties(properties)
+                .agentLeaseConfig();
+
+        assertTrue(policy.enabled());
+        assertEquals(java.time.Duration.ofSeconds(30), policy.leaseTtl());
+        assertEquals(java.time.Duration.ofSeconds(8), policy.renewInterval());
+
+        properties.setProperty("cluster.agent.lease.enabled", "maybe");
+        properties.setProperty("cluster.agent.lease.renew.interval.millis", "30000");
+        List<String> keys = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME)
+                .issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.agent.lease.enabled"));
+        assertTrue(keys.contains("cluster.agent.lease.renew.interval.millis"));
     }
 
     @Test
@@ -173,6 +496,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.health.max.scene.shard.hotspot.players", "500");
         properties.setProperty("cluster.health.max.player.business.pending.responses", "900");
         properties.setProperty("cluster.health.max.player.business.pending.age.millis", "7000");
+        properties.setProperty("cluster.health.max.async.business.pending.commands", "80");
+        properties.setProperty("cluster.health.max.async.business.pending.operation.shop.buy", "3");
+        properties.setProperty("cluster.health.max.async.business.pending.operation.activity.claim", "5");
 
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
 
@@ -184,6 +510,9 @@ class ClusterNodeConfigTest {
         assertEquals(500, config.runtimeHealthPolicy().maxSceneShardHotspotPlayers());
         assertEquals(900, config.runtimeHealthPolicy().maxPlayerBusinessPendingResponses());
         assertEquals(7000, config.runtimeHealthPolicy().maxPlayerBusinessPendingResponseAgeMillis());
+        assertEquals(80, config.runtimeHealthPolicy().maxAsyncBusinessPendingCommands());
+        assertEquals(3, config.runtimeHealthPolicy().maxAsyncBusinessPendingCommandsByOperation().get("shop.buy"));
+        assertEquals(5, config.runtimeHealthPolicy().maxAsyncBusinessPendingCommandsByOperation().get("activity.claim"));
     }
 
     @Test
@@ -296,6 +625,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "15000");
         properties.setProperty("cluster.player.auto.save.interval.millis", "45000");
         properties.setProperty("cluster.player.business.response.timeout.millis", "3500");
+        properties.setProperty("cluster.player.async.command.max.pending.total", "8");
+        properties.setProperty("cluster.player.async.command.max.pending.operation.shop.buy", "1");
+        properties.setProperty("cluster.player.async.command.max.pending.operation.activity.claim", "2");
         properties.setProperty("cluster.player.growth.stamina.recovery.enabled", "true");
         properties.setProperty("cluster.player.growth.stamina.recovery.initial.delay.millis", "3000");
         properties.setProperty("cluster.player.growth.stamina.recovery.interval.millis", "15000");
@@ -322,10 +654,52 @@ class ClusterNodeConfigTest {
         assertEquals(15_000, config.playerAutoSaveInitialDelay().toMillis());
         assertEquals(45_000, config.playerAutoSaveInterval().toMillis());
         assertEquals(3_500, config.playerBusinessResponseTimeout().toMillis());
+        assertEquals(8, config.asyncBusinessCommandPolicy().maxTotalPendingCommands());
+        assertEquals(1, config.asyncBusinessCommandPolicy().maxPendingFor("shop.buy"));
+        assertEquals(2, config.asyncBusinessCommandPolicy().maxPendingFor("activity.claim"));
         assertTrue(config.playerGrowthStaminaRecoveryEnabled());
         assertEquals(3_000, config.playerGrowthStaminaRecoveryInitialDelay().toMillis());
         assertEquals(15_000, config.playerGrowthStaminaRecoveryInterval().toMillis());
         assertEquals(Instant.parse("2026-08-01T00:00:00Z"), config.gameServerOpenTime());
+    }
+
+    @Test
+    void jdbcPlayerStateStoreCanBeConfiguredAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.player.state.store", "JDBC");
+        properties.setProperty("cluster.player.state.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.player.state.jdbc.url", "jdbc:example:players");
+        properties.setProperty("cluster.player.state.jdbc.user", "game");
+        properties.setProperty("cluster.player.state.jdbc.password", "secret");
+        properties.setProperty("cluster.player.state.jdbc.table", "player_state_r1");
+        properties.setProperty("cluster.player.state.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(PlayerStateStoreKind.JDBC, config.playerStateStoreKind());
+        assertEquals("org.example.Driver", config.playerStateJdbcDriver());
+        assertEquals("jdbc:example:players", config.playerStateJdbcUrl());
+        assertEquals("game", config.playerStateJdbcUser());
+        assertEquals("secret", config.playerStateJdbcPassword());
+        assertEquals("player_state_r1", config.playerStateJdbcTable());
+        assertFalse(config.playerStateJdbcInitializeSchema());
+        assertTrue(config.validate(ServiceKind.GAME).valid());
+    }
+
+    @Test
+    void jdbcPlayerStateStoreRequiresUrlAndSafeTableName() {
+        Properties properties = base();
+        properties.setProperty("cluster.player.state.store", "JDBC");
+        properties.setProperty("cluster.player.state.jdbc.table", "player_state;drop");
+
+        List<String> keys = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.GAME)
+                .issues().stream()
+                .map(ClusterConfigIssue::key)
+                .toList();
+
+        assertTrue(keys.contains("cluster.player.state.jdbc.url"));
+        assertTrue(keys.contains("cluster.player.state.jdbc.table"));
     }
 
     @Test
@@ -356,6 +730,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.player.auto.save.enabled", "maybe");
         properties.setProperty("cluster.player.auto.save.initial.delay.millis", "-1");
         properties.setProperty("cluster.player.auto.save.interval.millis", "0");
+        properties.setProperty("cluster.player.async.command.max.pending.total", "0");
+        properties.setProperty("cluster.player.async.command.max.pending.operation.shop.buy", "-1");
+        properties.setProperty("cluster.player.async.command.max.pending.operation.", "1");
         properties.setProperty("cluster.player.growth.stamina.recovery.enabled", "maybe");
         properties.setProperty("cluster.player.growth.stamina.recovery.initial.delay.millis", "-1");
         properties.setProperty("cluster.player.growth.stamina.recovery.interval.millis", "0");
@@ -404,6 +781,9 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.player.auto.save.enabled"));
         assertTrue(keys.contains("cluster.player.auto.save.initial.delay.millis"));
         assertTrue(keys.contains("cluster.player.auto.save.interval.millis"));
+        assertTrue(keys.contains("cluster.player.async.command.max.pending.total"));
+        assertTrue(keys.contains("cluster.player.async.command.max.pending.operation.shop.buy"));
+        assertTrue(keys.contains("cluster.player.async.command.max.pending.operation."));
         assertTrue(keys.contains("cluster.player.growth.stamina.recovery.enabled"));
         assertTrue(keys.contains("cluster.player.growth.stamina.recovery.initial.delay.millis"));
         assertTrue(keys.contains("cluster.player.growth.stamina.recovery.interval.millis"));
@@ -425,6 +805,16 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void asyncBusinessCommandPolicyDefaultsToUnlimited() {
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(base());
+
+        assertEquals(AsyncBusinessCommandPolicy.UNLIMITED,
+                config.asyncBusinessCommandPolicy().maxTotalPendingCommands());
+        assertEquals(AsyncBusinessCommandPolicy.UNLIMITED,
+                config.asyncBusinessCommandPolicy().maxPendingFor("shop.buy"));
+    }
+
+    @Test
     void validationRejectsInvalidHealthPolicyConfig() {
         Properties properties = base();
         properties.setProperty("cluster.health.max.queued.tasks", "-1");
@@ -433,6 +823,9 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.health.max.scene.active.scenes", "-1");
         properties.setProperty("cluster.health.max.scene.active.players", "bad");
         properties.setProperty("cluster.health.max.scene.shard.hotspot.players", "-1");
+        properties.setProperty("cluster.health.max.async.business.pending.commands", "-1");
+        properties.setProperty("cluster.health.max.async.business.pending.operation.shop.buy", "-1");
+        properties.setProperty("cluster.health.max.async.business.pending.operation.", "1");
         properties.setProperty("cluster.drain.timeout.millis", "0");
         properties.setProperty("cluster.drain.poll.interval.millis", "-1");
         properties.setProperty("cluster.drain.propagation.delay.millis", "bad");
@@ -452,6 +845,9 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.health.max.scene.active.scenes"));
         assertTrue(keys.contains("cluster.health.max.scene.active.players"));
         assertTrue(keys.contains("cluster.health.max.scene.shard.hotspot.players"));
+        assertTrue(keys.contains("cluster.health.max.async.business.pending.commands"));
+        assertTrue(keys.contains("cluster.health.max.async.business.pending.operation.shop.buy"));
+        assertTrue(keys.contains("cluster.health.max.async.business.pending.operation."));
         assertTrue(keys.contains("cluster.drain.timeout.millis"));
         assertTrue(keys.contains("cluster.drain.poll.interval.millis"));
         assertTrue(keys.contains("cluster.drain.propagation.delay.millis"));
@@ -820,6 +1216,30 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void jdbcShopStockCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.shop.stock.store", "JDBC");
+        properties.setProperty("cluster.shop.stock.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.shop.stock.jdbc.url", "jdbc:vendor://center/shop");
+        properties.setProperty("cluster.shop.stock.jdbc.user", "center");
+        properties.setProperty("cluster.shop.stock.jdbc.password", "secret");
+        properties.setProperty("cluster.shop.stock.jdbc.table", "center_shop_stock");
+        properties.setProperty("cluster.shop.stock.jdbc.reservation.table", "center_shop_reservation");
+        properties.setProperty("cluster.shop.stock.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(ShopStockStoreKind.JDBC, config.shopStockStoreKind());
+        assertEquals("org.example.Driver", config.shopStockJdbcDriver());
+        assertEquals("jdbc:vendor://center/shop", config.shopStockJdbcUrl());
+        assertEquals("center", config.shopStockJdbcUser());
+        assertEquals("secret", config.shopStockJdbcPassword());
+        assertEquals("center_shop_stock", config.shopStockJdbcTable());
+        assertEquals("center_shop_reservation", config.shopStockReservationJdbcTable());
+        assertFalse(config.shopStockJdbcInitializeSchema());
+    }
+
+    @Test
     void jdbcMigrationTaskStoreCanBeConfigured() {
         Properties properties = base();
         properties.setProperty("cluster.migration.task.store", "JDBC");
@@ -854,6 +1274,10 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.event.outbox.jdbc.initialize.schema", "false");
         properties.setProperty("cluster.event.outbox.replay.enabled", "false");
         properties.setProperty("cluster.event.outbox.replay.interval.millis", "7000");
+        properties.setProperty("cluster.event.outbox.retry.max.attempts", "8");
+        properties.setProperty("cluster.event.outbox.retry.initial.backoff.millis", "250");
+        properties.setProperty("cluster.event.outbox.retry.max.backoff.millis", "12000");
+        properties.setProperty("cluster.event.outbox.replay.batch.size", "64");
 
         ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
 
@@ -867,6 +1291,43 @@ class ClusterNodeConfigTest {
         assertFalse(config.eventOutboxJdbcInitializeSchema());
         assertFalse(config.eventOutboxReplayEnabled());
         assertEquals(7_000, config.eventOutboxReplayInterval().toMillis());
+        assertEquals(8, config.eventOutboxRetryMaxAttempts());
+        assertEquals(250, config.eventOutboxRetryInitialBackoff().toMillis());
+        assertEquals(12_000, config.eventOutboxRetryMaxBackoff().toMillis());
+        assertEquals(64, config.eventOutboxReplayBatchSize());
+    }
+
+    @Test
+    void jdbcEventInboxCanBeConfigured() {
+        Properties properties = base();
+        properties.setProperty("cluster.event.inbox.store", "JDBC");
+        properties.setProperty("cluster.event.inbox.jdbc.driver", "");
+        properties.setProperty("cluster.event.inbox.jdbc.url", "jdbc:vendor://127.0.0.1/scene");
+        properties.setProperty("cluster.event.inbox.jdbc.user", "scene");
+        properties.setProperty("cluster.event.inbox.jdbc.password", "secret");
+        properties.setProperty("cluster.event.inbox.jdbc.table", "scene_event_inbox");
+        properties.setProperty("cluster.event.inbox.jdbc.initialize.schema", "false");
+        properties.setProperty("cluster.event.inbox.replay.enabled", "true");
+        properties.setProperty("cluster.event.inbox.replay.interval.millis", "750");
+        properties.setProperty("cluster.event.inbox.retry.max.attempts", "6");
+        properties.setProperty("cluster.event.inbox.retry.initial.backoff.millis", "50");
+        properties.setProperty("cluster.event.inbox.retry.max.backoff.millis", "5000");
+        properties.setProperty("cluster.event.inbox.replay.batch.size", "128");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(EventInboxStoreKind.JDBC, config.eventInboxStoreKind());
+        assertEquals("jdbc:vendor://127.0.0.1/scene", config.eventInboxJdbcUrl());
+        assertEquals("scene", config.eventInboxJdbcUser());
+        assertEquals("secret", config.eventInboxJdbcPassword());
+        assertEquals("scene_event_inbox", config.eventInboxJdbcTable());
+        assertFalse(config.eventInboxJdbcInitializeSchema());
+        assertTrue(config.eventInboxReplayEnabled());
+        assertEquals(750, config.eventInboxReplayInterval().toMillis());
+        assertEquals(6, config.eventInboxRetryMaxAttempts());
+        assertEquals(50, config.eventInboxRetryInitialBackoff().toMillis());
+        assertEquals(5_000, config.eventInboxRetryMaxBackoff().toMillis());
+        assertEquals(128, config.eventInboxReplayBatchSize());
     }
 
     @Test
@@ -940,6 +1401,25 @@ class ClusterNodeConfigTest {
     }
 
     @Test
+    void validationRejectsInvalidJdbcShopStockConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.shop.stock.store", "JDBC");
+        properties.setProperty("cluster.shop.stock.jdbc.table", "stock;drop");
+        properties.setProperty("cluster.shop.stock.jdbc.reservation.table", "reservation;drop");
+        properties.setProperty("cluster.shop.stock.jdbc.initialize.schema", "maybe");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties)
+                .validate(ServiceKind.CENTER);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.shop.stock.jdbc.url"));
+        assertTrue(keys.contains("cluster.shop.stock.jdbc.table"));
+        assertTrue(keys.contains("cluster.shop.stock.jdbc.reservation.table"));
+        assertTrue(keys.contains("cluster.shop.stock.jdbc.initialize.schema"));
+    }
+
+    @Test
     void validationRejectsInvalidJdbcMigrationTaskStoreConfig() {
         Properties properties = base();
         properties.setProperty("cluster.migration.task.store", "JDBC");
@@ -962,6 +1442,10 @@ class ClusterNodeConfigTest {
         properties.setProperty("cluster.event.outbox.jdbc.initialize.schema", "maybe");
         properties.setProperty("cluster.event.outbox.replay.enabled", "maybe");
         properties.setProperty("cluster.event.outbox.replay.interval.millis", "0");
+        properties.setProperty("cluster.event.outbox.retry.max.attempts", "0");
+        properties.setProperty("cluster.event.outbox.retry.initial.backoff.millis", "-1");
+        properties.setProperty("cluster.event.outbox.retry.max.backoff.millis", "-1");
+        properties.setProperty("cluster.event.outbox.replay.batch.size", "0");
 
         ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.GAME);
 
@@ -971,6 +1455,36 @@ class ClusterNodeConfigTest {
         assertTrue(keys.contains("cluster.event.outbox.jdbc.initialize.schema"));
         assertTrue(keys.contains("cluster.event.outbox.replay.enabled"));
         assertTrue(keys.contains("cluster.event.outbox.replay.interval.millis"));
+        assertTrue(keys.contains("cluster.event.outbox.retry.max.attempts"));
+        assertTrue(keys.contains("cluster.event.outbox.retry.initial.backoff.millis"));
+        assertTrue(keys.contains("cluster.event.outbox.retry.max.backoff.millis"));
+        assertTrue(keys.contains("cluster.event.outbox.replay.batch.size"));
+    }
+
+    @Test
+    void validationRejectsInvalidEventInboxConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.event.inbox.store", "BAD");
+        properties.setProperty("cluster.event.inbox.jdbc.initialize.schema", "maybe");
+        properties.setProperty("cluster.event.inbox.replay.enabled", "maybe");
+        properties.setProperty("cluster.event.inbox.replay.interval.millis", "0");
+        properties.setProperty("cluster.event.inbox.retry.max.attempts", "0");
+        properties.setProperty("cluster.event.inbox.retry.initial.backoff.millis", "-1");
+        properties.setProperty("cluster.event.inbox.retry.max.backoff.millis", "-1");
+        properties.setProperty("cluster.event.inbox.replay.batch.size", "0");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.SCENE);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.event.inbox.store"));
+        assertTrue(keys.contains("cluster.event.inbox.jdbc.initialize.schema"));
+        assertTrue(keys.contains("cluster.event.inbox.replay.enabled"));
+        assertTrue(keys.contains("cluster.event.inbox.replay.interval.millis"));
+        assertTrue(keys.contains("cluster.event.inbox.retry.max.attempts"));
+        assertTrue(keys.contains("cluster.event.inbox.retry.initial.backoff.millis"));
+        assertTrue(keys.contains("cluster.event.inbox.retry.max.backoff.millis"));
+        assertTrue(keys.contains("cluster.event.inbox.replay.batch.size"));
     }
 
     @Test
@@ -1032,6 +1546,155 @@ class ClusterNodeConfigTest {
         List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
         assertTrue(keys.contains("cluster.event.history.default.limit"));
         assertTrue(keys.contains("cluster.event.history.topic.profile.changed.limit"));
+    }
+
+    @Test
+    void centerEventJournalJdbcConfigIsExposed() {
+        Properties properties = base();
+        properties.setProperty("cluster.event.journal.store", "JDBC");
+        properties.setProperty("cluster.event.journal.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.event.journal.jdbc.url", "jdbc:vendor://center/events");
+        properties.setProperty("cluster.event.journal.jdbc.user", "center");
+        properties.setProperty("cluster.event.journal.jdbc.password", "secret");
+        properties.setProperty("cluster.event.journal.jdbc.table", "event_journal");
+        properties.setProperty("cluster.event.journal.jdbc.sequence.table", "event_journal_seq");
+        properties.setProperty("cluster.event.journal.jdbc.cursor.table", "event_journal_cursor");
+        properties.setProperty("cluster.event.journal.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(CenterEventJournalStoreKind.JDBC, config.centerEventJournalStoreKind());
+        assertEquals("org.example.Driver", config.centerEventJournalJdbcDriver());
+        assertEquals("jdbc:vendor://center/events", config.centerEventJournalJdbcUrl());
+        assertEquals("center", config.centerEventJournalJdbcUser());
+        assertEquals("secret", config.centerEventJournalJdbcPassword());
+        assertEquals("event_journal", config.centerEventJournalJdbcTable());
+        assertEquals("event_journal_seq", config.centerEventJournalJdbcSequenceTable());
+        assertEquals("event_journal_cursor", config.centerEventJournalJdbcCursorTable());
+        assertFalse(config.centerEventJournalJdbcInitializeSchema());
+    }
+
+    @Test
+    void validationRejectsInvalidCenterEventJournalConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.event.journal.store", "JDBC");
+        properties.setProperty("cluster.event.journal.jdbc.table", "journal;drop");
+        properties.setProperty("cluster.event.journal.jdbc.sequence.table", "seq;drop");
+        properties.setProperty("cluster.event.journal.jdbc.cursor.table", "cursor;drop");
+        properties.setProperty("cluster.event.journal.jdbc.initialize.schema", "maybe");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CENTER);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.event.journal.jdbc.url"));
+        assertTrue(keys.contains("cluster.event.journal.jdbc.table"));
+        assertTrue(keys.contains("cluster.event.journal.jdbc.sequence.table"));
+        assertTrue(keys.contains("cluster.event.journal.jdbc.cursor.table"));
+        assertTrue(keys.contains("cluster.event.journal.jdbc.initialize.schema"));
+    }
+
+    @Test
+    void profileProjectionJdbcConfigIsExposedAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.profile.projection.store", "JDBC");
+        properties.setProperty("cluster.profile.projection.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.profile.projection.jdbc.url", "jdbc:vendor://profile/cache");
+        properties.setProperty("cluster.profile.projection.jdbc.user", "profile");
+        properties.setProperty("cluster.profile.projection.jdbc.password", "secret");
+        properties.setProperty("cluster.profile.projection.jdbc.table", "profile_cache");
+        properties.setProperty("cluster.profile.projection.jdbc.initialize.schema", "false");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(ProfileProjectionStoreKind.JDBC, config.profileProjectionStoreKind());
+        assertEquals("org.example.Driver", config.profileProjectionJdbcDriver());
+        assertEquals("jdbc:vendor://profile/cache", config.profileProjectionJdbcUrl());
+        assertEquals("profile", config.profileProjectionJdbcUser());
+        assertEquals("secret", config.profileProjectionJdbcPassword());
+        assertEquals("profile_cache", config.profileProjectionJdbcTable());
+        assertFalse(config.profileProjectionJdbcInitializeSchema());
+    }
+
+    @Test
+    void validationRejectsInvalidProfileProjectionConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.profile.projection.store", "JDBC");
+        properties.setProperty("cluster.profile.projection.jdbc.table", "profile;drop");
+        properties.setProperty("cluster.profile.projection.jdbc.initialize.schema", "maybe");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.SCENE);
+
+        assertFalse(validation.valid());
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+        assertTrue(keys.contains("cluster.profile.projection.jdbc.url"));
+        assertTrue(keys.contains("cluster.profile.projection.jdbc.table"));
+        assertTrue(keys.contains("cluster.profile.projection.jdbc.initialize.schema"));
+    }
+
+    @Test
+    void chatStateJdbcConfigIsExposedAndValidated() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CHAT");
+        properties.setProperty("cluster.chat.state.store", "JDBC");
+        properties.setProperty("cluster.chat.state.jdbc.driver", "org.example.Driver");
+        properties.setProperty("cluster.chat.state.jdbc.url", "jdbc:vendor://chat/state");
+        properties.setProperty("cluster.chat.state.jdbc.user", "chat");
+        properties.setProperty("cluster.chat.state.jdbc.password", "secret");
+        properties.setProperty("cluster.chat.state.jdbc.table", "chat_state");
+        properties.setProperty("cluster.chat.state.jdbc.initialize.schema", "false");
+        properties.setProperty("cluster.chat.state.io.workers", "3");
+        properties.setProperty("cluster.chat.state.io.queue.capacity", "2048");
+        properties.setProperty("cluster.chat.state.pending.per.agent", "64");
+
+        ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+
+        assertEquals(ChatStateStoreKind.JDBC, config.chatStateStoreKind());
+        assertEquals("org.example.Driver", config.chatStateJdbcDriver());
+        assertEquals("jdbc:vendor://chat/state", config.chatStateJdbcUrl());
+        assertEquals("chat", config.chatStateJdbcUser());
+        assertEquals("secret", config.chatStateJdbcPassword());
+        assertEquals("chat_state", config.chatStateJdbcTable());
+        assertFalse(config.chatStateJdbcInitializeSchema());
+        assertEquals(3, config.chatStateIoWorkers());
+        assertEquals(2048, config.chatStateIoQueueCapacity());
+        assertEquals(64, config.chatStatePendingPerAgent());
+        assertDoesNotThrow(() -> config.validate(ServiceKind.CHAT).throwIfInvalid());
+    }
+
+    @Test
+    void productionChatRejectsVolatileChatState() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CHAT");
+        properties.setProperty("cluster.environment", "PRODUCTION");
+        properties.setProperty("cluster.chat.state.store", "MEMORY");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CHAT);
+
+        assertTrue(validation.issues().stream().anyMatch(issue ->
+                "cluster.chat.state.store".equals(issue.key())));
+    }
+
+    @Test
+    void validationRejectsInvalidChatStateConfig() {
+        Properties properties = base();
+        properties.setProperty("cluster.kind", "CHAT");
+        properties.setProperty("cluster.chat.state.store", "JDBC");
+        properties.setProperty("cluster.chat.state.jdbc.table", "chat;drop");
+        properties.setProperty("cluster.chat.state.jdbc.initialize.schema", "maybe");
+        properties.setProperty("cluster.chat.state.io.workers", "0");
+        properties.setProperty("cluster.chat.state.io.queue.capacity", "-1");
+        properties.setProperty("cluster.chat.state.pending.per.agent", "0");
+
+        ClusterConfigValidation validation = ClusterNodeConfig.fromProperties(properties).validate(ServiceKind.CHAT);
+        List<String> keys = validation.issues().stream().map(ClusterConfigIssue::key).toList();
+
+        assertTrue(keys.contains("cluster.chat.state.jdbc.url"));
+        assertTrue(keys.contains("cluster.chat.state.jdbc.table"));
+        assertTrue(keys.contains("cluster.chat.state.jdbc.initialize.schema"));
+        assertTrue(keys.contains("cluster.chat.state.io.workers"));
+        assertTrue(keys.contains("cluster.chat.state.io.queue.capacity"));
+        assertTrue(keys.contains("cluster.chat.state.pending.per.agent"));
     }
 
     private static Properties base() {

@@ -24,27 +24,31 @@ public final class LargeSceneShardAgentMigrationSourceHook implements AgentMigra
 
     @Override
     public void sourceMoved(AgentMigrationTask task) {
-        if (!AgentIdentity.SCENE.equals(task.identity().type())) {
+        if (!supports(task.identity())) {
             return;
         }
-        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(task.identity().key());
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(task.identity());
         scenes.removeMigratedShard(key.shardIndex());
     }
 
     @Override
     public void rollbackRestored(AgentMigrationTask task) {
-        if (!AgentIdentity.SCENE.equals(task.identity().type())) {
+        if (!supports(task.identity())) {
             return;
         }
         if (!LargeSceneShardAgentMigrationStatePacker.STATE_TYPE.equals(task.snapshot().stateType())) {
             throw new IllegalArgumentException("unsupported large scene shard migration state type: "
                     + task.snapshot().stateType());
         }
-        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(task.identity().key());
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(task.identity());
         LargeSceneShardAgentSnapshot snapshot = serializer.deserialize(task.snapshot().stateBytes());
         if (!snapshot.sceneId().equals(key.sceneId()) || snapshot.shardIndex() != key.shardIndex()) {
             throw new IllegalArgumentException("large scene shard migration snapshot identity mismatch");
         }
         scenes.restoreMigratedShard(snapshot, task.source().actorRef());
+    }
+
+    private static boolean supports(AgentIdentity identity) {
+        return AgentIdentity.SCENE_SHARD.equals(identity.type()) || AgentIdentity.SCENE.equals(identity.type());
     }
 }

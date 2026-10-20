@@ -7,20 +7,23 @@ package com.commonbattle.observability;
 public record PlayerAgentHealthStats(
         int managerCount,
         int loadedAgents,
+        long fencingConflicts,
         int autoSaveSchedulers,
         long autoSaveRuns,
         long autoSaveSubmitted,
         long autoSaveCompleted,
         long autoSaveFailedRuns,
         long autoSaveFailedSaves,
+        long autoSavePendingAsyncBlockedSaves,
         int drainServices,
         int drainingServices,
         long drainSubmitted,
         long drainCompleted,
-        long drainFailedSaves
+        long drainFailedSaves,
+        long drainPendingAsyncBlockedSaves
 ) {
     public static PlayerAgentHealthStats empty() {
-        return new PlayerAgentHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new PlayerAgentHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public long drainPending() {

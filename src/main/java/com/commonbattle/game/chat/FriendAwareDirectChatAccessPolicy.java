@@ -12,7 +12,7 @@ import java.util.function.Consumer;
  * 基于本地好友快照的私聊访问策略。
  * 快照缺失或已标记 stale 时拒绝私聊，避免用不可信关系放行业务消息。
  */
-public final class FriendAwareDirectChatAccessPolicy implements EventAwareDirectChatAccessPolicy {
+public final class FriendAwareDirectChatAccessPolicy implements EventAwareDirectChatAccessPolicy, AsyncDirectChatAccessPolicy {
     private final SceneFriendAwarenessAgent friends;
 
     public FriendAwareDirectChatAccessPolicy(SceneFriendAwarenessAgent friends) {
@@ -22,6 +22,14 @@ public final class FriendAwareDirectChatAccessPolicy implements EventAwareDirect
     @Override
     public ChatSendStatus inspect(DirectChatSendRequest request) {
         return statusOf(friends.friendsOf(request.senderId()), request.receiverId());
+    }
+
+    @Override
+    public void inspect(DirectChatSendRequest request, Consumer<ChatSendStatus> callback) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        friends.readFriendsOf(request.senderId(), view ->
+                callback.accept(statusOf(view, request.receiverId())));
     }
 
     @Override

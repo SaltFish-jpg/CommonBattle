@@ -54,6 +54,35 @@ class SerializedVersionedEventOutboxTest {
         assertEquals(1, published.size());
     }
 
+    @Test
+    void retryScheduleAndDeadLetterSurviveRestartAndCanBeRedriven() {
+        InMemoryVersionedEventOutboxBytesStore store = new InMemoryVersionedEventOutboxBytesStore();
+        SerializedVersionedEventOutbox first = outbox(store);
+        PendingVersionedEvent pending = first.append(event(1));
+        Instant failedAt = CLOCK.instant().plusSeconds(1);
+
+        OutboxFailureResult result = first.markAttemptFailed(
+                pending.id(),
+                new IllegalStateException("poison payload"),
+                failedAt,
+                failedAt.plusSeconds(10),
+                1
+        );
+        SerializedVersionedEventOutbox restored = outbox(store);
+
+        assertEquals(OutboxFailureResult.DEAD_LETTERED, result);
+        assertTrue(restored.pending().isEmpty());
+        DeadLetteredVersionedEvent deadLetter = restored.deadLetters().getFirst();
+        assertEquals(failedAt, deadLetter.deadLetteredAt());
+        assertEquals("poison payload", deadLetter.lastFailure());
+
+        assertTrue(restored.redriveDeadLetter(deadLetter.id(), failedAt.plusSeconds(20)));
+        SerializedVersionedEventOutbox redriven = outbox(store);
+        assertTrue(redriven.deadLetters().isEmpty());
+        assertEquals(0, redriven.pending().getFirst().attempts());
+        assertEquals(failedAt.plusSeconds(20), redriven.pending().getFirst().nextAttemptAt());
+    }
+
     private static SerializedVersionedEventOutbox outbox(InMemoryVersionedEventOutboxBytesStore store) {
         PayloadCodecRegistry registry = ClusterEventPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
         return new SerializedVersionedEventOutbox(store, registry, CLOCK);

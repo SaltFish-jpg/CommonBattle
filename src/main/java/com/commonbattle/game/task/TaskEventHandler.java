@@ -18,6 +18,9 @@ public final class TaskEventHandler implements PlayerEventHandler {
 
     @Override
     public void handle(PlayerGameExecution execution, PlayerDomainEvent event) {
-        taskService.onEvent(execution.profile().tasks(), event);
+        int progressed = taskService.onEvent(execution.profile().tasks(), event);
+        if (progressed > 0) {
+            execution.pushTaskSnapshot();
+        }
     }
 }

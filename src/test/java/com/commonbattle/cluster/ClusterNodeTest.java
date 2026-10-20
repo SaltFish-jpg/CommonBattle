@@ -53,6 +53,28 @@ class ClusterNodeTest {
         }
     }
 
+    @Test
+    void nodeSubscribesSuppliedRegistryWhenDirectoryUsesSeparateLocalMirror() {
+        InMemoryServiceRegistry remote = new InMemoryServiceRegistry();
+        InMemoryServiceRegistry localMirror = new InMemoryServiceRegistry();
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9100);
+        remote.register(scene);
+        ClusterDirectory directory = new ClusterDirectory(localMirror);
+        ClusterNode game = new ClusterNode(
+                remote,
+                descriptor(ServiceKind.GAME, "game-1", 9001),
+                directory
+        );
+
+        game.start(List.of(ServiceKind.SCENE));
+
+        assertEquals(List.of(scene), directory.list(ServiceKind.SCENE));
+        assertEquals(1, remote.list(ServiceKind.GAME).size());
+        assertEquals(List.of(), localMirror.list(ServiceKind.SCENE));
+
+        game.close();
+    }
+
     private static ServiceDescriptor descriptor(ServiceKind kind, String node, int port) {
         return new ServiceDescriptor(
                 ServiceId.of(kind, "r1", node),

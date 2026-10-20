@@ -115,6 +115,61 @@ class ChatChannelAgentTest {
     }
 
     @Test
+    void asyncProfilePolicyReadsOutsideChannelMailboxAndReentersForAppend() {
+        RecordingExecutor profileReads = new RecordingExecutor();
+        Fixture fixture = Fixture.createAsync(profileReads);
+        AtomicReference<ChatSendResult> response = new AtomicReference<>();
+
+        fixture.manager.join(new ChatJoinRequest("world", 10001L, 0), ignored -> {
+        });
+        fixture.executor.runAll();
+
+        fixture.manager.send(new ChatSendRequest("world", 10001L, "hello", 3), response::set);
+
+        assertEquals(null, response.get());
+        assertEquals(1, profileReads.queued());
+        assertEquals(0, fixture.executor.queued());
+
+        profileReads.runNext();
+
+        assertEquals(null, response.get());
+        assertEquals(1, fixture.executor.queued());
+
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.SENT, response.get().status());
+        assertEquals("Hero", response.get().delivery().orElseThrow().senderName());
+        assertEquals(List.of(response.get().delivery().orElseThrow()),
+                fixture.manager.channel("world").snapshotNow().history());
+        assertEquals(1, fixture.manager.stats().asyncMessageChecks());
+        assertEquals(1, fixture.manager.stats().asyncMessageSentDecisions());
+        assertEquals(0, fixture.manager.stats().asyncMessageRejectedDecisions());
+    }
+
+    @Test
+    void asyncProfilePolicyRejectsWhenProfileExecutorIsBackpressured() {
+        RejectingExecutor profileReads = new RejectingExecutor();
+        Fixture fixture = Fixture.createAsync(profileReads);
+        AtomicReference<ChatSendResult> response = new AtomicReference<>();
+
+        fixture.manager.join(new ChatJoinRequest("world", 10001L, 0), ignored -> {
+        });
+        fixture.executor.runAll();
+
+        fixture.manager.send(new ChatSendRequest("world", 10001L, "hello", 3), response::set);
+
+        assertEquals(1, fixture.executor.queued());
+        fixture.executor.runAll();
+
+        assertEquals(ChatSendStatus.BACKPRESSURED, response.get().status());
+        assertEquals(List.of(), fixture.manager.channel("world").snapshotNow().history());
+        assertEquals(1, fixture.manager.stats().asyncMessageChecks());
+        assertEquals(0, fixture.manager.stats().asyncMessageSentDecisions());
+        assertEquals(1, fixture.manager.stats().asyncMessageRejectedDecisions());
+        assertEquals(1, fixture.manager.stats().asyncMessageBackpressuredDecisions());
+    }
+
+    @Test
     void mailboxPressureRejectsBeforeChannelActorTaskIsQueued() {
         Fixture fixture = Fixture.create(new ActorMailboxPressurePolicy(true, 1, 0, Duration.ofMillis(50)));
         fixture.actors.send(fixture.actors.actor(ChatActorIds.channelActorId("world")), ignored -> {
@@ -158,6 +213,22 @@ class ChatChannelAgentTest {
         }
 
         private static Fixture create(ActorMailboxPressurePolicy pressurePolicy) {
+            return create(pressurePolicy, null, ignored -> Optional.empty());
+        }
+
+        private static Fixture createAsync(Executor profileReads) {
+            return create(
+                    ActorMailboxPressurePolicy.disabled(),
+                    profileReads,
+                    playerId -> Optional.of(snapshot(playerId, "Hero", 3))
+            );
+        }
+
+        private static Fixture create(
+                ActorMailboxPressurePolicy pressurePolicy,
+                Executor profileReads,
+                com.commonbattle.game.profile.ProfileSnapshotReader profileReader
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
@@ -168,7 +239,7 @@ class ChatChannelAgentTest {
             ProfileRuntime profiles = new ProfileRuntime(
                     new LocalProfileCache(),
                     profileInterests,
-                    ignored -> Optional.empty()
+                    profileReader
             );
             ScenePlayerInterestCoordinator interests = new ScenePlayerInterestCoordinator(
                     new SceneProfileAwarenessAgent(messages, actors.actor("chat-profile-awareness"), profiles),
@@ -194,16 +265,28 @@ class ChatChannelAgentTest {
                     profileInterests,
                     interests,
                     pressure,
-                    new ChatChannelManager(
-                            actors,
-                            messages,
-                            interests,
-                            new ProfileAwareChatMessagePolicy(profiles),
-                            ChatDeliverySink.noop(),
-                            CLOCK,
-                            ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
-                            pressure
-                    )
+                    profileReads == null
+                            ? new ChatChannelManager(
+                                    actors,
+                                    messages,
+                                    interests,
+                                    new ProfileAwareChatMessagePolicy(profiles),
+                                    ChatDeliverySink.noop(),
+                                    CLOCK,
+                                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                                    pressure
+                            )
+                            : new ChatChannelManager(
+                                    actors,
+                                    messages,
+                                    interests,
+                                    ChatChannelAccessPolicy.allowAll(),
+                                    new AsyncProfileAwareChatMessagePolicy(profiles, profileReads),
+                                    ChatDeliverySink.noop(),
+                                    CLOCK,
+                                    ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                                    pressure
+                            )
             );
         }
     }
@@ -251,8 +334,19 @@ class ChatChannelAgentTest {
             }
         }
 
+        private void runNext() {
+            commands.removeFirst().run();
+        }
+
         private int queued() {
             return commands.size();
+        }
+    }
+
+    private static final class RejectingExecutor implements Executor {
+        @Override
+        public void execute(Runnable command) {
+            throw new java.util.concurrent.RejectedExecutionException("profile reads backpressured");
         }
     }
 

@@ -1,5 +1,10 @@
 package com.commonbattle.game.shop;
 
+import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.ActorTask;
+import com.commonbattle.actor.ActorTaskCategory;
+
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.Executors;
@@ -15,6 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ShopStockReservationRetentionScheduler implements AutoCloseable {
     private final ShopStockReservationRetentionService retentionService;
     private final Duration interval;
+    private final ActorSystem actors;
+    private final ActorRef maintenanceActor;
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final AtomicBoolean started = new AtomicBoolean();
@@ -22,9 +29,12 @@ public final class ShopStockReservationRetentionScheduler implements AutoCloseab
 
     public ShopStockReservationRetentionScheduler(
             ShopStockReservationRetentionService retentionService,
-            Duration interval
+            Duration interval,
+            ActorSystem actors,
+            ActorRef maintenanceActor
     ) {
-        this(retentionService, interval, Executors.newSingleThreadScheduledExecutor(runnable -> {
+        this(retentionService, interval, actors, maintenanceActor,
+                Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "shop-stock-reservation-retention");
             thread.setDaemon(true);
             return thread;
@@ -34,19 +44,25 @@ public final class ShopStockReservationRetentionScheduler implements AutoCloseab
     public ShopStockReservationRetentionScheduler(
             ShopStockReservationRetentionService retentionService,
             Duration interval,
+            ActorSystem actors,
+            ActorRef maintenanceActor,
             ScheduledExecutorService scheduler
     ) {
-        this(retentionService, interval, scheduler, false);
+        this(retentionService, interval, actors, maintenanceActor, scheduler, false);
     }
 
     private ShopStockReservationRetentionScheduler(
             ShopStockReservationRetentionService retentionService,
             Duration interval,
+            ActorSystem actors,
+            ActorRef maintenanceActor,
             ScheduledExecutorService scheduler,
             boolean ownsScheduler
     ) {
         this.retentionService = Objects.requireNonNull(retentionService, "retentionService");
         this.interval = positive(interval);
+        this.actors = Objects.requireNonNull(actors, "actors");
+        this.maintenanceActor = Objects.requireNonNull(maintenanceActor, "maintenanceActor");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.ownsScheduler = ownsScheduler;
     }
@@ -55,12 +71,19 @@ public final class ShopStockReservationRetentionScheduler implements AutoCloseab
         if (!started.compareAndSet(false, true)) {
             return;
         }
-        task = scheduler.scheduleAtFixedRate(this::reapSafely, interval.toMillis(), interval.toMillis(),
+        task = scheduler.scheduleAtFixedRate(this::enqueueSafely, interval.toMillis(), interval.toMillis(),
                 TimeUnit.MILLISECONDS);
     }
 
-    public int reapOnce() {
-        return retentionService.reap();
+    public boolean enqueueOnce() {
+        boolean accepted = actors.trySend(maintenanceActor, ActorTask.categorized(
+                ActorTaskCategory.TIMER,
+                ignored -> runReapSafely()
+        ));
+        if (!accepted) {
+            retentionService.rejected();
+        }
+        return accepted;
     }
 
     @Override
@@ -75,11 +98,19 @@ public final class ShopStockReservationRetentionScheduler implements AutoCloseab
         }
     }
 
-    private void reapSafely() {
+    private void enqueueSafely() {
+        try {
+            enqueueOnce();
+        } catch (RuntimeException ignored) {
+            retentionService.rejected();
+        }
+    }
+
+    private void runReapSafely() {
         try {
             retentionService.reap();
         } catch (RuntimeException ignored) {
-            // 失败已进入 retentionService 统计，调度线程必须继续运行。
+            // 失败已进入 retentionService 统计，Actor worker 必须继续处理后续消息。
         }
     }
 

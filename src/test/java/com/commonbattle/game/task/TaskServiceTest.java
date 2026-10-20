@@ -19,7 +19,7 @@ class TaskServiceTest {
         PlayerTasks tasks = new PlayerTasks();
         PlayerBag bag = new PlayerBag();
 
-        fixture.service().onEvent(tasks, new BattleStageClearedEvent(
+        int progressed = fixture.service().onEvent(tasks, new BattleStageClearedEvent(
                 10001L,
                 "forest-1",
                 3,
@@ -32,6 +32,7 @@ class TaskServiceTest {
         ));
         TaskClaimResult claim = fixture.service().claim(tasks, bag, "task-clear-forest");
 
+        assertEquals(1, progressed);
         assertEquals(1, claim.progress());
         assertEquals(3, bag.count("gem"));
     }
@@ -41,7 +42,7 @@ class TaskServiceTest {
         Fixture fixture = Fixture.create();
         PlayerTasks tasks = new PlayerTasks();
 
-        fixture.service().onEvent(tasks, new BattleStageClearedEvent(
+        int progressed = fixture.service().onEvent(tasks, new BattleStageClearedEvent(
                 10001L,
                 "hard-1",
                 3,
@@ -53,6 +54,7 @@ class TaskServiceTest {
                 1
         ));
 
+        assertEquals(0, progressed);
         assertEquals(0, tasks.progress("task-clear-forest").value());
     }
 

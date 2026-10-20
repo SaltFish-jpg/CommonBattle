@@ -29,15 +29,17 @@ class PlayerBusinessCommandCatalogTest {
                 PlayerBusinessOperations.ACHIEVEMENT_CLAIM
         ), PlayerBusinessCommandCatalog.operations());
 
+        assertEquals(2, PlayerBusinessCommandCatalog.descriptorsByOperation(PlayerBusinessOperations.ACTIVITY_CLAIM).size());
         assertEquals(2, PlayerBusinessCommandCatalog.descriptorsByOperation(PlayerBusinessOperations.SHOP_BUY).size());
         assertTrue(PlayerBusinessCommandCatalog.descriptors().stream()
                 .anyMatch(descriptor -> descriptor.domain().equals("battle")));
 
         PlayerBusinessCommandCatalogStats stats = PlayerBusinessCommandCatalog.view().commandCatalogStats();
-        assertEquals(10, stats.descriptorCount());
+        assertEquals(11, stats.descriptorCount());
         assertEquals(9, stats.operationCount());
-        assertEquals(10, stats.commandTypeCount());
+        assertEquals(11, stats.commandTypeCount());
         assertEquals(2, stats.descriptorsByDomain().get("battle"));
+        assertEquals(3, stats.descriptorsByDomain().get("activity"));
         assertEquals(2, stats.descriptorsByDomain().get("shop"));
     }
 
@@ -92,6 +94,7 @@ class PlayerBusinessCommandCatalogTest {
                 Map.entry(ConsumeBagItemCommand.class, new ConsumeBagItemCommand("stamina_potion", 2)),
                 Map.entry(ActivityProgressCommand.class, new ActivityProgressCommand("kill-3", 3)),
                 Map.entry(ClaimActivityCommand.class, new ClaimActivityCommand("daily-login")),
+                Map.entry(ClaimActivityAsyncCommand.class, new ClaimActivityAsyncCommand("daily-login")),
                 Map.entry(UseExpItemsCommand.class, new UseExpItemsCommand(2)),
                 Map.entry(BuyShopItemCommand.class, new BuyShopItemCommand("order-10001-1", "growth_pack", 1)),
                 Map.entry(BuyShopItemAsyncCommand.class,

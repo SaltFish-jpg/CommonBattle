@@ -31,6 +31,28 @@ class ClusterTopologyTest {
         assertEquals(scene, nextHop);
     }
 
+    @Test
+    void exposesAllSameRegionProxiesInStableLoadOrder() {
+        ClusterTopology topology = ClusterTopology.defaultCrossServer();
+        ServiceId game = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9100);
+        ServiceDescriptor otherRegion = new ServiceDescriptor(
+                ServiceId.of(ServiceKind.PROXY, "r2", "proxy-other"),
+                new ServiceEndpoint("127.0.0.1", 9200), Set.of(), Map.of()
+        );
+        ServiceDescriptor busy = ServiceMetadata.withLoad(
+                descriptor(ServiceKind.PROXY, "proxy-busy", 9201), 20, 100
+        );
+        ServiceDescriptor idle = ServiceMetadata.withLoad(
+                descriptor(ServiceKind.PROXY, "proxy-idle", 9202), 5, 100
+        );
+
+        assertEquals(
+                java.util.List.of(idle, busy),
+                topology.nextHops(game, scene, java.util.List.of(otherRegion, busy, idle))
+        );
+    }
+
     private static ServiceDescriptor descriptor(ServiceKind kind, String node, int port) {
         return new ServiceDescriptor(
                 ServiceId.of(kind, "r1", node),

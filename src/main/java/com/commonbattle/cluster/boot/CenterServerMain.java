@@ -6,9 +6,9 @@ import com.commonbattle.cluster.InMemoryServiceRegistry;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.actor.ActorSystem;
-import com.commonbattle.actor.agent.InMemoryAgentDirectory;
 import com.commonbattle.actor.agent.remote.CenterAgentDirectoryEndpoint;
 import com.commonbattle.cluster.event.ClusterEventCenter;
+import com.commonbattle.cluster.event.ClusterEventJournal;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionLeaseReaper;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
@@ -19,15 +19,10 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.config.GameConfigCenterEndpoint;
 import com.commonbattle.game.config.GameConfigCenterPublisher;
-import com.commonbattle.game.config.GameConfigValidator;
-import com.commonbattle.game.config.InMemoryGameConfigRegistry;
-import com.commonbattle.game.shop.InMemoryShopStockRepository;
-import com.commonbattle.game.shop.SerializedShopStockRepository;
 import com.commonbattle.game.shop.ShopStockReservationRepository;
 import com.commonbattle.game.shop.ShopStockReservationRetentionScheduler;
 import com.commonbattle.game.shop.ShopStockReservationRetentionService;
 import com.commonbattle.game.shop.ShopStockEndpoint;
-import com.commonbattle.persistence.InMemoryAtomicBytesStore;
 
 import java.time.Clock;
 import java.util.concurrent.CountDownLatch;
@@ -55,11 +50,15 @@ public final class CenterServerMain {
             }
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, center, center),
-                    codecs
+                    codecs,
+                    config.nettyTransportConfig()
             ));
             registry.register(center);
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
-                    new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport));
+                    new ClusterRpcGateway(center, directory, ClusterTopology.defaultCrossServer(), transport,
+                            true, config.rpcGovernanceConfig(),
+                            BootRpcIdempotencyStore.configure(config, codecs, clock)));
+            ActorSystem actors = BootActors.configure(runtime, config, clock);
             CenterRegistryEndpoint registryEndpoint = runtime.add(
                     "centerRegistryEndpoint",
                     new CenterRegistryEndpoint(
@@ -71,15 +70,20 @@ public final class CenterServerMain {
                             config.registrySubscriptionLeaseTtl()
                     )
             );
-            new CenterAgentDirectoryEndpoint(new InMemoryAgentDirectory()).bind(gateway);
-            ShopStockReservationRepository stockRepository = shopStockRepository(config, clock);
-            new ShopStockEndpoint(stockRepository).bind(gateway);
+            new CenterAgentDirectoryEndpoint(BootAgentDirectory.configure(config, clock)).bind(gateway);
+            ShopStockReservationRepository stockRepository = BootShopStockRepository.configure(config, clock);
+            new ShopStockEndpoint(stockRepository, actors, "center-shop-stock").bind(gateway);
             if (config.shopStockReservationRetentionEnabled()) {
                 ShopStockReservationRetentionService stockRetention = new ShopStockReservationRetentionService(stockRepository);
                 runtime.observe("shopStockReservationRetention", stockRetention);
                 ShopStockReservationRetentionScheduler stockRetentionScheduler = runtime.add(
                         "shopStockReservationRetentionScheduler",
-                        new ShopStockReservationRetentionScheduler(stockRetention, config.shopStockReservationScanInterval())
+                        new ShopStockReservationRetentionScheduler(
+                                stockRetention,
+                                config.shopStockReservationScanInterval(),
+                                actors,
+                                actors.actor("center-shop-stock-retention")
+                        )
                 );
                 stockRetentionScheduler.start();
             }
@@ -97,14 +101,15 @@ public final class CenterServerMain {
                     )
             );
             subscriptionLeaseReaper.start();
-            ActorSystem actors = BootActors.configure(runtime, config, clock);
+            ClusterEventJournal eventJournal = BootCenterEventJournal.configure(runtime, config);
             ClusterEventCenter eventCenter = new ClusterEventCenter(
                     center,
                     transport,
                     gateway,
                     config.eventHistoryPolicy(),
                     clock,
-                    config.eventSubscriptionLeaseTtl()
+                    config.eventSubscriptionLeaseTtl(),
+                    eventJournal
             );
             runtime.observe("eventCenter", eventCenter);
             ClusterEventSubscriptionLeaseReaper eventSubscriptionLeaseReaper = runtime.add(
@@ -116,12 +121,17 @@ public final class CenterServerMain {
                     )
             );
             eventSubscriptionLeaseReaper.start();
-            runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, runtime.healthRegistry()));
+            runtime.add("opsHttp", BootOpsHttp.start(config, center, actors, directory, runtime));
+            BootGameConfigCenter.Runtime configCenter = BootGameConfigCenter.configure(config, codecs, clock);
             GameConfigCenterPublisher configPublisher = new GameConfigCenterPublisher(
-                    new InMemoryGameConfigRegistry(new GameConfigValidator(), clock),
-                    eventCenter::publishLocal
+                    configCenter.registry(),
+                    eventCenter::publishLocal,
+                    configCenter.stateStore(),
+                    configCenter.recovered().orElse(null)
             );
-            configPublisher.publish(ExampleGameConfigs.basic(1, clock.instant()));
+            if (configCenter.recovered().isEmpty()) {
+                configPublisher.publish(ExampleGameConfigs.basic(1, clock.instant()));
+            }
             new GameConfigCenterEndpoint(configPublisher).bind(gateway);
             System.out.println("Center server started: " + center.id().wireName()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
@@ -129,17 +139,10 @@ public final class CenterServerMain {
         } catch (Exception e) {
             runtime.closeSuppressing(e);
             throw e;
+        } catch (Error e) {
+            runtime.closeSuppressing(e);
+            throw e;
         }
     }
 
-    private static ShopStockReservationRepository shopStockRepository(ClusterNodeConfig config, Clock clock) {
-        return switch (config.shopStockStoreKind()) {
-            case MEMORY -> new InMemoryShopStockRepository(clock, config.shopStockReservationTtl());
-            case ATOMIC_MEMORY -> new SerializedShopStockRepository(
-                    new InMemoryAtomicBytesStore(),
-                    clock,
-                    config.shopStockReservationTtl()
-            );
-        };
-    }
 }

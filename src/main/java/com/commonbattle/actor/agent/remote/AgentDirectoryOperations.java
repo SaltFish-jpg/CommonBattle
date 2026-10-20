@@ -8,6 +8,11 @@ public final class AgentDirectoryOperations {
     public static final String MOVE = "agent.directory.move";
     public static final String UNBIND = "agent.directory.unbind";
     public static final String LOCATE = "agent.directory.locate";
+    public static final String ACQUIRE_LEASE = "agent.directory.lease.acquire";
+    public static final String RENEW_LEASE = "agent.directory.lease.renew";
+    public static final String TRANSFER_LEASE = "agent.directory.lease.transfer";
+    public static final String RELEASE_LEASE = "agent.directory.lease.release";
+    public static final String LOCATE_LEASE = "agent.directory.lease.locate";
 
     private AgentDirectoryOperations() {
     }

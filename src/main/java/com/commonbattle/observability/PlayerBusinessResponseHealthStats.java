@@ -25,7 +25,15 @@ public record PlayerBusinessResponseHealthStats(
         long failedResponses,
         Map<String, Long> failedResponsesByCode,
         long rejectedBusinessResults,
-        Map<String, Long> rejectedBusinessResultsByCode
+        Map<String, Long> rejectedBusinessResultsByCode,
+        int loadedResponsePlayers,
+        long checkpointAttempts,
+        long checkpointSucceeded,
+        long checkpointFailures,
+        long storeLoadAttempts,
+        long storeLoadHits,
+        long storeLoadMisses,
+        long storeLoadFailures
 ) {
     public PlayerBusinessResponseHealthStats {
         failedResponsesByCode = Collections.unmodifiableMap(
@@ -38,7 +46,7 @@ public record PlayerBusinessResponseHealthStats(
 
     public static PlayerBusinessResponseHealthStats empty() {
         return new PlayerBusinessResponseHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                Map.of(), 0, Map.of());
+                Map.of(), 0, Map.of(), 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static PlayerBusinessResponseHealthStats from(int hubCount, PlayerBusinessResponseStats stats) {
@@ -57,7 +65,15 @@ public record PlayerBusinessResponseHealthStats(
                 stats.failedResponses(),
                 stats.failedResponsesByCode(),
                 stats.rejectedBusinessResults(),
-                stats.rejectedBusinessResultsByCode()
+                stats.rejectedBusinessResultsByCode(),
+                stats.loadedResponsePlayers(),
+                stats.checkpointAttempts(),
+                stats.checkpointSucceeded(),
+                stats.checkpointFailures(),
+                stats.storeLoadAttempts(),
+                stats.storeLoadHits(),
+                stats.storeLoadMisses(),
+                stats.storeLoadFailures()
         );
     }
 }

@@ -56,12 +56,37 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NettyPlayerGatewayServerTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
     private static final Instant SERVER_OPEN_TIME = Instant.parse("2026-08-01T00:00:00Z");
+
+    @Test
+    void drainPausesNewConnectionsAndResumeRestoresAccepting() throws Exception {
+        Fixture fixture = Fixture.create();
+        try (NettyPlayerGatewayServer server = new NettyPlayerGatewayServer(
+                new ServiceEndpoint("127.0.0.1", freePort()),
+                fixture.connections,
+                fixture.commandAcceptor,
+                fixture.codecs,
+                CLOCK
+        ).start()) {
+            assertTrue(server.isAcceptingConnections());
+
+            server.beginDrain();
+
+            assertTrue(server.isDraining());
+            assertFalse(server.isAcceptingConnections());
+
+            server.resumeAccepting();
+
+            assertFalse(server.isDraining());
+            assertTrue(server.isAcceptingConnections());
+        }
+    }
 
     @Test
     void acceptsLoginAndForwardsCommandOverTcp() throws Exception {

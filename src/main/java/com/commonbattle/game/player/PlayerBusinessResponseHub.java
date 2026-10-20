@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
@@ -30,6 +31,9 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     private final PlayerBusinessResultSink fallback;
     private final Clock clock;
     private final int completedResponseWindow;
+    private final PlayerBusinessResponseStore store;
+    private final Map<Long, Object> playerLoadLocks = new ConcurrentHashMap<>();
+    private final java.util.Set<Long> loadedPlayers = ConcurrentHashMap.newKeySet();
     private final AtomicLong submittedResponses = new AtomicLong();
     private final AtomicLong completedResponses = new AtomicLong();
     private final AtomicLong cancelledResponses = new AtomicLong();
@@ -41,6 +45,13 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     private final Map<String, AtomicLong> failedResponsesByCode = new ConcurrentHashMap<>();
     private final AtomicLong rejectedBusinessResults = new AtomicLong();
     private final Map<String, AtomicLong> rejectedBusinessResultsByCode = new ConcurrentHashMap<>();
+    private final AtomicLong checkpointAttempts = new AtomicLong();
+    private final AtomicLong checkpointSucceeded = new AtomicLong();
+    private final AtomicLong checkpointFailures = new AtomicLong();
+    private final AtomicLong storeLoadAttempts = new AtomicLong();
+    private final AtomicLong storeLoadHits = new AtomicLong();
+    private final AtomicLong storeLoadMisses = new AtomicLong();
+    private final AtomicLong storeLoadFailures = new AtomicLong();
 
     public PlayerBusinessResponseHub() {
         this(PlayerBusinessResultSink.NOOP, Clock.systemUTC());
@@ -55,8 +66,18 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     }
 
     public PlayerBusinessResponseHub(PlayerBusinessResultSink fallback, Clock clock, int completedResponseWindow) {
+        this(fallback, clock, completedResponseWindow, PlayerBusinessResponseStore.noop());
+    }
+
+    public PlayerBusinessResponseHub(
+            PlayerBusinessResultSink fallback,
+            Clock clock,
+            int completedResponseWindow,
+            PlayerBusinessResponseStore store
+    ) {
         this.fallback = Objects.requireNonNull(fallback, "fallback");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.store = Objects.requireNonNull(store, "store");
         if (completedResponseWindow <= 0) {
             throw new IllegalArgumentException("completedResponseWindow must be positive");
         }
@@ -69,6 +90,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     ) {
         Objects.requireNonNull(command, "command");
         Objects.requireNonNull(callback, "callback");
+        ensureLoaded(command.playerId());
         Key key = Key.from(command);
         CompletedResponse cached = completed.get(key);
         if (cached != null) {
@@ -115,6 +137,109 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         return callbacks.size();
     }
 
+    /**
+     * 返回指定玩家仍由当前进程持有的等待响应数。
+     */
+    public int pendingResponses(long playerId) {
+        return (int) callbacks.keySet().stream()
+                .filter(key -> key.playerId() == playerId)
+                .count();
+    }
+
+    /**
+     * 按完成顺序导出单个玩家的响应缓存；等待中的回调属于当前进程，不允许进入迁移快照。
+     */
+    public PlayerBusinessResponseSnapshot snapshotForPlayer(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        ensureLoaded(playerId);
+        synchronized (completedOrder) {
+            List<PlayerBusinessResponse> responses = completedOrder.stream()
+                    .filter(key -> key.playerId() == playerId)
+                    .map(completed::get)
+                    .filter(Objects::nonNull)
+                    .map(CompletedResponse::response)
+                    .toList();
+            return new PlayerBusinessResponseSnapshot(playerId, responses);
+        }
+    }
+
+    /**
+     * 恢复迁移携带的完成响应，已有更新结果保持不变。
+     */
+    public void restore(PlayerBusinessResponseSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Object loadLock = playerLoadLocks.computeIfAbsent(snapshot.playerId(), ignored -> new Object());
+        synchronized (loadLock) {
+            restoreLoaded(snapshot);
+            loadedPlayers.add(snapshot.playerId());
+        }
+    }
+
+    /**
+     * 在玩家状态与命令水位保存成功后持久化完成响应检查点。
+     */
+    public void checkpoint(long playerId) {
+        checkpointAttempts.incrementAndGet();
+        try {
+            store.save(snapshotForPlayer(playerId));
+            checkpointSucceeded.incrementAndGet();
+        } catch (RuntimeException e) {
+            checkpointFailures.incrementAndGet();
+            throw e;
+        }
+    }
+
+    private void restoreLoaded(PlayerBusinessResponseSnapshot snapshot) {
+        synchronized (completedOrder) {
+            for (PlayerBusinessResponse response : snapshot.responses()) {
+                Key key = Key.from(response);
+                if (!completed.containsKey(key)) {
+                    completedOrder.addLast(key);
+                    completed.put(key, new CompletedResponse(response));
+                }
+            }
+            trimCompleted();
+        }
+    }
+
+    /**
+     * 目标 owner 确认接管后清理源进程的完成响应缓存。
+     */
+    public void forgetPlayer(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        synchronized (completedOrder) {
+            completedOrder.removeIf(key -> key.playerId() == playerId);
+            completed.keySet().removeIf(key -> key.playerId() == playerId);
+        }
+        loadedPlayers.add(playerId);
+    }
+
+    /**
+     * 玩家正常钝化后释放内存缓存；下次激活时允许从已保存检查点重新加载。
+     */
+    public void releasePlayer(long playerId) {
+        if (playerId <= 0) {
+            throw new IllegalArgumentException("playerId must be positive");
+        }
+        synchronized (completedOrder) {
+            completedOrder.removeIf(key -> key.playerId() == playerId);
+            completed.keySet().removeIf(key -> key.playerId() == playerId);
+        }
+        loadedPlayers.remove(playerId);
+        playerLoadLocks.remove(playerId);
+    }
+
+    public Optional<PlayerBusinessResponse> cachedResponse(PlayerBusinessResponseQuery query) {
+        Objects.requireNonNull(query, "query");
+        ensureLoaded(query.playerId());
+        CompletedResponse cached = completed.get(Key.from(query));
+        return cached == null ? Optional.empty() : Optional.of(cached.response());
+    }
+
     @Override
     public boolean canComplete(PlayerCommand command) {
         Objects.requireNonNull(command, "command");
@@ -134,7 +259,7 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
                 new PlayerBusinessResponseTimeoutException(command, timeout)
         );
         recordFailure(response);
-        remember(Key.from(command), command, response);
+        remember(Key.from(command), response);
         waiter.complete(response);
         return true;
     }
@@ -155,7 +280,15 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
                 failedResponses.get(),
                 failedResponsesByCode(),
                 rejectedBusinessResults.get(),
-                rejectedBusinessResultsByCode()
+                rejectedBusinessResultsByCode(),
+                loadedPlayers.size(),
+                checkpointAttempts.get(),
+                checkpointSucceeded.get(),
+                checkpointFailures.get(),
+                storeLoadAttempts.get(),
+                storeLoadHits.get(),
+                storeLoadMisses.get(),
+                storeLoadFailures.get()
         );
     }
 
@@ -163,10 +296,28 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
     public void completed(PlayerCommand command, PlayerBusinessResponse response) {
         Objects.requireNonNull(command, "command");
         Objects.requireNonNull(response, "response");
-        Key key = Key.from(command);
+        ensureLoaded(command.playerId());
         recordFailure(response);
         recordBusinessResult(response);
-        remember(key, command, response);
+        complete(command, response, true);
+    }
+
+    /**
+     * 完成等待方但不写入幂等缓存；用于远程 owner 未确认接收的临时失败。
+     */
+    public void completedUncached(PlayerCommand command, PlayerBusinessResponse response) {
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(response, "response");
+        recordFailure(response);
+        recordBusinessResult(response);
+        complete(command, response, false);
+    }
+
+    private void complete(PlayerCommand command, PlayerBusinessResponse response, boolean cache) {
+        Key key = Key.from(command);
+        if (cache) {
+            remember(key, response);
+        }
         PendingResponse waiter = callbacks.remove(key);
         if (waiter != null) {
             completedResponses.incrementAndGet();
@@ -238,17 +389,55 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         private static Key from(PlayerCommand command) {
             return new Key(command.playerId(), command.sessionId(), command.sessionEpoch(), command.sequence());
         }
+
+        private static Key from(PlayerBusinessResponseQuery query) {
+            return new Key(query.playerId(), query.sessionId(), query.sessionEpoch(), query.sequence());
+        }
+
+        private static Key from(PlayerBusinessResponse response) {
+            return new Key(response.playerId(), response.sessionId(), response.sessionEpoch(), response.sequence());
+        }
     }
 
-    private void remember(Key key, PlayerCommand command, PlayerBusinessResponse response) {
+    private void remember(Key key, PlayerBusinessResponse response) {
         synchronized (completedOrder) {
             if (!completed.containsKey(key)) {
                 completedOrder.addLast(key);
             }
-            completed.put(key, new CompletedResponse(command, response));
-            while (completedOrder.size() > completedResponseWindow) {
-                Key removed = completedOrder.removeFirst();
-                completed.remove(removed);
+            completed.put(key, new CompletedResponse(response));
+            trimCompleted();
+        }
+    }
+
+    private void trimCompleted() {
+        while (completedOrder.size() > completedResponseWindow) {
+            Key removed = completedOrder.removeFirst();
+            completed.remove(removed);
+        }
+    }
+
+    private void ensureLoaded(long playerId) {
+        if (loadedPlayers.contains(playerId)) {
+            return;
+        }
+        Object loadLock = playerLoadLocks.computeIfAbsent(playerId, ignored -> new Object());
+        synchronized (loadLock) {
+            if (loadedPlayers.contains(playerId)) {
+                return;
+            }
+            storeLoadAttempts.incrementAndGet();
+            try {
+                Optional<PlayerBusinessResponseSnapshot> stored = store.load(playerId);
+                if (stored.isPresent()) {
+                    restoreLoaded(stored.orElseThrow());
+                    storeLoadHits.incrementAndGet();
+                } else {
+                    storeLoadMisses.incrementAndGet();
+                }
+                loadedPlayers.add(playerId);
+            } catch (RuntimeException e) {
+                storeLoadFailures.incrementAndGet();
+                throw e;
             }
         }
     }
@@ -294,6 +483,6 @@ public final class PlayerBusinessResponseHub implements PlayerBusinessResultSink
         }
     }
 
-    private record CompletedResponse(PlayerCommand command, PlayerBusinessResponse response) {
+    private record CompletedResponse(PlayerBusinessResponse response) {
     }
 }

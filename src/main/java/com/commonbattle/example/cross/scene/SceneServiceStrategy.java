@@ -1,10 +1,14 @@
 package com.commonbattle.example.cross.scene;
 
+import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.cluster.ServiceDescriptor;
+import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneRuntimeView;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -14,11 +18,42 @@ import java.util.function.Consumer;
 public interface SceneServiceStrategy extends SceneRuntimeView {
     ServiceDescriptor descriptor();
 
+    /**
+     * 在服务开始接收流量前接入全局 Agent owner 生命周期。
+     */
+    default void attachLifecycles(AgentLifecycleManager lifecycles) {
+        Objects.requireNonNull(lifecycles, "lifecycles");
+    }
+
     default SceneRuntimeStats stats() {
         return SceneRuntimeStats.empty();
     }
 
     ScenePlacement place(String sceneId, int chunkX, int chunkY);
+
+    /**
+     * 返回跨节点 RPC 路由使用的场景 owner 身份。
+     * 小场景按 scene 隔离；大场景可用一个稳定 shard 代表承载整个场景的进程。
+     */
+    default AgentIdentity routingIdentity(String sceneId) {
+        return AgentIdentity.scene(sceneId);
+    }
+
+    /**
+     * 将本策略创建的 ActorId 还原为全局 Agent 身份，供热点迁移管理入口使用。
+     */
+    default Optional<AgentIdentity> identityOfActor(String actorId) {
+        return Optional.empty();
+    }
+
+    /**
+     * 生成目标 Scene 进程内的 ActorId，避免把源节点名带入迁入邮箱。
+     */
+    default String migrationTargetActorId(AgentIdentity identity, ServiceId targetServiceId) {
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(targetServiceId, "targetServiceId");
+        return identity.wireName();
+    }
 
     default ScenePlacement enter(long playerId, String sceneId, int chunkX, int chunkY) {
         return place(sceneId, chunkX, chunkY);

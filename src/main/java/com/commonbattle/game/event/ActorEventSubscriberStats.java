@@ -8,10 +8,25 @@ public record ActorEventSubscriberStats(
         long enqueuedEvents,
         long rejectedEvents,
         long handledEvents,
-        long failedEvents
+        long failedEvents,
+        long duplicateEvents,
+        long retryScheduledEvents,
+        long deadLetteredEvents,
+        int pendingInboxEvents,
+        int inboxDeadLetters
 ) {
+    public ActorEventSubscriberStats(
+            long receivedEvents,
+            long enqueuedEvents,
+            long rejectedEvents,
+            long handledEvents,
+            long failedEvents
+    ) {
+        this(receivedEvents, enqueuedEvents, rejectedEvents, handledEvents, failedEvents, 0, 0, 0, 0, 0);
+    }
+
     public static ActorEventSubscriberStats empty() {
-        return new ActorEventSubscriberStats(0, 0, 0, 0, 0);
+        return new ActorEventSubscriberStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ActorEventSubscriberStats plus(ActorEventSubscriberStats other) {
@@ -20,7 +35,12 @@ public record ActorEventSubscriberStats(
                 enqueuedEvents + other.enqueuedEvents,
                 rejectedEvents + other.rejectedEvents,
                 handledEvents + other.handledEvents,
-                failedEvents + other.failedEvents
+                failedEvents + other.failedEvents,
+                duplicateEvents + other.duplicateEvents,
+                retryScheduledEvents + other.retryScheduledEvents,
+                deadLetteredEvents + other.deadLetteredEvents,
+                pendingInboxEvents + other.pendingInboxEvents,
+                inboxDeadLetters + other.inboxDeadLetters
         );
     }
 }

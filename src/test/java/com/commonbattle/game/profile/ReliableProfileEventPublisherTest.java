@@ -2,9 +2,11 @@ package com.commonbattle.game.profile;
 
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEvent;
+import com.commonbattle.game.event.VersionedEventRetryPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -41,7 +43,13 @@ class ReliableProfileEventPublisherTest {
         InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(CLOCK);
         List<VersionedEvent> published = new ArrayList<>();
         FailingOncePublisher delegate = new FailingOncePublisher(published);
-        ReliableProfileEventPublisher publisher = new ReliableProfileEventPublisher(snapshots, outbox, delegate);
+        ReliableProfileEventPublisher publisher = new ReliableProfileEventPublisher(
+                snapshots,
+                outbox,
+                delegate,
+                new VersionedEventRetryPolicy(3, Duration.ZERO, Duration.ZERO, 10),
+                CLOCK
+        );
 
         publisher.publish(event(1, "hero"));
 

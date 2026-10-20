@@ -1,8 +1,10 @@
 package com.commonbattle.actor.agent.remote;
 
 import com.commonbattle.actor.agent.AgentDirectory;
+import com.commonbattle.actor.agent.LeasedAgentDirectory;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -37,5 +39,46 @@ public final class CenterAgentDirectoryEndpoint {
             AgentDirectoryLocateRequest payload = (AgentDirectoryLocateRequest) request.payload();
             responder.success(new AgentDirectoryLocateResponse(directory.locate(payload.identity()).orElse(null)));
         });
+        gateway.handle(AgentDirectoryOperations.ACQUIRE_LEASE, (request, responder) -> {
+            AgentDirectoryLeaseAcquireRequest payload = (AgentDirectoryLeaseAcquireRequest) request.payload();
+            responder.success(new AgentDirectoryLeaseResponse(leasedDirectory().acquire(
+                    payload.identity(),
+                    payload.location(),
+                    payload.ownerSession(),
+                    Duration.ofMillis(payload.leaseTtlMillis())
+            ).orElse(null)));
+        });
+        gateway.handle(AgentDirectoryOperations.RENEW_LEASE, (request, responder) -> {
+            AgentDirectoryLeaseRenewRequest payload = (AgentDirectoryLeaseRenewRequest) request.payload();
+            responder.success(new AgentDirectoryLeaseResponse(leasedDirectory().renew(
+                    payload.lease(), Duration.ofMillis(payload.leaseTtlMillis())
+            ).orElse(null)));
+        });
+        gateway.handle(AgentDirectoryOperations.TRANSFER_LEASE, (request, responder) -> {
+            AgentDirectoryLeaseTransferRequest payload = (AgentDirectoryLeaseTransferRequest) request.payload();
+            responder.success(new AgentDirectoryLeaseResponse(leasedDirectory().transfer(
+                    payload.lease(),
+                    payload.nextLocation(),
+                    payload.nextOwnerSession(),
+                    Duration.ofMillis(payload.leaseTtlMillis())
+            ).orElse(null)));
+        });
+        gateway.handle(AgentDirectoryOperations.RELEASE_LEASE, (request, responder) -> {
+            AgentDirectoryLeaseReleaseRequest payload = (AgentDirectoryLeaseReleaseRequest) request.payload();
+            responder.success(new AgentDirectoryBooleanResponse(leasedDirectory().release(payload.lease())));
+        });
+        gateway.handle(AgentDirectoryOperations.LOCATE_LEASE, (request, responder) -> {
+            AgentDirectoryLocateRequest payload = (AgentDirectoryLocateRequest) request.payload();
+            responder.success(new AgentDirectoryLeaseResponse(
+                    leasedDirectory().locateLease(payload.identity()).orElse(null)
+            ));
+        });
+    }
+
+    private LeasedAgentDirectory leasedDirectory() {
+        if (directory instanceof LeasedAgentDirectory leased) {
+            return leased;
+        }
+        throw new IllegalStateException("Agent directory lease operations are not configured");
     }
 }

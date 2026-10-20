@@ -250,6 +250,15 @@ public final class SceneAllianceAwarenessAgent {
                 : AllianceMembershipDecision.NOT_MEMBER;
     }
 
+    public void readMembershipOf(
+            long allianceId,
+            long playerId,
+            Consumer<AllianceMembershipDecision> callback
+    ) {
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> callback.accept(membershipOf(allianceId, playerId)));
+    }
+
     public synchronized AllianceMembershipDecision freshMembershipOf(
             long allianceId,
             long playerId,

@@ -18,6 +18,9 @@ public final class AchievementEventHandler implements PlayerEventHandler {
 
     @Override
     public void handle(PlayerGameExecution execution, PlayerDomainEvent event) {
-        achievementService.onEvent(execution.profile().achievements(), event);
+        int progressed = achievementService.onEvent(execution.profile().achievements(), event);
+        if (progressed > 0) {
+            execution.pushAchievementSnapshot();
+        }
     }
 }

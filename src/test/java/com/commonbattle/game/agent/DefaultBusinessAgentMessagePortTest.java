@@ -91,42 +91,6 @@ class DefaultBusinessAgentMessagePortTest {
     }
 
     @Test
-    void sendsLocalPlayerCommandThroughPlayerMailbox() {
-        CountingRpcGateway rpc = new CountingRpcGateway();
-        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
-            RecordingCallback callback = new RecordingCallback();
-
-            node.business().sendPlayerCommand(command(1), callback);
-
-            assertNull(callback.response.get());
-            assertEquals(1, node.responses().pendingResponses());
-            node.executor().runAll();
-
-            assertEquals(PlayerBusinessResponseStatus.SUCCESS, callback.response.get().status());
-            assertEquals("player-10001", callback.response.get().payload());
-            assertEquals(0, node.responses().pendingResponses());
-            assertEquals(0, rpc.calls.get());
-        }
-    }
-
-    @Test
-    void sendsRemotePlayerCommandThroughRpcAndOwnerMailbox() {
-        try (RemoteFixture fixture = RemoteFixture.create()) {
-            RecordingCallback callback = new RecordingCallback();
-
-            fixture.caller().business().sendPlayerCommand(command(1), callback);
-
-            assertNull(callback.response.get());
-            assertEquals(1, fixture.owner().responses().pendingResponses());
-            fixture.owner().executor().runAll();
-
-            assertEquals(PlayerBusinessResponseStatus.SUCCESS, callback.response.get().status());
-            assertEquals("player-10001", callback.response.get().payload());
-            assertEquals(0, fixture.owner().responses().pendingResponses());
-        }
-    }
-
-    @Test
     void requestsLocalPlayerCommandPayloadOnRequesterMailbox() {
         CountingRpcGateway rpc = new CountingRpcGateway();
         try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
@@ -294,6 +258,141 @@ class DefaultBusinessAgentMessagePortTest {
             assertEquals("alliance-100:32", response.get());
             assertEquals("requester", callbackActor.get());
             assertEquals(0, rpc.calls.get());
+        }
+    }
+
+    @Test
+    void localBusinessAgentRequestWithSameIdempotencyKeyExecutesOnceAndReplaysResult() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc)) {
+            node.lifecycles().activate(AgentIdentity.alliance(100), "alliance-100");
+            node.executor().runAll();
+            ActorRef requester = node.actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            AtomicInteger successes = new AtomicInteger();
+            AtomicReference<String> response = new AtomicReference<>();
+            node.handlers().handle("alliance.version", (context, request) ->
+                    context.self().id() + ":" + handled.incrementAndGet());
+            BusinessAgentCallOptions options = BusinessAgentCallOptions.defaults()
+                    .withIdempotencyKey("alliance-version-local-1");
+
+            node.business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.version",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+            node.business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.version",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+            node.executor().runAll();
+
+            assertEquals(1, handled.get());
+            assertEquals(2, successes.get());
+            assertEquals("alliance-100:1", response.get());
+            assertEquals(1, node.business().stats().localIdempotency().startedRequests());
+            assertEquals(1, node.business().stats().localIdempotency().joinedInFlightRequests());
+            assertEquals(1, node.business().stats().localIdempotency().completedSuccesses());
+
+            node.business().requestAgent(
+                    requester,
+                    AgentIdentity.alliance(100),
+                    "alliance.version",
+                    null,
+                    String.class,
+                    options,
+                    successOnly(value -> {
+                        successes.incrementAndGet();
+                        response.set(value);
+                    })
+            );
+            node.executor().runAll();
+
+            assertEquals(1, handled.get());
+            assertEquals(3, successes.get());
+            assertEquals(1, node.business().stats().localIdempotency().completedCacheHits());
+            assertEquals(0, rpc.calls.get());
+        }
+    }
+
+    @Test
+    void localBusinessAgentIdempotencyEntryExpiresByTtl() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        AdjustableClock clock = new AdjustableClock(CLOCK.instant());
+        try (PlayerNode node = PlayerNode.localOwner(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), rpc);
+             DefaultBusinessAgentMessagePort business = node.businessWithIdempotency(
+                     new BusinessAgentIdempotencyConfig(8, Duration.ofMillis(5)),
+                     clock
+             )) {
+            node.lifecycles().activate(AgentIdentity.alliance(100), "alliance-100");
+            node.executor().runAll();
+            ActorRef requester = node.actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            AtomicReference<String> response = new AtomicReference<>();
+            node.handlers().handle("alliance.version", (context, request) ->
+                    context.self().id() + ":" + handled.incrementAndGet());
+            BusinessAgentCallOptions options = BusinessAgentCallOptions.defaults()
+                    .withIdempotencyKey("alliance-version-local-ttl");
+
+            business.requestAgent(requester, AgentIdentity.alliance(100), "alliance.version",
+                    null, String.class, options, successOnly(response));
+            node.executor().runAll();
+            clock.advance(Duration.ofMillis(6));
+            business.requestAgent(requester, AgentIdentity.alliance(100), "alliance.version",
+                    null, String.class, options, successOnly(response));
+            node.executor().runAll();
+
+            assertEquals("alliance-100:2", response.get());
+            assertEquals(2, handled.get());
+            assertEquals(2, business.stats().localIdempotency().startedRequests());
+            assertEquals(1, business.stats().localIdempotency().expiredEntries());
+        }
+    }
+
+    @Test
+    void localIdempotencyInFlightEntryIsAbandonedWhenRequesterMailboxRejectsCallback() {
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        try (PlayerNode node = PlayerNode.localOwner(
+                ServiceId.of(ServiceKind.GAME, "r1", "game-1"),
+                rpc,
+                ActorMailboxPressurePolicy.disabled(),
+                1
+        )) {
+            node.lifecycles().activate(AgentIdentity.alliance(100), "alliance-100");
+            node.executor().runAll();
+            ActorRef requester = node.actors().actor("requester");
+            AtomicInteger handled = new AtomicInteger();
+            node.handlers().handle("alliance.version", (context, request) ->
+                    "version-" + handled.incrementAndGet());
+            BusinessAgentCallOptions options = BusinessAgentCallOptions.defaults()
+                    .withIdempotencyKey("alliance-version-local-backpressure");
+
+            node.business().requestAgent(requester, AgentIdentity.alliance(100), "alliance.version",
+                    null, String.class, options, successOnly(ignored -> {
+                    }));
+            node.actors().send(requester, ignored -> {
+            });
+            node.executor().runNext();
+
+            assertEquals(1, handled.get());
+            assertEquals(1, node.business().stats().callbackDeliveryFailures());
+            assertEquals(1, node.business().stats().localIdempotency().abandonedInFlightRequests());
+            assertEquals(0, node.business().stats().localIdempotency().size());
         }
     }
 
@@ -985,12 +1084,26 @@ class DefaultBusinessAgentMessagePortTest {
 
         private DefaultBusinessAgentMessagePort businessWithTimeouts(AskTimeoutScheduler timeouts) {
             return new DefaultBusinessAgentMessagePort(
+                    new DefaultAgentMessagePort(actors, rpc, timeouts),
+                    gateway,
+                    router,
+                    handlers,
+                    businessAdmissions(actors, ActorMailboxPressurePolicy.disabled())
+            );
+        }
+
+        private DefaultBusinessAgentMessagePort businessWithIdempotency(
+                BusinessAgentIdempotencyConfig config,
+                Clock clock
+        ) {
+            return new DefaultBusinessAgentMessagePort(
                     new DefaultAgentMessagePort(actors, rpc),
                     gateway,
                     router,
                     handlers,
                     businessAdmissions(actors, ActorMailboxPressurePolicy.disabled()),
-                    timeouts
+                    config,
+                    clock
             );
         }
 
@@ -1071,21 +1184,6 @@ class DefaultBusinessAgentMessagePortTest {
         }
     }
 
-    private static final class RecordingCallback implements RpcCallback<PlayerBusinessResponse> {
-        private final AtomicReference<PlayerBusinessResponse> response = new AtomicReference<>();
-        private final AtomicReference<Throwable> failure = new AtomicReference<>();
-
-        @Override
-        public void success(PlayerBusinessResponse response) {
-            this.response.set(response);
-        }
-
-        @Override
-        public void failure(Throwable error) {
-            failure.set(error);
-        }
-    }
-
     private static final class CountingRpcGateway implements RpcGateway {
         private final AtomicInteger calls = new AtomicInteger();
 
@@ -1107,6 +1205,10 @@ class DefaultBusinessAgentMessagePortTest {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
+        }
+
+        void runNext() {
+            commands.removeFirst().run();
         }
     }
 

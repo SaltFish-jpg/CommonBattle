@@ -13,6 +13,8 @@ import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.network.ForwardingProxy;
+import com.commonbattle.cluster.network.ClusterSendCallback;
+import com.commonbattle.cluster.network.ClusterTransportException;
 import com.commonbattle.cluster.network.LocalClusterTransport;
 import com.commonbattle.example.cross.AgentStatus;
 import com.commonbattle.example.cross.CombatDamageRequest;
@@ -51,6 +53,97 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClusterRpcGatewayTest {
+    @Test
+    void asynchronousTransportFailureReleasesPendingCallImmediately() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+        registry.register(scene);
+        ClusterDirectory directory = new ClusterDirectory(registry);
+        directory.watch(ServiceKind.SCENE);
+        com.commonbattle.cluster.network.ClusterTransport transport = new com.commonbattle.cluster.network.ClusterTransport() {
+            @Override
+            public void bind(ServiceDescriptor local, com.commonbattle.cluster.network.ClusterMessageHandler handler) {
+            }
+
+            @Override
+            public void send(ServiceId nextHop, com.commonbattle.cluster.network.ClusterEnvelope envelope) {
+            }
+
+            @Override
+            public void send(
+                    ServiceId nextHop,
+                    com.commonbattle.cluster.network.ClusterEnvelope envelope,
+                    ClusterSendCallback callback
+            ) {
+                callback.failure(new ClusterTransportException(nextHop, "connection refused"));
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        ClusterRpcGateway gateway = new ClusterRpcGateway(
+                game,
+                directory,
+                new ClusterTopology().allow(ServiceKind.GAME, ServiceKind.SCENE),
+                transport
+        );
+        FailureCallback callback = new FailureCallback();
+
+        gateway.call(request(), callback, RpcCallOptions.of(Duration.ofHours(1)));
+
+        assertInstanceOf(ClusterTransportException.class, callback.error.get());
+        assertEquals(0, gateway.stats().pendingRequests());
+        assertEquals(1, gateway.stats().failedRequests());
+        assertEquals(0, gateway.stats().timedOutRequests());
+    }
+
+    @Test
+    void closeFailsPendingCallsAndRejectsNewCalls() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+        registry.register(scene);
+        ClusterDirectory directory = new ClusterDirectory(registry);
+        directory.watch(ServiceKind.SCENE);
+        com.commonbattle.cluster.network.ClusterTransport transport = new com.commonbattle.cluster.network.ClusterTransport() {
+            @Override
+            public void bind(ServiceDescriptor local, com.commonbattle.cluster.network.ClusterMessageHandler handler) {
+            }
+
+            @Override
+            public void send(ServiceId nextHop, com.commonbattle.cluster.network.ClusterEnvelope envelope) {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        ClusterRpcGateway gateway = new ClusterRpcGateway(
+                game,
+                directory,
+                new ClusterTopology().allow(ServiceKind.GAME, ServiceKind.SCENE),
+                transport
+        );
+        FailureCallback pending = new FailureCallback();
+        gateway.call(request(), pending, RpcCallOptions.of(Duration.ofHours(1)));
+        assertEquals(1, gateway.stats().pendingRequests());
+
+        gateway.close();
+        gateway.close();
+
+        assertInstanceOf(RpcGatewayClosedException.class, pending.error.get());
+        assertEquals(0, gateway.stats().pendingRequests());
+        assertEquals(1, gateway.stats().failedRequests());
+
+        FailureCallback rejected = new FailureCallback();
+        gateway.call(request(), rejected);
+
+        assertInstanceOf(RpcGatewayClosedException.class, rejected.error.get());
+        assertEquals(1, gateway.stats().rejectedRequests());
+    }
+
     @Test
     void playerAgentEntersSceneThroughRegistryAndProxyForwarding() {
         InMemoryServiceRegistry registry = new InMemoryServiceRegistry();

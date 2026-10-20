@@ -18,8 +18,51 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RegistryLeaseRenewerTest {
+    @Test
+    void closeShutsOwnedSchedulerEvenWhenUnregisterFails() {
+        UnregisterFailureRegistry registry = new UnregisterFailureRegistry();
+        RegistryLeaseRenewer renewer = new RegistryLeaseRenewer(
+                registry,
+                descriptor(),
+                Duration.ofSeconds(5),
+                Duration.ofHours(1)
+        );
+        renewer.start();
+
+        assertThrows(IllegalStateException.class, renewer::close);
+
+        assertTrue(registry.unregisterAttempted);
+        renewer.close();
+    }
+
+    @Test
+    void heartbeatTransportFailureTriggersIdempotentReregistration() {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        HeartbeatFailureRegistry registry = new HeartbeatFailureRegistry();
+        RegistryLeaseRenewer renewer = new RegistryLeaseRenewer(
+                registry,
+                descriptor(),
+                Duration.ofSeconds(5),
+                Duration.ofHours(1),
+                scheduler
+        );
+        try {
+            renewer.start();
+
+            renewer.renewOnce();
+
+            assertEquals(2, registry.registers);
+            assertEquals(1, renewer.stats().failedRenewals());
+            assertEquals(1, renewer.stats().reRegistrations());
+        } finally {
+            renewer.close();
+            scheduler.shutdownNow();
+        }
+    }
+
     @Test
     void beginDrainPublishFailureIsCounted() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -75,6 +118,65 @@ class RegistryLeaseRenewerTest {
 
         @Override
         public void unregister(ServiceId serviceId) {
+        }
+
+        @Override
+        public List<ServiceDescriptor> list(ServiceKind kind) {
+            return List.of();
+        }
+
+        @Override
+        public AutoCloseable subscribe(ServiceKind kind, RegistrySubscriber subscriber) {
+            return () -> {
+            };
+        }
+    }
+
+    private static final class HeartbeatFailureRegistry implements ServiceRegistry {
+        private int registers;
+
+        @Override
+        public void register(ServiceDescriptor service) {
+            register(service, Duration.ofSeconds(5));
+        }
+
+        @Override
+        public void register(ServiceDescriptor service, Duration leaseTtl) {
+            registers++;
+        }
+
+        @Override
+        public boolean heartbeat(ServiceId serviceId, Duration leaseTtl) {
+            throw new IllegalStateException("heartbeat response route missing");
+        }
+
+        @Override
+        public void unregister(ServiceId serviceId) {
+        }
+
+        @Override
+        public List<ServiceDescriptor> list(ServiceKind kind) {
+            return List.of();
+        }
+
+        @Override
+        public AutoCloseable subscribe(ServiceKind kind, RegistrySubscriber subscriber) {
+            return () -> {
+            };
+        }
+    }
+
+    private static final class UnregisterFailureRegistry implements ServiceRegistry {
+        private boolean unregisterAttempted;
+
+        @Override
+        public void register(ServiceDescriptor service) {
+        }
+
+        @Override
+        public void unregister(ServiceId serviceId) {
+            unregisterAttempted = true;
+            throw new IllegalStateException("center unavailable");
         }
 
         @Override

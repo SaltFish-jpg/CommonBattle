@@ -8,6 +8,9 @@ import com.commonbattle.battle.event.Event;
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorSystemClosedException;
+import com.commonbattle.actor.MailboxFullException;
+import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.migration.AgentMigrationOperations;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
@@ -38,10 +41,12 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SceneServiceStrategyTest {
     @Test
@@ -77,6 +83,18 @@ class SceneServiceStrategyTest {
             assertEquals("200", service.descriptor().metadata(ServiceMetadata.LOAD_CAPACITY));
             assertEquals("0", service.descriptor().metadata(SceneRuntimeMetadata.ACTIVE_SCENES));
             assertEquals("0", service.descriptor().metadata(SceneRuntimeMetadata.ACTIVE_PLAYERS));
+            assertTrue(service.descriptor().supports(AgentMigrationOperations.ACCEPT));
+            assertEquals(AgentIdentity.scene("room-1"), service.routingIdentity("room-1"));
+            assertEquals(Optional.of(AgentIdentity.scene("room-1")), service.identityOfActor(first.actor().id()));
+            assertEquals(
+                    "scene:scene-small-2:room-1",
+                    service.migrationTargetActorId(
+                            AgentIdentity.scene("room-1"),
+                            com.commonbattle.cluster.ServiceId.of(
+                                    com.commonbattle.cluster.ServiceKind.SCENE, "r1", "scene-small-2"
+                            )
+                    )
+            );
         }
     }
 
@@ -155,6 +173,21 @@ class SceneServiceStrategyTest {
             assertEquals("0", service.descriptor().metadata(ServiceMetadata.LOAD_USED));
             assertEquals("8", service.descriptor().metadata(ServiceMetadata.LOAD_CAPACITY));
             assertEquals("1", service.descriptor().metadata("scene.shard.chunk.size"));
+            assertFalse(service.descriptor().supports(AgentMigrationOperations.ACCEPT));
+            assertEquals(AgentIdentity.sceneShard("world-1", 0), service.routingIdentity("world-1"));
+            assertEquals(
+                    Optional.of(AgentIdentity.sceneShard("world-1", first.shardIndex())),
+                    service.identityOfActor(first.actor().id())
+            );
+            assertEquals(
+                    "scene:scene-large-2:world-1:shard-3",
+                    service.migrationTargetActorId(
+                            AgentIdentity.sceneShard("world-1", 3),
+                            com.commonbattle.cluster.ServiceId.of(
+                                    com.commonbattle.cluster.ServiceKind.SCENE, "r1", "scene-large-2"
+                            )
+                    )
+            );
         }
     }
 
@@ -246,6 +279,7 @@ class SceneServiceStrategyTest {
         assertEquals(-1, negativeCell.cellX());
         assertEquals(-1, negativeCell.cellY());
         assertEquals(new LargeSceneShardAgentKey("world-1", origin.shardIndex()), origin.agentKey());
+        assertEquals(AgentIdentity.sceneShard("world-1", origin.shardIndex()), origin.agentIdentity());
     }
 
     @Test
@@ -342,6 +376,238 @@ class SceneServiceStrategyTest {
     }
 
     @Test
+    void largeSceneAsyncCrossShardMoveCommitsAfterTargetShardMailboxRuns() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> moved = new AtomicReference<>();
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runAll();
+            int sourceShard = entered.get().shardIndex();
+            int targetShard = service.place("world-1", 4, 0).shardIndex();
+
+            service.moveAsync(10001L, "world-1", 4, 0, moved::set, error -> {
+                throw new AssertionError(error);
+            });
+
+            assertEquals(Set.of(10001L), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(targetShard));
+            assertEquals(null, moved.get());
+
+            executor.runNext();
+
+            assertEquals(Set.of(), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(targetShard));
+            assertEquals(null, moved.get());
+
+            executor.runNext();
+
+            assertEquals(true, moved.get().moved());
+            assertEquals(sourceShard, moved.get().previousShardIndex());
+            assertEquals(targetShard, moved.get().shardIndex());
+            assertEquals(Set.of(10001L), service.shardPlayers(targetShard));
+        }
+    }
+
+    @Test
+    void largeSceneAsyncCrossShardMoveRejectsDuplicateWhileTransferIsPending() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> firstMove = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> duplicateMove = new AtomicReference<>();
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runAll();
+
+            service.moveAsync(10001L, "world-1", 4, 0, firstMove::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runNext();
+
+            assertEquals(1, service.stats().pendingShardTransfers());
+            assertEquals(null, firstMove.get());
+
+            service.moveAsync(10001L, "world-1", 8, 0, duplicateMove::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runLast();
+
+            assertEquals(false, duplicateMove.get().moved());
+            assertEquals(1, service.stats().pendingShardTransfers());
+
+            executor.runNext();
+
+            assertEquals(true, firstMove.get().moved());
+            assertEquals(0, service.stats().pendingShardTransfers());
+            assertEquals(0, service.stats().failedShardTransfers());
+        }
+    }
+
+    @Test
+    void largeSceneAsyncCrossShardMoveRollsBackWhenTargetMailboxRejects() {
+        RecordingExecutor executor = new RecordingExecutor();
+        try (ActorSystem actors = new ActorSystem(executor, 64, 1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC()
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runAll();
+            int sourceShard = entered.get().shardIndex();
+            ScenePlacement target = service.place("world-1", 4, 0);
+            actors.send(target.actor(), ignored -> {
+            });
+
+            service.moveAsync(10001L, "world-1", 4, 0, ignored -> {
+                throw new AssertionError("move should not complete");
+            }, failure::set);
+            executor.runLast();
+
+            assertEquals(MailboxFullException.class, failure.get().getClass());
+            assertEquals(Set.of(10001L), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(target.shardIndex()));
+            assertEquals(0, service.stats().pendingShardTransfers());
+            assertEquals(1, service.stats().failedShardTransfers());
+        }
+    }
+
+    @Test
+    void largeSceneExpiredCrossShardMoveRollsBackAndRejectsLateTargetCommit() {
+        RecordingExecutor executor = new RecordingExecutor();
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-14T00:00:00Z"));
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    clock
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> moved = new AtomicReference<>();
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runAll();
+            int sourceShard = entered.get().shardIndex();
+            int targetShard = service.place("world-1", 4, 0).shardIndex();
+
+            service.moveAsync(10001L, "world-1", 4, 0, moved::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runNext();
+
+            assertEquals(1, service.stats().pendingShardTransfers());
+            assertEquals(0, service.repairExpiredShardTransfers(Duration.ofSeconds(5)));
+
+            clock.advance(Duration.ofSeconds(6));
+            assertEquals(1, service.repairExpiredShardTransfers(Duration.ofSeconds(5)));
+
+            executor.runLast();
+
+            assertEquals(Set.of(10001L), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(targetShard));
+            assertEquals(0, service.stats().pendingShardTransfers());
+            assertEquals(1, service.stats().failedShardTransfers());
+            assertEquals(null, moved.get());
+
+            executor.runNext();
+
+            assertEquals(false, moved.get().moved());
+            assertEquals(Set.of(10001L), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(targetShard));
+        }
+    }
+
+    @Test
+    void largeSceneShardTransferRepairCanBeScheduledThroughActorTimer() throws InterruptedException {
+        RecordingExecutor executor = new RecordingExecutor();
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-14T00:00:00Z"));
+        try (ActorSystem actors = new ActorSystem(executor, 64);
+             ActorScheduleRegistry schedules = new ActorScheduleRegistry(actors)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    clock
+            );
+            AtomicReference<ScenePlacement> entered = new AtomicReference<>();
+            AtomicReference<SceneMoveOutcome> moved = new AtomicReference<>();
+            service.enterAsync(10001L, "world-1", 0, 0, entered::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runAll();
+            int sourceShard = entered.get().shardIndex();
+            int targetShard = service.place("world-1", 4, 0).shardIndex();
+            service.moveAsync(10001L, "world-1", 4, 0, moved::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runNext();
+            clock.advance(Duration.ofSeconds(6));
+
+            service.scheduleShardTransferRepairs(
+                    schedules,
+                    Duration.ofMillis(1),
+                    Duration.ofDays(1),
+                    Duration.ofSeconds(5)
+            );
+
+            awaitQueued(executor, 2);
+            executor.runLast();
+
+            assertEquals(Set.of(10001L), service.shardPlayers(sourceShard));
+            assertEquals(Set.of(), service.shardPlayers(targetShard));
+            assertEquals(0, service.stats().pendingShardTransfers());
+            assertEquals(1, schedules.stats().deliveredTimerMessages());
+
+            executor.runNext();
+
+            assertEquals(false, moved.get().moved());
+        }
+    }
+
+    @Test
     void largeSceneMigrationExportRequiresShardMailbox() {
         RecordingExecutor executor = new RecordingExecutor();
         try (ActorSystem actors = new ActorSystem(executor, 64)) {
@@ -417,6 +683,34 @@ class SceneServiceStrategyTest {
     }
 
     @Test
+    void largeSceneVisiblePlayersCanCrossShardBoundary() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            ScenePlacement left = service.enter(10001L, "world-1", 3, 0);
+            ScenePlacement right = service.enter(20002L, "world-1", 4, 0);
+
+            assertNotEquals(left.shardIndex(), right.shardIndex());
+            assertEquals(List.of(20002L), service.visiblePlayers(10001L));
+            assertEquals(List.of(10001L), service.visiblePlayers(20002L));
+            SceneBroadcastEnvelope envelope = broadcasts.envelopes().getLast();
+            assertEquals(Set.of(10001L), envelope.recipients());
+            assertEquals(SceneBroadcastEventType.ENTER_VIEW, envelope.event().type());
+            assertEquals(20002L, envelope.event().subjectPlayerId());
+        }
+    }
+
+    @Test
     void largeSceneMoveReportsAoiDeltaInsideShard() {
         try (ActorSystem actors = new ActorSystem(1)) {
             LargeSceneShardService service = LargeSceneShardService.create(
@@ -439,6 +733,34 @@ class SceneServiceStrategyTest {
             assertEquals(List.of(10001L), moved.aoi().observerLeave());
             assertEquals(List.of(), service.visiblePlayers(10001L));
             assertEquals(List.of(), service.visiblePlayers(20002L));
+        }
+    }
+
+    @Test
+    void largeSceneMoveBroadcastCanReachCrossShardObservers() {
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(1)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            service.enter(10001L, "world-1", 4, 0);
+            service.enter(20002L, "world-1", 0, 0);
+
+            service.move(20002L, "world-1", 3, 0);
+
+            SceneBroadcastEnvelope envelope = broadcasts.envelopes().getLast();
+            assertEquals(Set.of(10001L), envelope.recipients());
+            assertEquals(SceneBroadcastEventType.PLAYER_MOVED, envelope.event().type());
+            assertEquals(20002L, envelope.event().subjectPlayerId());
+            assertEquals(List.of(10001L), service.visiblePlayers(20002L));
         }
     }
 
@@ -564,6 +886,81 @@ class SceneServiceStrategyTest {
             SceneCombatDamageOutcome outcome = service.applyDamage(10001L, 20002L, 35);
 
             assertEquals(false, outcome.applied());
+            assertEquals(80, service.hitPoints(20002L).orElseThrow());
+            assertEquals(beforeBroadcasts, broadcasts.envelopes().size());
+        }
+    }
+
+    @Test
+    void largeSceneAsyncDamageCanBeSettledByCrossShardTargetMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            ScenePlacement attacker = service.enter(10001L, "world-1", 3, 0);
+            ScenePlacement target = service.enter(20002L, "world-1", 4, 0);
+            service.registerCombatant(10001L, 100);
+            service.registerCombatant(20002L, 80);
+            AtomicReference<SceneCombatDamageOutcome> outcome = new AtomicReference<>();
+
+            service.applyDamageAsync(10001L, 20002L, 35, outcome::set, error -> {
+                throw new AssertionError(error);
+            });
+
+            assertNotEquals(attacker.shardIndex(), target.shardIndex());
+            assertEquals(80, service.hitPoints(20002L).orElseThrow());
+            assertEquals(null, outcome.get());
+
+            executor.runNext();
+
+            assertEquals(true, outcome.get().applied());
+            assertEquals(target.shardIndex(), outcome.get().shardIndex());
+            assertEquals(45, service.hitPoints(20002L).orElseThrow());
+            SceneBroadcastEnvelope damage = broadcasts.envelopes().getLast();
+            assertEquals(Set.of(10001L, 20002L), damage.recipients());
+            assertEquals(SceneBroadcastEventType.COMBAT_DAMAGE, damage.event().type());
+        }
+    }
+
+    @Test
+    void largeSceneAsyncDamageRejectsCrossShardTargetOutsideView() {
+        RecordingExecutor executor = new RecordingExecutor();
+        InMemorySceneBroadcastSink broadcasts = new InMemorySceneBroadcastSink();
+        try (ActorSystem actors = new ActorSystem(executor, 64)) {
+            LargeSceneShardService service = LargeSceneShardService.create(
+                    actors,
+                    "r1",
+                    "scene-large-1",
+                    new ServiceEndpoint("127.0.0.1", 9200),
+                    "world-1",
+                    8,
+                    4,
+                    Clock.systemUTC(),
+                    broadcasts
+            );
+            service.enter(10001L, "world-1", 0, 0);
+            service.enter(20002L, "world-1", 8, 0);
+            service.registerCombatant(10001L, 100);
+            service.registerCombatant(20002L, 80);
+            int beforeBroadcasts = broadcasts.envelopes().size();
+            AtomicReference<SceneCombatDamageOutcome> outcome = new AtomicReference<>();
+
+            service.applyDamageAsync(10001L, 20002L, 35, outcome::set, error -> {
+                throw new AssertionError(error);
+            });
+            executor.runNext();
+
+            assertEquals(false, outcome.get().applied());
             assertEquals(80, service.hitPoints(20002L).orElseThrow());
             assertEquals(beforeBroadcasts, broadcasts.envelopes().size());
         }
@@ -1000,10 +1397,41 @@ class SceneServiceStrategyTest {
             commands.removeFirst().run();
         }
 
+        synchronized void runLast() {
+            commands.removeLast().run();
+        }
+
         void runAll() {
             while (queued() > 0) {
                 runNext();
             }
+        }
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        private MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        private void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
         }
     }
 

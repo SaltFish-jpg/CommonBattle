@@ -30,11 +30,17 @@ import com.commonbattle.game.bag.BagChangeAuditRecord;
 import com.commonbattle.game.bag.InMemoryBagChangeAuditLog;
 import com.commonbattle.game.event.EventGatedCommandAuditRecord;
 import com.commonbattle.game.event.EventGatedCommandBoundary;
+import com.commonbattle.game.event.DeadLetteredEventInboxEntry;
+import com.commonbattle.game.event.DeadLetteredVersionedEvent;
+import com.commonbattle.game.event.EventInboxDeadLetterAdmin;
+import com.commonbattle.game.event.EventInboxKey;
+import com.commonbattle.game.event.EventOutboxDeadLetterAdmin;
 import com.commonbattle.game.event.InMemoryEventGatedCommandAuditLog;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.OwnerEventRepairIsolatedOwner;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
 import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
+import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.player.PlayerBusinessOperations;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.PlayerCommandAuditOutcome;
@@ -65,6 +71,62 @@ class OpsHttpServerTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-02T00:00:00Z"), ZoneOffset.UTC);
 
     @Test
+    void eventDeadLettersCanBeListedAndRedrivenThroughAdminPath() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        RecordingOutboxDeadLetterAdmin outbox = new RecordingOutboxDeadLetterAdmin();
+        RecordingInboxDeadLetterAdmin inbox = new RecordingInboxDeadLetterAdmin();
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors)
+        )) {
+            server.attachEventOutboxDeadLetterAdmin(outbox);
+            server.attachEventInboxDeadLetterAdmin(inbox);
+            server.start();
+
+            HttpResult outboxList = get(server, "/event-dead-letters/outbox");
+            HttpResult inboxList = get(server, "/event-dead-letters/inbox?topic=profile.changed");
+            HttpResult outboxRedrive = post(server,
+                    "/event-dead-letters/outbox/redrive?outboxId=7");
+            HttpResult inboxRedrive = post(server,
+                    "/event-dead-letters/inbox/redrive?topic=profile.changed&ownerKey=profile%3A10001&revision=3");
+            HttpResult audit = get(server, "/event-dead-letters/audit");
+
+            assertEquals(200, outboxList.statusCode());
+            assertTrue(outboxList.body().contains("\"outboxId\":7"));
+            assertTrue(outboxList.body().contains("\"lastFailure\":\"center unavailable\""));
+            assertEquals(200, inboxList.statusCode());
+            assertTrue(inboxList.body().contains("\"ownerKey\":\"profile:10001\""));
+            assertEquals(200, outboxRedrive.statusCode());
+            assertEquals(List.of(7L), outbox.redriven);
+            assertEquals(200, inboxRedrive.statusCode());
+            assertEquals(List.of(new EventInboxKey("profile.changed", "profile:10001", 3)), inbox.redriven);
+            assertEquals(200, audit.statusCode());
+            assertTrue(audit.body().contains("\"action\":\"inbox-redrive\""));
+            assertTrue(audit.body().contains("\"action\":\"outbox-redrive\""));
+        }
+    }
+
+    @Test
+    void eventDeadLetterRedriveValidatesMethodAndIdentity() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        try (OpsHttpServer server = new OpsHttpServer(
+                new InetSocketAddress("127.0.0.1", 0),
+                probe(actors)
+        )) {
+            server.attachEventOutboxDeadLetterAdmin(new RecordingOutboxDeadLetterAdmin());
+            server.attachEventInboxDeadLetterAdmin(new RecordingInboxDeadLetterAdmin());
+            server.start();
+
+            assertEquals(405, get(server,
+                    "/event-dead-letters/outbox/redrive?outboxId=7").statusCode());
+            assertEquals(400, post(server,
+                    "/event-dead-letters/outbox/redrive?outboxId=bad").statusCode());
+            assertEquals(400, post(server,
+                    "/event-dead-letters/inbox/redrive?topic=profile.changed&ownerKey=profile%3A10001").statusCode());
+        }
+    }
+
+    @Test
     void liveReadyAndHealthReturnJsonWhenRuntimeIsUp() throws Exception {
         ActorSystem actors = new ActorSystem(Runnable::run, 64);
         try (OpsHttpServer server = new OpsHttpServer(
@@ -89,9 +151,11 @@ class OpsHttpServerTest {
             assertTrue(health.body().contains("\"networkTransports\""));
             assertTrue(health.body().contains("\"eventCenters\""));
             assertTrue(health.body().contains("\"eventSubscriptions\""));
+            assertTrue(health.body().contains("\"playerMutations\""));
             assertEquals(200, metrics.statusCode());
             assertTrue(metrics.contentType().startsWith("text/plain"));
             assertTrue(metrics.body().contains("commonbattle_runtime_status{status=\"UP\"} 1"));
+            assertTrue(metrics.body().contains("commonbattle_player_mutation_pending_events 0"));
             assertTrue(metrics.body().contains("commonbattle_actor_queued_tasks 0"));
             assertTrue(metrics.body().contains("commonbattle_rpc_pending_requests 0"));
             assertTrue(metrics.body().contains("commonbattle_network_connection_failures_total 0"));
@@ -251,6 +315,82 @@ class OpsHttpServerTest {
             assertEquals(200, releaseAll.statusCode());
             assertEquals("{\"released\":2}", releaseAll.body());
             assertEquals("{\"owners\":[]}", listAfterRelease.body());
+        }
+    }
+
+    @Test
+    void pendingPlayerMutationsCanBeQueriedThroughAdminPath() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        com.commonbattle.game.player.SerializedPlayerMutationRepository mutations =
+                new com.commonbattle.game.player.SerializedPlayerMutationRepository(
+                        new com.commonbattle.persistence.InMemoryAtomicBytesStore(),
+                        new com.commonbattle.game.player.InMemoryPlayerStateRepository(),
+                        new com.commonbattle.game.player.ProtostuffPlayerStateSnapshotSerializer()
+                );
+        long playerId = 10001L;
+        com.commonbattle.game.player.PlayerStateSnapshot snapshot =
+                new com.commonbattle.game.player.PlayerProfile(playerId, CLOCK.instant())
+                        .snapshot(1, 1, CLOCK.instant())
+                        .withCommandSequencer(
+                                com.commonbattle.game.session.PlayerCommandSequencerSnapshot.empty(playerId));
+        mutations.commit(snapshot, List.of(new com.commonbattle.game.player.event.PlayerDomainVersionedEvent(
+                playerId, "bag.changed", "gold", 1, 1, CLOCK.instant()
+        )));
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(mutations);
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                new AgentLifecycleManager(local, actors, new InMemoryAgentDirectory(), CLOCK),
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
+                RuntimeHealthPolicy.defaults()
+        );
+        try (OpsHttpServer server = new OpsHttpServer(new InetSocketAddress("127.0.0.1", 0), probe)) {
+            server.start();
+
+            HttpResult response = get(server, "/player-mutations/pending?limit=10");
+            HttpResult health = get(server, "/health");
+
+            assertEquals(200, response.statusCode());
+            assertTrue(response.body().contains("\"playerId\":10001"));
+            assertTrue(response.body().contains("\"eventTypes\":[\"bag.changed\"]"));
+            assertTrue(health.body().contains("\"status\":\"DEGRADED\""));
+            assertTrue(health.body().contains("\"code\":\"events_not_handed_to_outbox\""));
+        }
+    }
+
+    @Test
+    void agentLifecycleEndpointFiltersFencedOwners() throws Exception {
+        ActorSystem actors = new ActorSystem(Runnable::run, 64);
+        InMemoryAgentDirectory directory = new InMemoryAgentDirectory();
+        ServiceId local = ServiceId.of(ServiceKind.GAME, "r1", "game-1");
+        AgentLifecycleManager lifecycles = new AgentLifecycleManager(local, actors, directory, CLOCK);
+        var player = com.commonbattle.actor.agent.AgentIdentity.player(10001L);
+        var location = lifecycles.activate(player, "player-10001");
+        actors.send(location.actorRef(), ignored -> lifecycles.fenceCurrent(player, location.actorRef()));
+        RuntimeHealthProbe probe = new RuntimeHealthProbe(
+                CLOCK,
+                actors,
+                lifecycles,
+                new InMemoryVersionedEventOutbox(CLOCK),
+                new ClusterDirectory(new InMemoryServiceRegistry()),
+                new RuntimeHealthRegistry(),
+                RuntimeHealthPolicy.defaults()
+        );
+
+        try (OpsHttpServer server = new OpsHttpServer(new InetSocketAddress("127.0.0.1", 0), probe)) {
+            server.start();
+
+            HttpResult response = get(server, "/agent-lifecycles?state=fenced&limit=10");
+
+            assertEquals(200, response.statusCode());
+            assertTrue(response.body().contains("\"key\":\"10001\""));
+            assertTrue(response.body().contains("\"actorId\":\"player-10001\""));
+            assertTrue(response.body().contains("\"state\":\"FENCED\""));
+            assertTrue(response.body().contains("\"count\":1"));
         }
     }
 
@@ -1418,5 +1558,74 @@ class OpsHttpServerTest {
             requests.add(List.copyOf(ownerKeys));
             priorities.add(priority);
         }
+    }
+
+    private static final class RecordingOutboxDeadLetterAdmin implements EventOutboxDeadLetterAdmin {
+        private final List<Long> redriven = new ArrayList<>();
+
+        @Override
+        public String target() {
+            return "event-outbox";
+        }
+
+        @Override
+        public List<DeadLetteredVersionedEvent> outboxDeadLetters() {
+            return List.of(new DeadLetteredVersionedEvent(
+                    7,
+                    new TestVersionedEvent("profile.changed", "profile:10001", 3),
+                    CLOCK.instant().minusSeconds(10),
+                    5,
+                    CLOCK.instant(),
+                    "center unavailable"
+            ));
+        }
+
+        @Override
+        public boolean redriveOutboxDeadLetter(long outboxId) {
+            if (outboxId != 7) {
+                return false;
+            }
+            redriven.add(outboxId);
+            return true;
+        }
+    }
+
+    private static final class RecordingInboxDeadLetterAdmin implements EventInboxDeadLetterAdmin {
+        private final List<EventInboxKey> redriven = new ArrayList<>();
+
+        @Override
+        public String target() {
+            return "profile-events";
+        }
+
+        @Override
+        public String topic() {
+            return "profile.changed";
+        }
+
+        @Override
+        public List<DeadLetteredEventInboxEntry> inboxDeadLetters() {
+            EventInboxKey key = new EventInboxKey(topic(), "profile:10001", 3);
+            return List.of(new DeadLetteredEventInboxEntry(
+                    key,
+                    new TestVersionedEvent(key.topic(), key.ownerKey(), key.revision()),
+                    CLOCK.instant().minusSeconds(10),
+                    5,
+                    CLOCK.instant(),
+                    "handler failed"
+            ));
+        }
+
+        @Override
+        public boolean redriveInboxDeadLetter(EventInboxKey key) {
+            if (!inboxDeadLetters().getFirst().key().equals(key)) {
+                return false;
+            }
+            redriven.add(key);
+            return true;
+        }
+    }
+
+    private record TestVersionedEvent(String topic, String ownerKey, long revision) implements VersionedEvent {
     }
 }

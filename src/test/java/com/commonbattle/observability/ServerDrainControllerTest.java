@@ -15,12 +15,17 @@ import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.config.GameConfigPublishStatus;
 import com.commonbattle.game.config.GameConfigValidator;
 import com.commonbattle.game.config.InMemoryGameConfigRegistry;
+import com.commonbattle.game.chat.ChatPersistenceStats;
+import com.commonbattle.game.chat.ChatRuntimeView;
+import com.commonbattle.game.chat.ChatServiceStats;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.player.InMemoryPlayerStateRepository;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerGameAgentManager;
 import com.commonbattle.game.player.PlayerStateRepository;
 import com.commonbattle.game.player.PlayerStateSnapshot;
+import com.commonbattle.game.player.NettyPlayerGatewayStats;
+import com.commonbattle.game.player.PlayerGatewayView;
 import com.commonbattle.game.profile.AllianceBrief;
 import com.commonbattle.game.profile.AppearanceSummary;
 import com.commonbattle.game.profile.FriendBrief;
@@ -41,7 +46,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -153,6 +162,177 @@ class ServerDrainControllerTest {
     }
 
     @Test
+    void waitsForRunningMailboxTaskEvenWhenQueueIsEmpty() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        try (ActorSystem actors = new ActorSystem(1)) {
+            actors.send(actors.actor("busy"), ignored -> {
+                started.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    completed.countDown();
+                }
+            });
+            assertTrue(started.await(1, TimeUnit.SECONDS));
+            ServerDrainController controller = new ServerDrainController(
+                    probe(clock, new InMemoryVersionedEventOutbox(clock), actors, new RuntimeHealthRegistry()),
+                    clock,
+                    duration -> {
+                        clock.advance(duration);
+                        release.countDown();
+                        assertTrue(completed.await(1, TimeUnit.SECONDS));
+                    }
+            );
+
+            DrainResult result = controller.awaitDrained(
+                    new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10))
+            );
+
+            assertTrue(result.drained());
+            assertTrue(result.elapsed().toMillis() >= 10);
+            assertEquals(0, result.lastSnapshot().actorSystem().runningMailboxes());
+        }
+    }
+
+    @Test
+    void waitsUntilRemoteCallbackCompletesOnRequesterMailbox() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        CapturingRpcGateway rpc = new CapturingRpcGateway();
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(actors, rpc);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register(port);
+        AtomicBoolean callbackExecuted = new AtomicBoolean();
+        port.callRemote(
+                actors.actor("requester"),
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                new com.commonbattle.actor.message.RemoteActorCallback<>() {
+                    @Override
+                    public void success(com.commonbattle.actor.ActorContext context, String response) {
+                        callbackExecuted.set(true);
+                    }
+
+                    @Override
+                    public void failure(
+                            com.commonbattle.actor.ActorContext context,
+                            com.commonbattle.actor.message.AgentDeliveryResult delivery,
+                            Throwable error
+                    ) {
+                        throw new AssertionError(error);
+                    }
+                }
+        );
+        AtomicInteger polls = new AtomicInteger();
+        ServerDrainController controller = new ServerDrainController(
+                probe(clock, new InMemoryVersionedEventOutbox(clock), actors, registry),
+                clock,
+                duration -> {
+                    clock.advance(duration);
+                    if (polls.getAndIncrement() == 0) {
+                        rpc.success("entered");
+                    } else {
+                        executor.runAll();
+                    }
+                }
+        );
+
+        DrainResult result = controller.awaitDrained(
+                new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10))
+        );
+
+        assertTrue(result.drained());
+        assertTrue(callbackExecuted.get());
+        assertEquals(20, result.elapsed().toMillis());
+        assertEquals(0, result.lastSnapshot().agentMessagePorts().currentInFlightRemoteCalls());
+        port.close();
+    }
+
+    @Test
+    void waitsUntilPlayerGatewayFlushesOutboundWrites() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        AtomicLong inFlightWrites = new AtomicLong(1);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register((PlayerGatewayView) () -> gatewayStats(inFlightWrites.get()));
+        ServerDrainController controller = new ServerDrainController(
+                probe(clock, new InMemoryVersionedEventOutbox(clock),
+                        new ActorSystem(new InlineExecutor(), 64), registry),
+                clock,
+                duration -> {
+                    clock.advance(duration);
+                    inFlightWrites.set(0);
+                }
+        );
+
+        DrainResult result = controller.awaitDrained(
+                new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10))
+        );
+
+        assertTrue(result.drained());
+        assertEquals(10, result.elapsed().toMillis());
+        assertEquals(0, result.lastSnapshot().playerGateways().inFlightWrites());
+    }
+
+    @Test
+    void waitsUntilChatPersistenceFinishesInFlightSaveAndPendingCommands() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        AtomicLong savingAgents = new AtomicLong(1);
+        AtomicLong pendingCommands = new AtomicLong(2);
+        RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
+        registry.register((ChatRuntimeView) () -> ChatServiceStats.empty().withPersistenceStats(
+                new ChatPersistenceStats(
+                        1, 0, savingAgents.get(), 0, pendingCommands.get(),
+                        1, 0, 0, 0, 0, 0, 0
+                )
+        ));
+        ServerDrainController controller = new ServerDrainController(
+                probe(clock, new InMemoryVersionedEventOutbox(clock),
+                        new ActorSystem(new InlineExecutor(), 64), registry),
+                clock,
+                duration -> {
+                    clock.advance(duration);
+                    savingAgents.set(0);
+                    pendingCommands.set(0);
+                }
+        );
+
+        DrainResult result = controller.awaitDrained(
+                new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10))
+        );
+
+        assertTrue(result.drained());
+        assertEquals(10, result.elapsed().toMillis());
+        assertEquals(0, result.lastSnapshot().chatRuntimes().persistence().inFlightAgents());
+        assertEquals(0, result.lastSnapshot().chatRuntimes().persistence().pendingCommands());
+    }
+
+    @Test
+    void pollsDrainableComponentsBetweenHealthSnapshots() throws InterruptedException {
+        MutableClock clock = new MutableClock();
+        InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(clock);
+        outbox.append(profileEvent(clock));
+        PollingDrainable drainable = new PollingDrainable(outbox);
+        ServerDrainController controller = new ServerDrainController(
+                probe(clock, outbox),
+                clock,
+                duration -> clock.advance(duration),
+                List.of(drainable)
+        );
+
+        DrainResult result = controller.awaitDrained(new DrainConfig(Duration.ofSeconds(1), Duration.ofMillis(10)));
+
+        assertTrue(result.drained());
+        assertEquals(10, result.elapsed().toMillis());
+        assertEquals(1, drainable.polls);
+    }
+
+
+    @Test
     void returnsTimeoutWhenRuntimeNeverDrains() throws InterruptedException {
         MutableClock clock = new MutableClock();
         InMemoryVersionedEventOutbox outbox = new InMemoryVersionedEventOutbox(clock);
@@ -225,6 +405,15 @@ class ServerDrainControllerTest {
 
     private static RuntimeHealthProbe probe(Clock clock, InMemoryVersionedEventOutbox outbox) {
         ActorSystem actors = new ActorSystem(new InlineExecutor(), 64);
+        return probe(clock, outbox, actors, new RuntimeHealthRegistry());
+    }
+
+    private static RuntimeHealthProbe probe(
+            Clock clock,
+            InMemoryVersionedEventOutbox outbox,
+            ActorSystem actors,
+            RuntimeHealthRegistry registry
+    ) {
         return new RuntimeHealthProbe(
                 clock,
                 actors,
@@ -236,6 +425,7 @@ class ServerDrainControllerTest {
                 ),
                 outbox,
                 new ClusterDirectory(new InMemoryServiceRegistry()),
+                registry,
                 RuntimeHealthPolicy.defaults()
         );
     }
@@ -404,6 +594,42 @@ class ServerDrainControllerTest {
         }
     }
 
+    private static NettyPlayerGatewayStats gatewayStats(long inFlightWrites) {
+        return new NettyPlayerGatewayStats(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                inFlightWrites,
+                Map.of()
+        );
+    }
+
+    private static final class PollingDrainable implements DrainableComponent {
+        private final InMemoryVersionedEventOutbox outbox;
+        private int polls;
+
+        private PollingDrainable(InMemoryVersionedEventOutbox outbox) {
+            this.outbox = outbox;
+        }
+
+        @Override
+        public void beginDrain() {
+        }
+
+        @Override
+        public void onDrainPoll() {
+            polls++;
+            outbox.markPublished(1);
+        }
+
+        @Override
+        public void resumeAccepting() {
+        }
+
+        @Override
+        public boolean isDraining() {
+            return true;
+        }
+    }
+
     private static final class FailingDrainable implements DrainableComponent {
         @Override
         public void beginDrain() {
@@ -423,6 +649,20 @@ class ServerDrainControllerTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class CapturingRpcGateway implements RpcGateway {
+        private RpcCallback<Object> callback;
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            this.callback = (RpcCallback<Object>) callback;
+        }
+
+        private void success(Object response) {
+            callback.success(response);
         }
     }
 

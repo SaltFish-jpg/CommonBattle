@@ -17,10 +17,11 @@ public record AsyncShopPurchaseStats(
         long rejectedPurchases,
         long abandonedPendingCommands,
         long releasedReservations,
-        long releaseFailures
+        long releaseFailures,
+        long callbackDeliveryFailures
 ) {
     public static AsyncShopPurchaseStats empty() {
-        return new AsyncShopPurchaseStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new AsyncShopPurchaseStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public AsyncShopPurchaseStats plus(AsyncShopPurchaseStats other) {
@@ -37,7 +38,8 @@ public record AsyncShopPurchaseStats(
                 rejectedPurchases + other.rejectedPurchases,
                 abandonedPendingCommands + other.abandonedPendingCommands,
                 releasedReservations + other.releasedReservations,
-                releaseFailures + other.releaseFailures
+                releaseFailures + other.releaseFailures,
+                callbackDeliveryFailures + other.callbackDeliveryFailures
         );
     }
 }

@@ -35,10 +35,13 @@ public final class RegionServerMain {
             PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
-                    codecs
+                    codecs,
+                    config.nettyTransportConfig()
             ));
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
-                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport,
+                            true, config.rpcGovernanceConfig(),
+                            BootRpcIdempotencyStore.configure(config, codecs, Clock.systemUTC())));
             RemoteServiceRegistry registry = new RemoteServiceRegistry(
                     local.id(),
                     gateway,
@@ -53,11 +56,14 @@ public final class RegionServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime));
             System.out.println("Region server started: " + local.id().wireName()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
             new CountDownLatch(1).await();
         } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        } catch (Error e) {
             runtime.closeSuppressing(e);
             throw e;
         }

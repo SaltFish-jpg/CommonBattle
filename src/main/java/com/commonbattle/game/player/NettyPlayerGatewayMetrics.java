@@ -111,6 +111,10 @@ final class NettyPlayerGatewayMetrics {
     }
 
     NettyPlayerGatewayStats snapshot() {
+        return snapshot(0);
+    }
+
+    NettyPlayerGatewayStats snapshot(long inFlightWrites) {
         return new NettyPlayerGatewayStats(
                 acceptedLogins.get(),
                 failedLogins.get(),
@@ -129,6 +133,7 @@ final class NettyPlayerGatewayMetrics {
                 invalidFrames.get(),
                 disconnectedSessions.get(),
                 idleTimeouts.get(),
+                inFlightWrites,
                 rejectedCommandsByCode()
         );
     }

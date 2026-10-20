@@ -28,12 +28,12 @@ class PlayerGatewayHealthStatsTest {
     void snapshotFormatsPlayerGatewayStats() {
         RuntimeHealthRegistry registry = new RuntimeHealthRegistry();
         PlayerGatewayView first = () -> new NettyPlayerGatewayStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                13, 14, 15, 16, 17, Map.of(
+                13, 14, 15, 16, 17, 18, Map.of(
                 PlayerClientErrorCode.NOT_LOGGED_IN, 2L,
                 PlayerClientErrorCode.SESSION_EXPIRED, 5L
         ));
         PlayerGatewayView second = () -> new NettyPlayerGatewayStats(14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
-                2, 1, 1, 1, 1, Map.of(
+                2, 1, 1, 1, 1, 19, Map.of(
                 PlayerClientErrorCode.NOT_LOGGED_IN, 3L,
                 PlayerClientErrorCode.COMMAND_RATE_LIMITED, 7L
         ));
@@ -76,6 +76,7 @@ class PlayerGatewayHealthStatsTest {
         assertEquals(16, snapshot.playerGateways().invalidFrames());
         assertEquals(17, snapshot.playerGateways().disconnectedSessions());
         assertEquals(18, snapshot.playerGateways().idleTimeouts());
+        assertEquals(37, snapshot.playerGateways().inFlightWrites());
         assertEquals(5, snapshot.playerGateways().rejectedCommandsByCode()
                 .get(PlayerClientErrorCode.NOT_LOGGED_IN));
         assertEquals(5, snapshot.playerGateways().rejectedCommandsByCode()
@@ -84,10 +85,12 @@ class PlayerGatewayHealthStatsTest {
                 .get(PlayerClientErrorCode.COMMAND_RATE_LIMITED));
         assertTrue(json.contains("\"playerGateways\":{\"gatewayCount\":2,\"acceptedLogins\":15"));
         assertTrue(json.contains("\"rejectedCommandsByCode\""));
+        assertTrue(json.contains("\"inFlightWrites\":37"));
         assertTrue(metrics.contains("commonbattle_player_gateway_accepted_logins_total 15"));
         assertTrue(metrics.contains(
                 "commonbattle_player_gateway_rejected_commands_by_code_total{code=\"NOT_LOGGED_IN\"} 5"));
         assertTrue(metrics.contains("commonbattle_player_gateway_slow_client_closures_total 15"));
         assertTrue(metrics.contains("commonbattle_player_gateway_idle_timeouts_total 18"));
+        assertTrue(metrics.contains("commonbattle_player_gateway_in_flight_writes 37"));
     }
 }

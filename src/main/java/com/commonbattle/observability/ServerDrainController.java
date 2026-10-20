@@ -59,6 +59,7 @@ public final class ServerDrainController {
                 return new DrainResult(false, Duration.ofMillis(elapsed), snapshot);
             }
             sleeper.sleep(config.pollInterval());
+            pollDrainables();
             snapshot = probe.snapshot();
         }
         return new DrainResult(true, Duration.ofMillis(clock.millis() - start), snapshot);
@@ -70,12 +71,22 @@ public final class ServerDrainController {
                 .forEach(DrainableComponent::beginDrain);
     }
 
+    private void pollDrainables() {
+        drainableComponents.forEach(DrainableComponent::onDrainPoll);
+    }
+
     private boolean drained(RuntimeHealthSnapshot snapshot) {
         return snapshot.actorSystem().queuedTasks() == 0
+                && snapshot.actorSystem().runningMailboxes() == 0
                 && snapshot.rpc().pendingRequests() == 0
+                && snapshot.agentMessagePorts().currentInFlightRemoteCalls() == 0
+                && snapshot.networkTransports().inFlightWrites() == 0
+                && snapshot.playerGateways().inFlightWrites() == 0
                 && snapshot.outbox().pendingEvents() == 0
                 && snapshot.playerAgents().drainPending() == 0
-                && snapshot.playerAgents().drainFailedSaves() == 0;
+                && snapshot.playerAgents().drainFailedSaves() == 0
+                && snapshot.chatRuntimes().persistence().inFlightAgents() == 0
+                && snapshot.chatRuntimes().persistence().pendingCommands() == 0;
     }
 
     /**

@@ -38,6 +38,7 @@ public final class PlayerAutoSaveScheduler implements AutoCloseable {
     private final AtomicLong completed = new AtomicLong();
     private final AtomicLong failedRuns = new AtomicLong();
     private final AtomicLong failedSaves = new AtomicLong();
+    private final AtomicLong pendingAsyncBlockedSaves = new AtomicLong();
     private volatile ScheduledFuture<?> future;
     private volatile ActorTimerHandle actorTimer;
 
@@ -148,6 +149,9 @@ public final class PlayerAutoSaveScheduler implements AutoCloseable {
                 @Override
                 public void failed(long playerId, RuntimeException error) {
                     failedSaves.incrementAndGet();
+                    if (error instanceof PendingAsyncPlayerCommandException) {
+                        pendingAsyncBlockedSaves.incrementAndGet();
+                    }
                 }
             });
             submitted.addAndGet(count);
@@ -159,7 +163,14 @@ public final class PlayerAutoSaveScheduler implements AutoCloseable {
     }
 
     public PlayerAutoSaveStats stats() {
-        return new PlayerAutoSaveStats(runs.get(), submitted.get(), completed.get(), failedRuns.get(), failedSaves.get());
+        return new PlayerAutoSaveStats(
+                runs.get(),
+                submitted.get(),
+                completed.get(),
+                failedRuns.get(),
+                failedSaves.get(),
+                pendingAsyncBlockedSaves.get()
+        );
     }
 
     private void runOnceSafely() {

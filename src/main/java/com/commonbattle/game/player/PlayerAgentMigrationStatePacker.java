@@ -5,6 +5,7 @@ import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.actor.agent.migration.AgentMigrationSnapshot;
 import com.commonbattle.actor.agent.migration.AgentMigrationStatePacker;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.game.session.PlayerCommandSequencer;
 
 import java.util.Objects;
@@ -15,10 +16,13 @@ import java.util.Objects;
  */
 public final class PlayerAgentMigrationStatePacker implements AgentMigrationStatePacker {
     public static final String STATE_TYPE = "commonbattle.player.state.v1";
+    public static final String RUNTIME_STATE_TYPE = "commonbattle.player.runtime-state.v2";
 
     private final PlayerGameAgentManager agents;
     private final PlayerStateSnapshotSerializer serializer;
     private final PlayerCommandSequencer commandSequencer;
+    private final PlayerBusinessResponseHub businessResponses;
+    private final PlayerAgentMigrationPayloadCodec migrationCodec;
 
     public PlayerAgentMigrationStatePacker(
             PlayerGameAgentManager agents,
@@ -32,9 +36,26 @@ public final class PlayerAgentMigrationStatePacker implements AgentMigrationStat
             PlayerStateSnapshotSerializer serializer,
             PlayerCommandSequencer commandSequencer
     ) {
+        this(agents, serializer, commandSequencer, null, null);
+    }
+
+    public PlayerAgentMigrationStatePacker(
+            PlayerGameAgentManager agents,
+            PlayerStateSnapshotSerializer serializer,
+            PlayerCommandSequencer commandSequencer,
+            PlayerBusinessResponseHub businessResponses,
+            PayloadCodecRegistry payloadCodecs
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.commandSequencer = commandSequencer;
+        this.businessResponses = businessResponses;
+        this.migrationCodec = payloadCodecs == null
+                ? null
+                : new PlayerAgentMigrationPayloadCodec(serializer, payloadCodecs);
+        if ((businessResponses == null) != (payloadCodecs == null)) {
+            throw new IllegalArgumentException("businessResponses and payloadCodecs must be configured together");
+        }
     }
 
     @Override
@@ -48,6 +69,17 @@ public final class PlayerAgentMigrationStatePacker implements AgentMigrationStat
         PlayerStateSnapshot snapshot = agent.exportForMigrationInCurrentMailbox();
         if (commandSequencer != null) {
             snapshot = snapshot.withCommandSequencer(commandSequencer.snapshotForPlayer(playerId));
+        }
+        if (businessResponses != null) {
+            int pending = businessResponses.pendingResponses(playerId);
+            if (pending > 0) {
+                throw new PendingPlayerBusinessResponseException(playerId, pending);
+            }
+            PlayerAgentMigrationPayload payload = new PlayerAgentMigrationPayload(
+                    snapshot,
+                    businessResponses.snapshotForPlayer(playerId)
+            );
+            return new AgentMigrationSnapshot(RUNTIME_STATE_TYPE, migrationCodec.encode(payload));
         }
         return new AgentMigrationSnapshot(STATE_TYPE, serializer.serialize(snapshot));
     }

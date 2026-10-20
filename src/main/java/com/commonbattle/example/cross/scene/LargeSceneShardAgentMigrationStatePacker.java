@@ -28,10 +28,7 @@ public final class LargeSceneShardAgentMigrationStatePacker implements AgentMigr
 
     @Override
     public AgentMigrationSnapshot pack(AgentIdentity identity, AgentLocation target, ActorContext context) {
-        if (!AgentIdentity.SCENE.equals(identity.type())) {
-            throw new IllegalArgumentException("unsupported migration identity: " + identity.type());
-        }
-        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(identity.key());
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(identity);
         LargeSceneShardAgentSnapshot snapshot = scenes.exportShardForMigrationInCurrentMailbox(key.shardIndex());
         if (!snapshot.sceneId().equals(key.sceneId())) {
             throw new IllegalArgumentException("large scene shard identity mismatch");

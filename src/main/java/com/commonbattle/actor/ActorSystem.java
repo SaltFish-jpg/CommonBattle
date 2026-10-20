@@ -105,8 +105,47 @@ public final class ActorSystem implements AutoCloseable {
 
     public ActorRef actor(String id) {
         ActorRef ref = new ActorRef(id);
-        mailboxes.computeIfAbsent(ref, ActorMailbox::new);
+        ActorMailbox mailbox = mailboxes.computeIfAbsent(ref, ActorMailbox::new);
+        if (mailbox.retirementRequested()) {
+            throw new IllegalStateException("actor mailbox is retiring: " + id);
+        }
         return ref;
+    }
+
+    /**
+     * 在当前 Actor 邮箱任务内请求安全退休；当前 drain 结束后邮箱才会从系统移除。
+     */
+    public boolean retireCurrent(ActorRef actor) {
+        Objects.requireNonNull(actor, "actor");
+        ActorContext.requireCurrent(actor);
+        ActorMailbox mailbox = mailboxes.get(actor);
+        if (mailbox == null || !mailbox.requestRetirement()) {
+            return false;
+        }
+        mailbox.markRetired();
+        return true;
+    }
+
+    /**
+     * 从邮箱外请求安全退休；退休标记作为 SYSTEM 消息排在已接受任务之后执行。
+     */
+    public boolean retire(ActorRef actor) {
+        Objects.requireNonNull(actor, "actor");
+        ActorMailbox mailbox = mailboxes.get(actor);
+        if (mailbox == null || !mailbox.requestRetirement()) {
+            return false;
+        }
+        if (mailbox.tryRetireIdle()) {
+            if (mailboxes.remove(actor, mailbox)) {
+                metrics.mailboxRetired();
+            }
+            mailbox.markIdle();
+            return true;
+        }
+        mailbox.enqueue(ActorTask.categorized(ActorTaskCategory.SYSTEM, ignored -> mailbox.markRetired()));
+        metrics.taskSubmitted();
+        schedule(mailbox);
+        return true;
     }
 
     public void send(ActorRef target, ActorTask task) {
@@ -160,7 +199,8 @@ public final class ActorSystem implements AutoCloseable {
                 queuedByCategory.merge(entry.getKey(), entry.getValue(), Integer::sum);
             }
         }
-        return metrics.snapshot(activeMailboxes, largestMailboxQueuedTasks, largestMailboxActorId, queuedByCategory);
+        return metrics.snapshot(mailboxes.size(), activeMailboxes, largestMailboxQueuedTasks,
+                largestMailboxActorId, queuedByCategory);
     }
 
     /**
@@ -168,7 +208,7 @@ public final class ActorSystem implements AutoCloseable {
      */
     public List<ActorMailboxStats> queuedMailboxStats() {
         return mailboxes.values().stream()
-                .map(mailbox -> new ActorMailboxStats(mailbox.ref(), mailbox.size(), mailbox.categorySizes()))
+                .map(ActorMailbox::stats)
                 .filter(stats -> stats.queuedTasks() > 0)
                 .sorted(Comparator.comparingInt(ActorMailboxStats::queuedTasks)
                         .reversed()
@@ -186,9 +226,23 @@ public final class ActorSystem implements AutoCloseable {
             try {
                 executor.execute(() -> drain(mailbox));
             } catch (RejectedExecutionException ignored) {
+                metrics.schedulerRejectedMailbox();
+                rejectQueuedAfterSchedulerFailure(mailbox);
                 mailbox.markIdle();
                 metrics.mailboxIdle();
+                if (accepting.get() && mailbox.hasTasks()) {
+                    schedule(mailbox);
+                }
             }
+        }
+    }
+
+    private void rejectQueuedAfterSchedulerFailure(ActorMailbox mailbox) {
+        ActorTask rejected;
+        while ((rejected = mailbox.poll()) != null) {
+            metrics.taskPolled();
+            metrics.schedulerRejectedTask();
+            reject(mailbox.ref(), rejected, DeadLetterReason.SCHEDULER_REJECTED);
         }
     }
 
@@ -201,14 +255,34 @@ public final class ActorSystem implements AutoCloseable {
                 metrics.taskPolled();
                 runTask(mailbox.ref(), task, context);
                 processed++;
+                if (mailbox.retired()) {
+                    rejectRetiredQueuedTasks(mailbox);
+                    break;
+                }
             }
         } finally {
             // 邮箱调度边界：先释放 RUNNING 标记，再检查是否有新消息，防止回调线程漏调度。
+            boolean yieldedByBatch = accepting.get() && processed >= batchSize && mailbox.hasTasks();
+            mailbox.recordDrain(processed, yieldedByBatch);
+            metrics.mailboxDrained(processed, yieldedByBatch);
             mailbox.markIdle();
             metrics.mailboxIdle();
-            if (accepting.get() && mailbox.hasTasks()) {
+            if (mailbox.retired() && !mailbox.hasTasks()) {
+                if (mailboxes.remove(mailbox.ref(), mailbox)) {
+                    metrics.mailboxRetired();
+                }
+            } else if (accepting.get() && mailbox.hasTasks()) {
                 schedule(mailbox);
             }
+        }
+    }
+
+    private void rejectRetiredQueuedTasks(ActorMailbox mailbox) {
+        ActorTask rejected;
+        while ((rejected = mailbox.poll()) != null) {
+            metrics.taskPolled();
+            metrics.retiredQueuedTask();
+            reject(mailbox.ref(), rejected, DeadLetterReason.ACTOR_RETIRED);
         }
     }
 
@@ -278,11 +352,25 @@ public final class ActorSystem implements AutoCloseable {
 
     @Override
     public void close() {
-        accepting.set(false);
+        if (!accepting.compareAndSet(true, false)) {
+            return;
+        }
         try {
             closeHook.close();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to close actor system", e);
+        } finally {
+            rejectQueuedOnClose();
+        }
+    }
+
+    private void rejectQueuedOnClose() {
+        for (ActorMailbox mailbox : mailboxes.values()) {
+            ActorTask rejected;
+            while ((rejected = mailbox.poll()) != null) {
+                metrics.taskPolled();
+                reject(mailbox.ref(), rejected, DeadLetterReason.SYSTEM_CLOSED);
+            }
         }
     }
 

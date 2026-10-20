@@ -5,5 +5,6 @@ package com.commonbattle.cluster.boot;
  */
 enum PlayerStateStoreKind {
     MEMORY,
-    FILE
+    FILE,
+    JDBC
 }

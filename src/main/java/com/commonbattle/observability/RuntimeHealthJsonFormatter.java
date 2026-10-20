@@ -4,6 +4,7 @@ import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.game.player.AsyncBusinessCommandOperationStats;
 import com.commonbattle.game.session.PlayerClientErrorCode;
 import com.commonbattle.game.session.PlayerOutboundTopicDeliveryStats;
 import com.commonbattle.game.session.PlayerCommandStatus;
@@ -37,6 +38,7 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "rpcResilience", rpcResilience(snapshot)).append(',');
         object(json, "rpcRoutes", rpcRoutes(snapshot)).append(',');
         object(json, "actorRpc", actorRpc(snapshot)).append(',');
+        object(json, "agentMessagePorts", agentMessagePorts(snapshot)).append(',');
         object(json, "businessAgentMessages", businessAgentMessages(snapshot)).append(',');
         object(json, "businessAgentRpcEndpoints", businessAgentRpcEndpoints(snapshot)).append(',');
         object(json, "commands", commands(snapshot)).append(',');
@@ -46,14 +48,17 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "playerOutboundDeliveries", playerOutboundDeliveries(snapshot)).append(',');
         object(json, "playerGateways", playerGateways(snapshot)).append(',');
         object(json, "asyncShopPurchases", asyncShopPurchases(snapshot)).append(',');
+        object(json, "asyncBusinessCommands", asyncBusinessCommands(snapshot)).append(',');
         object(json, "agents", agents(snapshot)).append(',');
         object(json, "playerAgents", playerAgents(snapshot)).append(',');
         object(json, "agentMigrations", agentMigrations(snapshot)).append(',');
+        object(json, "playerAgentMigrationRetries", playerAgentMigrationRetries(snapshot)).append(',');
         object(json, "agentMigrationExecutors", agentMigrationExecutors(snapshot)).append(',');
         object(json, "agentMigrationRecoveries", agentMigrationRecoveries(snapshot)).append(',');
         object(json, "agentMigrationRecoverySchedulers", agentMigrationRecoverySchedulers(snapshot)).append(',');
         object(json, "agentMigrationTaskRetentions", agentMigrationTaskRetentions(snapshot)).append(',');
         object(json, "agentMigrationTaskStores", agentMigrationTaskStores(snapshot)).append(',');
+        object(json, "playerMutations", playerMutations(snapshot)).append(',');
         object(json, "outbox", outbox(snapshot)).append(',');
         object(json, "cluster", cluster(snapshot)).append(',');
         object(json, "registryLeases", registryLeases(snapshot)).append(',');
@@ -113,6 +118,7 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "droppedTasks", snapshot.actorSystem().droppedTasks()).append(',');
         number(json, "queuedTasks", snapshot.actorSystem().queuedTasks()).append(',');
         number(json, "runningMailboxes", snapshot.actorSystem().runningMailboxes()).append(',');
+        number(json, "registeredMailboxes", snapshot.actorSystem().registeredMailboxes()).append(',');
         number(json, "activeMailboxes", snapshot.actorSystem().activeMailboxes()).append(',');
         number(json, "largestMailboxQueuedTasks", snapshot.actorSystem().largestMailboxQueuedTasks()).append(',');
         field(json, "largestMailboxActorId", snapshot.actorSystem().largestMailboxActorId()).append(',');
@@ -122,6 +128,14 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "slowestTaskMillis", snapshot.actorSystem().slowestTaskMillis()).append(',');
         field(json, "slowestTaskActorId", snapshot.actorSystem().slowestTaskActorId()).append(',');
         field(json, "slowestTaskCategory", snapshot.actorSystem().slowestTaskCategory().name()).append(',');
+        number(json, "mailboxDrainCycles", snapshot.actorSystem().mailboxDrainCycles()).append(',');
+        number(json, "mailboxDrainProcessedTasks", snapshot.actorSystem().mailboxDrainProcessedTasks()).append(',');
+        number(json, "maxTasksPerMailboxDrain", snapshot.actorSystem().maxTasksPerMailboxDrain()).append(',');
+        number(json, "mailboxBatchYields", snapshot.actorSystem().mailboxBatchYields()).append(',');
+        number(json, "schedulerRejectedMailboxes", snapshot.actorSystem().schedulerRejectedMailboxes()).append(',');
+        number(json, "schedulerRejectedTasks", snapshot.actorSystem().schedulerRejectedTasks()).append(',');
+        number(json, "retiredMailboxes", snapshot.actorSystem().retiredMailboxes()).append(',');
+        number(json, "retiredQueuedTasks", snapshot.actorSystem().retiredQueuedTasks()).append(',');
         object(json, "queuedTasksByCategory", enumMap(snapshot.actorSystem().queuedTasksByCategory(),
                 ActorTaskCategory.values())).append(',');
         object(json, "rejectedTasksByCategory", enumMap(snapshot.actorSystem().rejectedTasksByCategory(),
@@ -157,6 +171,10 @@ public final class RuntimeHealthJsonFormatter {
             json.append('{');
             field(json, "actorId", mailbox.actor().id()).append(',');
             number(json, "queuedTasks", mailbox.queuedTasks()).append(',');
+            number(json, "drainCycles", mailbox.drainCycles()).append(',');
+            number(json, "drainProcessedTasks", mailbox.drainProcessedTasks()).append(',');
+            number(json, "maxTasksPerDrain", mailbox.maxTasksPerDrain()).append(',');
+            number(json, "batchYields", mailbox.batchYields()).append(',');
             object(json, "queuedTasksByCategory", enumMap(mailbox.queuedTasksByCategory(),
                     ActorTaskCategory.values()));
             json.append('}');
@@ -209,7 +227,8 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "migrationCandidateRejected", stats.migrationCandidateRejected()).append(',');
         object(json, "rejectedByTargetType", stringNumberMap(stats.rejectedByTargetType())).append(',');
         object(json, "rejectedByActorGroup", stringNumberMap(stats.rejectedByActorGroup())).append(',');
-        object(json, "rejectedByReason", stringNumberMap(stats.rejectedByReason()));
+        object(json, "rejectedByReason", stringNumberMap(stats.rejectedByReason())).append(',');
+        object(json, "rejectedByHotspotReason", stringNumberMap(stats.rejectedByHotspotReason()));
         json.append('}');
         return json;
     }
@@ -270,7 +289,17 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "rejectedRequests", snapshot.rpc().rejectedRequests()).append(',');
         number(json, "slowRequests", snapshot.rpc().slowRequests()).append(',');
         number(json, "pendingRequests", snapshot.rpc().pendingRequests()).append(',');
-        number(json, "idempotencyCacheSize", snapshot.rpc().idempotencyCacheSize());
+        number(json, "idempotencyCacheSize", snapshot.rpc().idempotencyCacheSize()).append(',');
+        number(json, "idempotencyInFlightRequests", snapshot.rpc().idempotencyInFlightRequests()).append(',');
+        number(json, "idempotencyJoinedRequests", snapshot.rpc().idempotencyJoinedRequests()).append(',');
+        number(json, "forwardingFailedRequests", snapshot.rpc().forwardingFailedRequests()).append(',');
+        number(json, "requestFailovers", snapshot.rpc().requestFailovers()).append(',');
+        number(json, "replyWriteFailures", snapshot.rpc().replyWriteFailures()).append(',');
+        number(json, "replyFailovers", snapshot.rpc().replyFailovers()).append(',');
+        number(json, "undeliverableReplies", snapshot.rpc().undeliverableReplies()).append(',');
+        number(json, "pendingDeliveryAcks", snapshot.rpc().pendingDeliveryAcks()).append(',');
+        number(json, "deliveryAckTimeouts", snapshot.rpc().deliveryAckTimeouts()).append(',');
+        number(json, "deliveryAckWriteFailures", snapshot.rpc().deliveryAckWriteFailures());
         json.append('}');
         return json;
     }
@@ -332,7 +361,27 @@ public final class RuntimeHealthJsonFormatter {
         object(json, "callbackDeliveryFailuresByStatus", enumMap(
                 stats.callbackDeliveryFailuresByStatus(),
                 AgentDeliveryStatus.values()
-        ));
+        )).append(',');
+        object(json, "localIdempotency", businessAgentLocalIdempotency(stats));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder businessAgentLocalIdempotency(BusinessAgentMessageHealthStats stats) {
+        var idempotency = stats.localIdempotency();
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "capacity", idempotency.capacity()).append(',');
+        number(json, "ttlMillis", idempotency.ttlMillis()).append(',');
+        number(json, "size", idempotency.size()).append(',');
+        number(json, "startedRequests", idempotency.startedRequests()).append(',');
+        number(json, "joinedInFlightRequests", idempotency.joinedInFlightRequests()).append(',');
+        number(json, "completedCacheHits", idempotency.completedCacheHits()).append(',');
+        number(json, "expiredEntries", idempotency.expiredEntries()).append(',');
+        number(json, "evictedEntries", idempotency.evictedEntries()).append(',');
+        number(json, "completedSuccesses", idempotency.completedSuccesses()).append(',');
+        number(json, "completedFailures", idempotency.completedFailures()).append(',');
+        number(json, "abandonedInFlightRequests", idempotency.abandonedInFlightRequests());
         json.append('}');
         return json;
     }
@@ -366,6 +415,31 @@ public final class RuntimeHealthJsonFormatter {
         return json;
     }
 
+    private static StringBuilder agentMessagePorts(RuntimeHealthSnapshot snapshot) {
+        AgentMessagePortHealthStats stats = snapshot.agentMessagePorts();
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "portCount", stats.portCount()).append(',');
+        number(json, "localTellAttempts", stats.localTellAttempts()).append(',');
+        number(json, "localTellAccepted", stats.localTellAccepted()).append(',');
+        number(json, "localTellRejected", stats.localTellRejected()).append(',');
+        number(json, "localAskStarted", stats.localAskStarted()).append(',');
+        number(json, "localAskSucceeded", stats.localAskSucceeded()).append(',');
+        number(json, "localAskFailed", stats.localAskFailed()).append(',');
+        number(json, "localAskTimedOut", stats.localAskTimedOut()).append(',');
+        number(json, "localAskTargetDeliveryFailures", stats.localAskTargetDeliveryFailures()).append(',');
+        number(json, "localAskCallbackDeliveryFailures", stats.localAskCallbackDeliveryFailures()).append(',');
+        number(json, "remoteCalls", stats.remoteCalls()).append(',');
+        number(json, "remoteSucceeded", stats.remoteSucceeded()).append(',');
+        number(json, "remoteFailed", stats.remoteFailed()).append(',');
+        number(json, "remoteTimedOut", stats.remoteTimedOut()).append(',');
+        number(json, "remoteLateResponses", stats.remoteLateResponses()).append(',');
+        number(json, "remoteCallbackDeliveryFailures", stats.remoteCallbackDeliveryFailures()).append(',');
+        number(json, "currentInFlightRemoteCalls", stats.currentInFlightRemoteCalls());
+        json.append('}');
+        return json;
+    }
+
     private static StringBuilder businessCommandGateways(RuntimeHealthSnapshot snapshot) {
         StringBuilder json = new StringBuilder();
         PlayerBusinessCommandGatewayHealthStats stats = snapshot.businessCommandGateways();
@@ -377,7 +451,21 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "remoteForwardTimedOutResponses", stats.remoteForwardTimedOutResponses()).append(',');
         number(json, "lateRemoteForwardResponses", stats.lateRemoteForwardResponses()).append(',');
         number(json, "remoteForwardMigrationProtectedResponses",
-                stats.remoteForwardMigrationProtectedResponses());
+                stats.remoteForwardMigrationProtectedResponses()).append(',');
+        number(json, "remoteForwardRedirectResponses", stats.remoteForwardRedirectResponses()).append(',');
+        number(json, "remoteForwardRedirectRetries", stats.remoteForwardRedirectRetries()).append(',');
+        number(json, "remoteForwardRedirectRouteRefreshes",
+                stats.remoteForwardRedirectRouteRefreshes()).append(',');
+        number(json, "remoteForwardRedirectRouteRefreshFailures",
+                stats.remoteForwardRedirectRouteRefreshFailures()).append(',');
+        number(json, "remoteForwardTimeoutRecoveryQueries",
+                stats.remoteForwardTimeoutRecoveryQueries()).append(',');
+        number(json, "remoteForwardTimeoutRecoveryHits",
+                stats.remoteForwardTimeoutRecoveryHits()).append(',');
+        number(json, "remoteForwardTimeoutRecoveryMisses",
+                stats.remoteForwardTimeoutRecoveryMisses()).append(',');
+        number(json, "remoteForwardTimeoutRecoveryFailures",
+                stats.remoteForwardTimeoutRecoveryFailures());
         json.append('}');
         return json;
     }
@@ -414,7 +502,15 @@ public final class RuntimeHealthJsonFormatter {
                 .append(',');
         number(json, "rejectedBusinessResults", snapshot.businessResponses().rejectedBusinessResults()).append(',');
         object(json, "rejectedBusinessResultsByCode",
-                stringNumberMap(snapshot.businessResponses().rejectedBusinessResultsByCode()));
+                stringNumberMap(snapshot.businessResponses().rejectedBusinessResultsByCode())).append(',');
+        number(json, "loadedResponsePlayers", snapshot.businessResponses().loadedResponsePlayers()).append(',');
+        number(json, "checkpointAttempts", snapshot.businessResponses().checkpointAttempts()).append(',');
+        number(json, "checkpointSucceeded", snapshot.businessResponses().checkpointSucceeded()).append(',');
+        number(json, "checkpointFailures", snapshot.businessResponses().checkpointFailures()).append(',');
+        number(json, "storeLoadAttempts", snapshot.businessResponses().storeLoadAttempts()).append(',');
+        number(json, "storeLoadHits", snapshot.businessResponses().storeLoadHits()).append(',');
+        number(json, "storeLoadMisses", snapshot.businessResponses().storeLoadMisses()).append(',');
+        number(json, "storeLoadFailures", snapshot.businessResponses().storeLoadFailures());
         json.append('}');
         return json;
     }
@@ -436,8 +532,58 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "abandonedPendingCommands", snapshot.asyncShopPurchases().abandonedPendingCommands()).append(',');
         number(json, "releasedReservations", snapshot.asyncShopPurchases().releasedReservations()).append(',');
         number(json, "releaseFailures", snapshot.asyncShopPurchases().releaseFailures()).append(',');
+        number(json, "callbackDeliveryFailures", snapshot.asyncShopPurchases().callbackDeliveryFailures()).append(',');
         number(json, "stockReservationCallbackGap", snapshot.asyncShopPurchases().stockReservationCallbackGap()).append(',');
         number(json, "compensationAttempts", snapshot.asyncShopPurchases().compensationAttempts());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder asyncBusinessCommands(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "viewCount", snapshot.asyncBusinessCommands().viewCount()).append(',');
+        number(json, "startedCommands", snapshot.asyncBusinessCommands().startedCommands()).append(',');
+        number(json, "currentPendingCommands", snapshot.asyncBusinessCommands().currentPendingCommands()).append(',');
+        number(json, "completedCommands", snapshot.asyncBusinessCommands().completedCommands()).append(',');
+        number(json, "rejectedCommands", snapshot.asyncBusinessCommands().rejectedCommands()).append(',');
+        number(json, "failedCommands", snapshot.asyncBusinessCommands().failedCommands()).append(',');
+        number(json, "lateCallbacks", snapshot.asyncBusinessCommands().lateCallbacks()).append(',');
+        number(json, "abandonedPendingCommands", snapshot.asyncBusinessCommands().abandonedPendingCommands()).append(',');
+        number(json, "callbackDeliveryFailures", snapshot.asyncBusinessCommands().callbackDeliveryFailures()).append(',');
+        object(json, "operations", asyncBusinessCommandOperations(snapshot.asyncBusinessCommands().operations()));
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder asyncBusinessCommandOperations(
+            Map<String, AsyncBusinessCommandOperationStats> operations
+    ) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        boolean first = true;
+        for (Map.Entry<String, AsyncBusinessCommandOperationStats> entry : operations.entrySet()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            object(json, entry.getKey(), asyncBusinessCommandOperation(entry.getValue()));
+        }
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder asyncBusinessCommandOperation(AsyncBusinessCommandOperationStats stats) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "startedCommands", stats.startedCommands()).append(',');
+        number(json, "currentPendingCommands", stats.currentPendingCommands()).append(',');
+        number(json, "completedCommands", stats.completedCommands()).append(',');
+        number(json, "rejectedCommands", stats.rejectedCommands()).append(',');
+        number(json, "failedCommands", stats.failedCommands()).append(',');
+        number(json, "lateCallbacks", stats.lateCallbacks()).append(',');
+        number(json, "abandonedPendingCommands", stats.abandonedPendingCommands()).append(',');
+        number(json, "callbackDeliveryFailures", stats.callbackDeliveryFailures());
         json.append('}');
         return json;
     }
@@ -451,17 +597,22 @@ public final class RuntimeHealthJsonFormatter {
         json.append('{');
         number(json, "managerCount", snapshot.playerAgents().managerCount()).append(',');
         number(json, "loadedAgents", snapshot.playerAgents().loadedAgents()).append(',');
+        number(json, "fencingConflicts", snapshot.playerAgents().fencingConflicts()).append(',');
         number(json, "autoSaveSchedulers", snapshot.playerAgents().autoSaveSchedulers()).append(',');
         number(json, "autoSaveRuns", snapshot.playerAgents().autoSaveRuns()).append(',');
         number(json, "autoSaveSubmitted", snapshot.playerAgents().autoSaveSubmitted()).append(',');
         number(json, "autoSaveCompleted", snapshot.playerAgents().autoSaveCompleted()).append(',');
         number(json, "autoSaveFailedRuns", snapshot.playerAgents().autoSaveFailedRuns()).append(',');
         number(json, "autoSaveFailedSaves", snapshot.playerAgents().autoSaveFailedSaves()).append(',');
+        number(json, "autoSavePendingAsyncBlockedSaves",
+                snapshot.playerAgents().autoSavePendingAsyncBlockedSaves()).append(',');
         number(json, "drainServices", snapshot.playerAgents().drainServices()).append(',');
         number(json, "drainingServices", snapshot.playerAgents().drainingServices()).append(',');
         number(json, "drainSubmitted", snapshot.playerAgents().drainSubmitted()).append(',');
         number(json, "drainCompleted", snapshot.playerAgents().drainCompleted()).append(',');
         number(json, "drainFailedSaves", snapshot.playerAgents().drainFailedSaves()).append(',');
+        number(json, "drainPendingAsyncBlockedSaves",
+                snapshot.playerAgents().drainPendingAsyncBlockedSaves()).append(',');
         number(json, "drainPending", snapshot.playerAgents().drainPending());
         json.append('}');
         return json;
@@ -480,6 +631,20 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "completionRejected", snapshot.agentMigrations().completionRejected()).append(',');
         number(json, "rollbackSucceeded", snapshot.agentMigrations().rollbackSucceeded()).append(',');
         number(json, "rollbackFailed", snapshot.agentMigrations().rollbackFailed());
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerAgentMigrationRetries(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "serviceCount", snapshot.playerAgentMigrationRetries().serviceCount()).append(',');
+        number(json, "pendingRetries", snapshot.playerAgentMigrationRetries().pendingRetries()).append(',');
+        number(json, "retryableSourceFailures",
+                snapshot.playerAgentMigrationRetries().retryableSourceFailures()).append(',');
+        number(json, "retryAttempts", snapshot.playerAgentMigrationRetries().retryAttempts()).append(',');
+        number(json, "retrySubmitted", snapshot.playerAgentMigrationRetries().retrySubmitted()).append(',');
+        number(json, "retryCompleted", snapshot.playerAgentMigrationRetries().retryCompleted());
         json.append('}');
         return json;
     }
@@ -551,6 +716,7 @@ public final class RuntimeHealthJsonFormatter {
         StringBuilder json = new StringBuilder();
         json.append('{');
         number(json, "pendingEvents", snapshot.outbox().pendingEvents()).append(',');
+        number(json, "deadLetterEvents", snapshot.outbox().deadLetterEvents()).append(',');
         number(json, "failedAttempts", snapshot.outbox().failedAttempts()).append(',');
         number(json, "oldestPendingAgeMillis", snapshot.outbox().oldestPendingAgeMillis());
         json.append('}');
@@ -644,8 +810,20 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "connectionFailures", snapshot.networkTransports().connectionFailures()).append(',');
         number(json, "sentEnvelopes", snapshot.networkTransports().sentEnvelopes()).append(',');
         number(json, "failedWrites", snapshot.networkTransports().failedWrites()).append(',');
+        number(json, "inFlightWrites", snapshot.networkTransports().inFlightWrites()).append(',');
         number(json, "receivedEnvelopes", snapshot.networkTransports().receivedEnvelopes()).append(',');
-        number(json, "inboundFailures", snapshot.networkTransports().inboundFailures());
+        number(json, "inboundFailures", snapshot.networkTransports().inboundFailures()).append(',');
+        number(json, "forwardingProxyCount", snapshot.networkTransports().forwardingProxyCount()).append(',');
+        number(json, "proxyReceivedEnvelopes", snapshot.networkTransports().proxyReceivedEnvelopes()).append(',');
+        number(json, "proxyForwardedEnvelopes", snapshot.networkTransports().proxyForwardedEnvelopes()).append(',');
+        number(json, "proxyFailedForwards", snapshot.networkTransports().proxyFailedForwards()).append(',');
+        number(json, "proxySentFailureReceipts", snapshot.networkTransports().proxySentFailureReceipts()).append(',');
+        number(json, "proxyFailedFailureReceipts", snapshot.networkTransports().proxyFailedFailureReceipts()).append(',');
+        number(json, "proxyPendingForwards", snapshot.networkTransports().proxyPendingForwards()).append(',');
+        number(json, "proxyTimedOutForwards", snapshot.networkTransports().proxyTimedOutForwards()).append(',');
+        number(json, "proxyRejectedForwards", snapshot.networkTransports().proxyRejectedForwards()).append(',');
+        number(json, "proxySentDeliveryAcks", snapshot.networkTransports().proxySentDeliveryAcks()).append(',');
+        number(json, "proxyFailedDeliveryAcks", snapshot.networkTransports().proxyFailedDeliveryAcks());
         json.append('}');
         return json;
     }
@@ -706,6 +884,8 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "subscribers", snapshot.eventCenters().subscribers()).append(',');
         number(json, "publishedEvents", snapshot.eventCenters().publishedEvents()).append(',');
         number(json, "droppedEvents", snapshot.eventCenters().droppedEvents()).append(',');
+        number(json, "duplicatePublishes", snapshot.eventCenters().duplicatePublishes()).append(',');
+        number(json, "journalFailures", snapshot.eventCenters().journalFailures()).append(',');
         number(json, "deliveryFailures", snapshot.eventCenters().deliveryFailures()).append(',');
         number(json, "expiredSubscriptions", snapshot.eventCenters().expiredSubscriptions()).append(',');
         object(json, "topics", eventCenterTopics(snapshot));
@@ -737,6 +917,8 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "subscribers", topic.subscribers()).append(',');
         number(json, "publishedEvents", topic.publishedEvents()).append(',');
         number(json, "droppedEvents", topic.droppedEvents()).append(',');
+        number(json, "duplicatePublishes", topic.duplicatePublishes()).append(',');
+        number(json, "journalFailures", topic.journalFailures()).append(',');
         number(json, "deliveryFailures", topic.deliveryFailures()).append(',');
         number(json, "expiredSubscriptions", topic.expiredSubscriptions()).append(',');
         number(json, "minRetainedRevision", topic.minRetainedRevision()).append(',');
@@ -753,7 +935,12 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "enqueuedEvents", snapshot.actorEventSubscribers().enqueuedEvents()).append(',');
         number(json, "rejectedEvents", snapshot.actorEventSubscribers().rejectedEvents()).append(',');
         number(json, "handledEvents", snapshot.actorEventSubscribers().handledEvents()).append(',');
-        number(json, "failedEvents", snapshot.actorEventSubscribers().failedEvents());
+        number(json, "failedEvents", snapshot.actorEventSubscribers().failedEvents()).append(',');
+        number(json, "duplicateEvents", snapshot.actorEventSubscribers().duplicateEvents()).append(',');
+        number(json, "retryScheduledEvents", snapshot.actorEventSubscribers().retryScheduledEvents()).append(',');
+        number(json, "deadLetteredEvents", snapshot.actorEventSubscribers().deadLetteredEvents()).append(',');
+        number(json, "pendingInboxEvents", snapshot.actorEventSubscribers().pendingInboxEvents()).append(',');
+        number(json, "inboxDeadLetters", snapshot.actorEventSubscribers().inboxDeadLetters());
         json.append('}');
         return json;
     }
@@ -895,7 +1082,55 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "failedDeliveryRecipients", snapshot.chatRuntimes().failedDeliveryRecipients()).append(',');
         number(json, "allianceRemovedMembers", snapshot.chatRuntimes().allianceRemovedMembers()).append(',');
         number(json, "allianceEventRemovedMembers", snapshot.chatRuntimes().allianceEventRemovedMembers()).append(',');
-        number(json, "allianceSnapshotRemovedMembers", snapshot.chatRuntimes().allianceSnapshotRemovedMembers());
+        number(json, "allianceSnapshotRemovedMembers", snapshot.chatRuntimes().allianceSnapshotRemovedMembers()).append(',');
+        number(json, "asyncMessageChecks", snapshot.chatRuntimes().asyncMessageChecks()).append(',');
+        number(json, "asyncMessageSentDecisions", snapshot.chatRuntimes().asyncMessageSentDecisions()).append(',');
+        number(json, "asyncMessageRejectedDecisions", snapshot.chatRuntimes().asyncMessageRejectedDecisions()).append(',');
+        number(json, "asyncMessageBackpressuredDecisions",
+                snapshot.chatRuntimes().asyncMessageBackpressuredDecisions()).append(',');
+        number(json, "asyncMessageCallbackDeliveryFailures",
+                snapshot.chatRuntimes().asyncMessageCallbackDeliveryFailures()).append(',');
+        number(json, "asyncAccessChecks", snapshot.chatRuntimes().asyncAccessChecks()).append(',');
+        number(json, "asyncAccessAllowedDecisions", snapshot.chatRuntimes().asyncAccessAllowedDecisions()).append(',');
+        number(json, "asyncAccessRejectedDecisions", snapshot.chatRuntimes().asyncAccessRejectedDecisions()).append(',');
+        number(json, "asyncAccessBackpressuredDecisions",
+                snapshot.chatRuntimes().asyncAccessBackpressuredDecisions()).append(',');
+        number(json, "asyncAccessCallbackDeliveryFailures",
+                snapshot.chatRuntimes().asyncAccessCallbackDeliveryFailures()).append(',');
+        json.append("\"persistence\":{");
+        number(json, "agents", snapshot.chatRuntimes().persistence().agents()).append(',');
+        number(json, "recoveringAgents", snapshot.chatRuntimes().persistence().recoveringAgents()).append(',');
+        number(json, "savingAgents", snapshot.chatRuntimes().persistence().savingAgents()).append(',');
+        number(json, "failedAgents", snapshot.chatRuntimes().persistence().failedAgents()).append(',');
+        number(json, "pendingCommands", snapshot.chatRuntimes().persistence().pendingCommands()).append(',');
+        number(json, "completedLoads", snapshot.chatRuntimes().persistence().completedLoads()).append(',');
+        number(json, "completedSaves", snapshot.chatRuntimes().persistence().completedSaves()).append(',');
+        number(json, "loadFailures", snapshot.chatRuntimes().persistence().loadFailures()).append(',');
+        number(json, "saveFailures", snapshot.chatRuntimes().persistence().saveFailures()).append(',');
+        number(json, "conflicts", snapshot.chatRuntimes().persistence().conflicts()).append(',');
+        number(json, "backpressuredCommands", snapshot.chatRuntimes().persistence().backpressuredCommands()).append(',');
+        number(json, "callbackDeliveryFailures",
+                snapshot.chatRuntimes().persistence().callbackDeliveryFailures());
+        json.append('}');
+        json.append('}');
+        return json;
+    }
+
+    private static StringBuilder playerMutations(RuntimeHealthSnapshot snapshot) {
+        StringBuilder json = new StringBuilder();
+        json.append('{');
+        number(json, "records", snapshot.playerMutations().records()).append(',');
+        number(json, "pendingEvents", snapshot.playerMutations().pendingEvents()).append(',');
+        number(json, "commits", snapshot.playerMutations().commits()).append(',');
+        number(json, "commitFailures", snapshot.playerMutations().commitFailures()).append(',');
+        number(json, "committedEvents", snapshot.playerMutations().committedEvents()).append(',');
+        number(json, "enqueuedEvents", snapshot.playerMutations().enqueuedEvents()).append(',');
+        number(json, "casRetries", snapshot.playerMutations().casRetries()).append(',');
+        number(json, "projectionFailures", snapshot.playerMutations().projectionFailures()).append(',');
+        number(json, "statsFailures", snapshot.playerMutations().statsFailures()).append(',');
+        number(json, "replayRuns", snapshot.playerMutationReplays().runs()).append(',');
+        number(json, "replaySubmittedPlayers", snapshot.playerMutationReplays().submittedPlayers()).append(',');
+        number(json, "replayFailedRuns", snapshot.playerMutationReplays().failedRuns());
         json.append('}');
         return json;
     }
@@ -973,6 +1208,7 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "invalidFrames", snapshot.playerGateways().invalidFrames()).append(',');
         number(json, "disconnectedSessions", snapshot.playerGateways().disconnectedSessions()).append(',');
         number(json, "idleTimeouts", snapshot.playerGateways().idleTimeouts()).append(',');
+        number(json, "inFlightWrites", snapshot.playerGateways().inFlightWrites()).append(',');
         object(json, "rejectedCommandsByCode", enumMap(snapshot.playerGateways().rejectedCommandsByCode(),
                 PlayerClientErrorCode.values()));
         json.append('}');
@@ -987,6 +1223,8 @@ public final class RuntimeHealthJsonFormatter {
         number(json, "activePlayers", snapshot.sceneRuntimes().activePlayers()).append(',');
         number(json, "shardCount", snapshot.sceneRuntimes().shardCount()).append(',');
         number(json, "maxShardPlayers", snapshot.sceneRuntimes().maxShardPlayers()).append(',');
+        number(json, "pendingShardTransfers", snapshot.sceneRuntimes().pendingShardTransfers()).append(',');
+        number(json, "failedShardTransfers", snapshot.sceneRuntimes().failedShardTransfers()).append(',');
         number(json, "playerInterests", snapshot.sceneRuntimes().playerInterests()).append(',');
         number(json, "allianceReferences", snapshot.sceneRuntimes().allianceReferences()).append(',');
         number(json, "duplicateEnters", snapshot.sceneRuntimes().duplicateEnters()).append(',');

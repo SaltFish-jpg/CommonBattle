@@ -1,6 +1,8 @@
 package com.commonbattle.example.cross.scene;
 
+import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.cluster.ServiceDescriptor;
+import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.game.scene.SceneProjectionStats;
 import com.commonbattle.game.scene.SceneRuntimeStats;
 import com.commonbattle.game.scene.SceneAllianceAwarenessAgent;
@@ -104,6 +106,21 @@ public final class ProfileAwareSceneService implements SceneServiceStrategy {
     @Override
     public ScenePlacement place(String sceneId, int chunkX, int chunkY) {
         return delegate.place(sceneId, chunkX, chunkY);
+    }
+
+    @Override
+    public AgentIdentity routingIdentity(String sceneId) {
+        return delegate.routingIdentity(sceneId);
+    }
+
+    @Override
+    public Optional<AgentIdentity> identityOfActor(String actorId) {
+        return delegate.identityOfActor(actorId);
+    }
+
+    @Override
+    public String migrationTargetActorId(AgentIdentity identity, ServiceId targetServiceId) {
+        return delegate.migrationTargetActorId(identity, targetServiceId);
     }
 
     @Override

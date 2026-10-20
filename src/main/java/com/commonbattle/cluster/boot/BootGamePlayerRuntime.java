@@ -4,6 +4,9 @@ import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.agent.AgentDirectory;
+import com.commonbattle.actor.agent.AgentLeaseConfig;
+import com.commonbattle.actor.agent.AgentLeaseSupervisor;
+import com.commonbattle.actor.agent.LeasedAgentDirectory;
 import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.agent.remote.RemoteAgentDirectory;
@@ -30,12 +33,16 @@ import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.observability.ActorHotspotPolicy;
 import com.commonbattle.game.player.CompositePlayerDomainEventListener;
+import com.commonbattle.game.player.AgentDirectoryPlayerBusinessRedirectHandler;
+import com.commonbattle.game.player.AsyncBusinessCommandPolicy;
 import com.commonbattle.game.player.PlayerBusinessCommandBinder;
 import com.commonbattle.game.player.PlayerBusinessCommandCatalog;
 import com.commonbattle.game.player.PlayerBusinessCommandEndpoint;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
 import com.commonbattle.game.player.PlayerBusinessCommandHandler;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
+import com.commonbattle.game.player.PlayerBusinessResponseStore;
+import com.commonbattle.game.player.PlayerCheckpointRepository;
 import com.commonbattle.game.player.PlayerClientCommandIngress;
 import com.commonbattle.game.player.PlayerAgentDrainService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
@@ -73,6 +80,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Game 服玩家入口启动装配。
@@ -274,6 +282,7 @@ record BootGamePlayerRuntime(
                 config.businessAgentIdempotencyConfig(),
                 config.actorHotspotPolicy(),
                 config.actorHotspotRetryAfter(),
+                config.asyncBusinessCommandPolicy(),
                 actorSchedules,
                 config.playerAutoSaveEnabled(),
                 config.playerAutoSaveInitialDelay(),
@@ -282,7 +291,8 @@ record BootGamePlayerRuntime(
                 config.playerGatewayConfig().maxPendingAckMessages(),
                 config.playerGrowthStaminaRecoveryEnabled(),
                 config.playerGrowthStaminaRecoveryInitialDelay(),
-                config.playerGrowthStaminaRecoveryInterval()
+                config.playerGrowthStaminaRecoveryInterval(),
+                config.agentLeaseConfig()
         );
     }
 
@@ -403,6 +413,7 @@ record BootGamePlayerRuntime(
                 BusinessAgentIdempotencyConfig.defaults(),
                 ActorHotspotPolicy.defaults(),
                 Duration.ofMillis(100),
+                AsyncBusinessCommandPolicy.unlimited(),
                 null,
                 false,
                 Duration.ZERO,
@@ -466,6 +477,7 @@ record BootGamePlayerRuntime(
                 BusinessAgentIdempotencyConfig.defaults(),
                 ActorHotspotPolicy.defaults(),
                 Duration.ofMillis(100),
+                AsyncBusinessCommandPolicy.unlimited(),
                 actorSchedules,
                 autoSaveEnabled,
                 autoSaveInitialDelay,
@@ -501,6 +513,7 @@ record BootGamePlayerRuntime(
             BusinessAgentIdempotencyConfig businessAgentIdempotencyConfig,
             ActorHotspotPolicy actorHotspotPolicy,
             Duration actorHotspotRetryAfter,
+            AsyncBusinessCommandPolicy asyncCommandPolicy,
             ActorScheduleRegistry actorSchedules,
             boolean autoSaveEnabled,
             Duration autoSaveInitialDelay,
@@ -510,6 +523,126 @@ record BootGamePlayerRuntime(
             boolean growthStaminaRecoveryEnabled,
             Duration growthStaminaRecoveryInitialDelay,
             Duration growthStaminaRecoveryInterval
+    ) {
+        return configure(
+                runtime, local, actors, rpc, agentDirectory, stateRepository, configCache,
+                profileSnapshots, friendSnapshots, allianceSnapshots, playerDomainEvents,
+                profileEvents, friendEvents, shopStockAsyncClient, clock, serverOpenTime,
+                commandRateLimitPolicy, commandMailboxPressurePolicy, businessAgentMailboxPressurePolicy,
+                businessAgentIdempotencyConfig, actorHotspotPolicy, actorHotspotRetryAfter,
+                asyncCommandPolicy, actorSchedules, autoSaveEnabled, autoSaveInitialDelay,
+                autoSaveInterval, businessResponseTimeout, maxPendingAckMessagesPerPlayer,
+                growthStaminaRecoveryEnabled, growthStaminaRecoveryInitialDelay,
+                growthStaminaRecoveryInterval, AgentLeaseConfig.disabled()
+        );
+    }
+
+    static BootGamePlayerRuntime configure(
+            BootRuntime runtime,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            RpcGateway rpc,
+            AgentDirectory agentDirectory,
+            PlayerStateRepository stateRepository,
+            LocalGameConfigCache configCache,
+            ProfileSnapshotRepository profileSnapshots,
+            FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
+            EventPublisher playerDomainEvents,
+            EventPublisher profileEvents,
+            EventPublisher friendEvents,
+            ShopStockAsyncClient shopStockAsyncClient,
+            Clock clock,
+            Instant serverOpenTime,
+            AgentRateLimitPolicy commandRateLimitPolicy,
+            ActorMailboxPressurePolicy commandMailboxPressurePolicy,
+            ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy,
+            BusinessAgentIdempotencyConfig businessAgentIdempotencyConfig,
+            ActorHotspotPolicy actorHotspotPolicy,
+            Duration actorHotspotRetryAfter,
+            AsyncBusinessCommandPolicy asyncCommandPolicy,
+            ActorScheduleRegistry actorSchedules,
+            boolean autoSaveEnabled,
+            Duration autoSaveInitialDelay,
+            Duration autoSaveInterval,
+            Duration businessResponseTimeout,
+            int maxPendingAckMessagesPerPlayer,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaRecoveryInitialDelay,
+            Duration growthStaminaRecoveryInterval,
+            AgentLeaseConfig agentLeaseConfig
+    ) {
+        return configureInternal(
+                runtime,
+                local,
+                actors,
+                rpc,
+                agentDirectory,
+                stateRepository,
+                configCache,
+                profileSnapshots,
+                friendSnapshots,
+                allianceSnapshots,
+                playerDomainEvents,
+                profileEvents,
+                friendEvents,
+                shopStockAsyncClient,
+                clock,
+                serverOpenTime,
+                commandRateLimitPolicy,
+                commandMailboxPressurePolicy,
+                businessAgentMailboxPressurePolicy,
+                businessAgentIdempotencyConfig,
+                actorHotspotPolicy,
+                actorHotspotRetryAfter,
+                asyncCommandPolicy,
+                actorSchedules,
+                autoSaveEnabled,
+                autoSaveInitialDelay,
+                autoSaveInterval,
+                businessResponseTimeout,
+                maxPendingAckMessagesPerPlayer,
+                growthStaminaRecoveryEnabled,
+                growthStaminaRecoveryInitialDelay,
+                growthStaminaRecoveryInterval,
+                agentLeaseConfig
+        );
+    }
+
+    private static BootGamePlayerRuntime configureInternal(
+            BootRuntime runtime,
+            ServiceDescriptor local,
+            ActorSystem actors,
+            RpcGateway rpc,
+            AgentDirectory agentDirectory,
+            PlayerStateRepository stateRepository,
+            LocalGameConfigCache configCache,
+            ProfileSnapshotRepository profileSnapshots,
+            FriendSnapshotRepository friendSnapshots,
+            AllianceSnapshotRepository allianceSnapshots,
+            EventPublisher playerDomainEvents,
+            EventPublisher profileEvents,
+            EventPublisher friendEvents,
+            ShopStockAsyncClient shopStockAsyncClient,
+            Clock clock,
+            Instant serverOpenTime,
+            AgentRateLimitPolicy commandRateLimitPolicy,
+            ActorMailboxPressurePolicy commandMailboxPressurePolicy,
+            ActorMailboxPressurePolicy businessAgentMailboxPressurePolicy,
+            BusinessAgentIdempotencyConfig businessAgentIdempotencyConfig,
+            ActorHotspotPolicy actorHotspotPolicy,
+            Duration actorHotspotRetryAfter,
+            AsyncBusinessCommandPolicy asyncCommandPolicy,
+            ActorScheduleRegistry actorSchedules,
+            boolean autoSaveEnabled,
+            Duration autoSaveInitialDelay,
+            Duration autoSaveInterval,
+            Duration businessResponseTimeout,
+            int maxPendingAckMessagesPerPlayer,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaRecoveryInitialDelay,
+            Duration growthStaminaRecoveryInterval,
+            AgentLeaseConfig agentLeaseConfig
     ) {
         Objects.requireNonNull(runtime, "runtime");
         Objects.requireNonNull(local, "local");
@@ -532,11 +665,13 @@ record BootGamePlayerRuntime(
         Objects.requireNonNull(businessAgentIdempotencyConfig, "businessAgentIdempotencyConfig");
         Objects.requireNonNull(actorHotspotPolicy, "actorHotspotPolicy");
         Objects.requireNonNull(actorHotspotRetryAfter, "actorHotspotRetryAfter");
+        Objects.requireNonNull(asyncCommandPolicy, "asyncCommandPolicy");
         Objects.requireNonNull(autoSaveInitialDelay, "autoSaveInitialDelay");
         Objects.requireNonNull(autoSaveInterval, "autoSaveInterval");
         Objects.requireNonNull(businessResponseTimeout, "businessResponseTimeout");
         Objects.requireNonNull(growthStaminaRecoveryInitialDelay, "growthStaminaRecoveryInitialDelay");
         Objects.requireNonNull(growthStaminaRecoveryInterval, "growthStaminaRecoveryInterval");
+        Objects.requireNonNull(agentLeaseConfig, "agentLeaseConfig");
         if (maxPendingAckMessagesPerPlayer <= 0) {
             throw new IllegalArgumentException("maxPendingAckMessagesPerPlayer must be positive");
         }
@@ -545,7 +680,17 @@ record BootGamePlayerRuntime(
             runtime.observe("rpcRoutePolicy", routePolicyView);
         }
         DefaultAgentMessagePort messages = runtime.add("agentMessages", new DefaultAgentMessagePort(actors, rpc));
-        AgentLifecycleManager lifecycles = new AgentLifecycleManager(local.id(), actors, agentDirectory, clock);
+        AtomicReference<AgentLifecycleManager> lifecycleRef = new AtomicReference<>();
+        AgentLeaseSupervisor leaseSupervisor = configureLeaseSupervisor(
+                runtime, local, agentDirectory, agentLeaseConfig, clock, lifecycleRef
+        );
+        AgentLifecycleManager lifecycles = new AgentLifecycleManager(
+                local.id(), actors, agentDirectory, clock, leaseSupervisor
+        );
+        lifecycleRef.set(lifecycles);
+        if (leaseSupervisor != null) {
+            leaseSupervisor.start();
+        }
         FriendAgentManager friendAgents = new FriendAgentManager(
                 actors,
                 messages,
@@ -576,6 +721,16 @@ record BootGamePlayerRuntime(
                 new BagChangeAuditPlayerEventListener(bagChangeAudit, clock)
         );
         PlayerCommandSequencer commandSequencer = new PlayerCommandSequencer();
+        PlayerBusinessResponseStore responseStore = stateRepository instanceof PlayerCheckpointRepository checkpoints
+                ? checkpoints.responses()
+                : PlayerBusinessResponseStore.noop();
+        PlayerBusinessResponseHub businessResponses = new PlayerBusinessResponseHub(
+                com.commonbattle.game.player.PlayerBusinessResultSink.NOOP,
+                clock,
+                PlayerBusinessResponseHub.DEFAULT_COMPLETED_RESPONSE_WINDOW,
+                responseStore
+        );
+        PlayerProfileSnapshotProjector profileProjector = new PlayerProfileSnapshotProjector(profileSnapshots);
         PlayerGameAgentManager agents = new PlayerGameAgentManager(
                 actors,
                 messages,
@@ -586,16 +741,22 @@ record BootGamePlayerRuntime(
                 serverOpenTime,
                 playerDomainEvents,
                 playerDomainEventListener,
-                new PlayerProfileSnapshotProjector(profileSnapshots)::project,
+                snapshot -> {
+                    profileProjector.project(snapshot);
+                    businessResponses.checkpoint(snapshot.playerId());
+                },
                 shopStockAsyncClient,
                 new OutboundPlayerPushPort(outbound),
                 audit,
                 commandSequencer,
+                asyncCommandPolicy,
                 actorSchedules,
                 growthStaminaRecoveryEnabled,
                 growthStaminaRecoveryInitialDelay,
                 growthStaminaRecoveryInterval
         );
+        agents.attachBusinessResponseSnapshots(businessResponses::snapshotForPlayer);
+        agents.onPassivated(businessResponses::releasePlayer);
         PlayerLoginService logins = new PlayerLoginService(agents, sessions);
         LifecycleAwareAgentRouter lifecycleRouter = new LifecycleAwareAgentRouter(lifecycles, messages);
         InboundAdmissionController commandMailboxAdmissions = new ActorMailboxPressureAdmissionController(
@@ -637,12 +798,12 @@ record BootGamePlayerRuntime(
                 playerId -> configCache.resolve(playerId).version(),
                 clock
         );
-        PlayerBusinessResponseHub businessResponses = new PlayerBusinessResponseHub();
         PlayerBusinessCommandGateway businessCommands = runtime.add("playerBusinessCommands", new PlayerBusinessCommandGateway(
                 dispatcher,
                 rpc,
                 businessResponses,
-                businessResponseTimeout
+                businessResponseTimeout,
+                new AgentDirectoryPlayerBusinessRedirectHandler(agentDirectory)
         ));
         PlayerClientConnectionService clientConnections = new PlayerClientConnectionService(logins, outbound);
         PlayerClientCommandIngress clientCommandIngress = new PlayerClientCommandIngress(businessCommands, outbound);
@@ -657,7 +818,9 @@ record BootGamePlayerRuntime(
                 businessCommands,
                 lifecycleRouter,
                 businessAgentHandlers,
-                businessAgentAdmissions
+                businessAgentAdmissions,
+                businessAgentIdempotencyConfig,
+                clock
         ));
         PlayerBusinessCommandBinder.registerExamples(
                 dispatcher,
@@ -725,6 +888,40 @@ record BootGamePlayerRuntime(
         runtime.observe("playerBusinessResponses", businessResponses);
         runtime.observe("playerAgentDrain", drain);
         return playerRuntime;
+    }
+
+    private static AgentLeaseSupervisor configureLeaseSupervisor(
+            BootRuntime runtime,
+            ServiceDescriptor local,
+            AgentDirectory agentDirectory,
+            AgentLeaseConfig config,
+            Clock clock,
+            AtomicReference<AgentLifecycleManager> lifecycleRef
+    ) {
+        if (!config.enabled()) {
+            return null;
+        }
+        if (!(agentDirectory instanceof LeasedAgentDirectory leasedDirectory)) {
+            throw new IllegalStateException("Agent lease is enabled but directory does not support leases");
+        }
+        AgentLeaseSupervisor supervisor = runtime.add(
+                "agentLeaseSupervisor",
+                new AgentLeaseSupervisor(
+                        leasedDirectory,
+                        AgentLeaseSupervisor.newOwnerSession(local.id().wireName()),
+                        config.leaseTtl(),
+                        config.renewInterval(),
+                        clock,
+                        lease -> {
+                            AgentLifecycleManager lifecycles = lifecycleRef.get();
+                            if (lifecycles != null) {
+                                lifecycles.handleLeaseLost(lease);
+                            }
+                        }
+                )
+        );
+        runtime.observe("agentLeaseSupervisorStats", supervisor);
+        return supervisor;
     }
 
     private static InboundAdmissionController hotspotAdmissions(

@@ -19,6 +19,7 @@ public final class PlayerBusinessCommandProtocolValidator {
         Objects.requireNonNull(registry, "registry");
         List<String> missing = new ArrayList<>();
         requireProtobuf(registry, PlayerCommand.class, missing);
+        requireProtobuf(registry, PlayerBusinessResponseQuery.class, missing);
         requireProtobuf(registry, PlayerBusinessResponse.class, missing);
         requireProtobuf(registry, PlayerBusinessAck.class, missing);
         for (PlayerBusinessCommandDescriptor descriptor : PlayerBusinessCommandCatalog.descriptors()) {

@@ -2,6 +2,7 @@ package com.commonbattle.observability;
 
 import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.game.agent.BusinessAgentMessageStats;
+import com.commonbattle.game.agent.BusinessAgentLocalIdempotencyStats;
 
 import java.util.EnumMap;
 import java.util.Map;
@@ -21,10 +22,12 @@ public record BusinessAgentMessageHealthStats(
         long remoteTimedOutResponses,
         long lateRemoteResponses,
         long callbackDeliveryFailures,
-        Map<AgentDeliveryStatus, Long> callbackDeliveryFailuresByStatus
+        Map<AgentDeliveryStatus, Long> callbackDeliveryFailuresByStatus,
+        BusinessAgentLocalIdempotencyStats localIdempotency
 ) {
     public static BusinessAgentMessageHealthStats empty() {
-        return new BusinessAgentMessageHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of());
+        return new BusinessAgentMessageHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(),
+                BusinessAgentLocalIdempotencyStats.empty());
     }
 
     public static BusinessAgentMessageHealthStats from(BusinessAgentMessageStats stats) {
@@ -39,7 +42,8 @@ public record BusinessAgentMessageHealthStats(
                 stats.remoteTimedOutResponses(),
                 stats.lateRemoteResponses(),
                 stats.callbackDeliveryFailures(),
-                stats.callbackDeliveryFailuresByStatus()
+                stats.callbackDeliveryFailuresByStatus(),
+                stats.localIdempotency()
         );
     }
 
@@ -60,7 +64,27 @@ public record BusinessAgentMessageHealthStats(
                 remoteTimedOutResponses + other.remoteTimedOutResponses,
                 lateRemoteResponses + other.lateRemoteResponses,
                 callbackDeliveryFailures + other.callbackDeliveryFailures,
-                Map.copyOf(failures)
+                Map.copyOf(failures),
+                plus(localIdempotency, other.localIdempotency)
+        );
+    }
+
+    private static BusinessAgentLocalIdempotencyStats plus(
+            BusinessAgentLocalIdempotencyStats left,
+            BusinessAgentLocalIdempotencyStats right
+    ) {
+        return new BusinessAgentLocalIdempotencyStats(
+                left.capacity() + right.capacity(),
+                Math.max(left.ttlMillis(), right.ttlMillis()),
+                left.size() + right.size(),
+                left.startedRequests() + right.startedRequests(),
+                left.joinedInFlightRequests() + right.joinedInFlightRequests(),
+                left.completedCacheHits() + right.completedCacheHits(),
+                left.expiredEntries() + right.expiredEntries(),
+                left.evictedEntries() + right.evictedEntries(),
+                left.completedSuccesses() + right.completedSuccesses(),
+                left.completedFailures() + right.completedFailures(),
+                left.abandonedInFlightRequests() + right.abandonedInFlightRequests()
         );
     }
 }

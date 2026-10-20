@@ -81,14 +81,40 @@ public final class JdbcVersionedEventOutboxBytesStore implements VersionedEventO
     @Override
     public void save(long outboxId, byte[] bytes) {
         Objects.requireNonNull(bytes, "bytes");
-        String sql = "INSERT INTO " + tableName + " (outbox_id, payload) VALUES (?, ?)";
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setLong(1, requireOutboxId(outboxId));
-            statement.setBytes(2, copy(bytes));
-            statement.executeUpdate();
+        long id = requireOutboxId(outboxId);
+        try (Connection connection = dataSource.getConnection()) {
+            if (updatePayload(connection, id, bytes) == 0) {
+                insertPayload(connection, id, bytes);
+            }
+        } catch (SQLIntegrityConstraintViolationException race) {
+            // 首次写入与并发更新竞争时，已存在的行由本次 payload 覆盖。
+            try (Connection connection = dataSource.getConnection()) {
+                if (updatePayload(connection, id, bytes) == 0) {
+                    throw new IllegalStateException("Event outbox row disappeared during concurrent save " + id, race);
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to update event outbox " + id, e);
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to save event outbox " + outboxId, e);
+        }
+    }
+
+    private int updatePayload(Connection connection, long outboxId, byte[] bytes) throws SQLException {
+        String sql = "UPDATE " + tableName + " SET payload = ? WHERE outbox_id = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setBytes(1, copy(bytes));
+            statement.setLong(2, outboxId);
+            return statement.executeUpdate();
+        }
+    }
+
+    private void insertPayload(Connection connection, long outboxId, byte[] bytes) throws SQLException {
+        String sql = "INSERT INTO " + tableName + " (outbox_id, payload) VALUES (?, ?)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, outboxId);
+            statement.setBytes(2, copy(bytes));
+            statement.executeUpdate();
         }
     }
 

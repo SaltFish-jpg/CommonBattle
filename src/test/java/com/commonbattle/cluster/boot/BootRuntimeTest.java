@@ -56,6 +56,36 @@ class BootRuntimeTest {
     }
 
     @Test
+    void errorFromOneResourceDoesNotSkipRemainingStartupCleanup() {
+        BootRuntime runtime = new BootRuntime();
+        List<String> closed = new ArrayList<>();
+        runtime.add("first", () -> closed.add("first"));
+        runtime.add("fatal", () -> {
+            closed.add("fatal");
+            throw new AssertionError("fatal close failure");
+        });
+
+        RuntimeException error = assertThrows(RuntimeException.class, runtime::close);
+
+        assertEquals(List.of("fatal", "first"), closed);
+        assertEquals(AssertionError.class, error.getCause().getClass());
+    }
+
+    @Test
+    void startupErrorKeepsCleanupFailureAsSuppressedDiagnostic() {
+        BootRuntime runtime = new BootRuntime();
+        runtime.add("resource", () -> {
+            throw new IllegalStateException("close failed");
+        });
+        AssertionError startup = new AssertionError("startup failed");
+
+        runtime.closeSuppressing(startup);
+
+        assertEquals(1, startup.getSuppressed().length);
+        assertEquals("Failed to close boot resource: resource", startup.getSuppressed()[0].getMessage());
+    }
+
+    @Test
     void addingAfterCloseImmediatelyClosesResource() {
         BootRuntime runtime = new BootRuntime();
         List<String> closed = new ArrayList<>();
@@ -78,6 +108,47 @@ class BootRuntimeTest {
         runtime.close();
 
         assertEquals(List.of("only"), closed);
+    }
+
+    @Test
+    void shutdownDrainsBeforeClosingResources() {
+        BootRuntime runtime = new BootRuntime();
+        List<String> events = new ArrayList<>();
+        runtime.add("first", () -> events.add("close:first"));
+        runtime.add("second", () -> events.add("close:second"));
+        runtime.configureShutdownDrain(() -> events.add("drain"));
+
+        runtime.shutdown();
+
+        assertEquals(List.of("drain", "close:second", "close:first"), events);
+    }
+
+    @Test
+    void shutdownStillClosesResourcesWhenDrainFails() {
+        BootRuntime runtime = new BootRuntime();
+        List<String> events = new ArrayList<>();
+        runtime.add("resource", () -> events.add("close"));
+        runtime.configureShutdownDrain(() -> {
+            events.add("drain");
+            throw new IllegalStateException("drain timeout");
+        });
+
+        RuntimeException error = assertThrows(RuntimeException.class, runtime::shutdown);
+
+        assertEquals(List.of("drain", "close"), events);
+        assertEquals("Failed to drain boot runtime", error.getMessage());
+    }
+
+    @Test
+    void ordinaryCloseDoesNotRunShutdownDrain() {
+        BootRuntime runtime = new BootRuntime();
+        List<String> events = new ArrayList<>();
+        runtime.add("resource", () -> events.add("close"));
+        runtime.configureShutdownDrain(() -> events.add("drain"));
+
+        runtime.close();
+
+        assertEquals(List.of("close"), events);
     }
 
     @Test

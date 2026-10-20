@@ -45,19 +45,22 @@ public final class ClusterNode implements AutoCloseable {
         if (started) {
             return;
         }
-        Objects.requireNonNull(watches, "watches").forEach(directory::watch);
         registry.register(local);
-        started = true;
+        try {
+            watch(watches);
+            started = true;
+        } catch (RuntimeException error) {
+            rollbackRegistration(error);
+            throw error;
+        }
     }
 
     public void start(Collection<ServiceKind> watches, Duration leaseTtl, Duration heartbeatInterval) {
         if (started) {
             return;
         }
-        Objects.requireNonNull(watches, "watches").forEach(directory::watch);
-        leaseRenewer = new RegistryLeaseRenewer(registry, local, leaseTtl, heartbeatInterval);
-        leaseRenewer.start();
-        started = true;
+        RegistryLeaseRenewer renewer = new RegistryLeaseRenewer(registry, local, leaseTtl, heartbeatInterval);
+        startWithLease(watches, renewer);
     }
 
     public void start(
@@ -69,23 +72,79 @@ public final class ClusterNode implements AutoCloseable {
         if (started) {
             return;
         }
-        Objects.requireNonNull(watches, "watches").forEach(directory::watch);
-        leaseRenewer = new RegistryLeaseRenewer(registry, local, leaseTtl, heartbeatInterval, scheduler);
-        leaseRenewer.start();
-        started = true;
+        RegistryLeaseRenewer renewer = new RegistryLeaseRenewer(
+                registry, local, leaseTtl, heartbeatInterval, scheduler);
+        startWithLease(watches, renewer);
     }
 
     @Override
     public void close() {
+        RuntimeException failure = null;
         if (started) {
-            if (leaseRenewer != null) {
-                leaseRenewer.close();
+            try {
+                if (leaseRenewer != null) {
+                    leaseRenewer.close();
+                } else {
+                    registry.unregister(local.id());
+                }
+            } catch (RuntimeException error) {
+                failure = error;
+            } finally {
                 leaseRenewer = null;
-            } else {
-                registry.unregister(local.id());
+                started = false;
             }
-            started = false;
         }
-        directory.close();
+        try {
+            directory.close();
+        } catch (RuntimeException error) {
+            if (failure == null) {
+                failure = error;
+            } else {
+                failure.addSuppressed(error);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void startWithLease(Collection<ServiceKind> watches, RegistryLeaseRenewer renewer) {
+        try {
+            renewer.start();
+            leaseRenewer = renewer;
+            watch(watches);
+            started = true;
+        } catch (RuntimeException error) {
+            try {
+                renewer.close();
+            } catch (RuntimeException closeError) {
+                error.addSuppressed(closeError);
+            }
+            leaseRenewer = null;
+            closeDirectoryAfterFailedStart(error);
+            throw error;
+        }
+    }
+
+    private void watch(Collection<ServiceKind> watches) {
+        Objects.requireNonNull(watches, "watches")
+                .forEach(kind -> directory.watch(kind, registry));
+    }
+
+    private void rollbackRegistration(RuntimeException error) {
+        try {
+            registry.unregister(local.id());
+        } catch (RuntimeException unregisterError) {
+            error.addSuppressed(unregisterError);
+        }
+        closeDirectoryAfterFailedStart(error);
+    }
+
+    private void closeDirectoryAfterFailedStart(RuntimeException error) {
+        try {
+            directory.close();
+        } catch (RuntimeException closeError) {
+            error.addSuppressed(closeError);
+        }
     }
 }

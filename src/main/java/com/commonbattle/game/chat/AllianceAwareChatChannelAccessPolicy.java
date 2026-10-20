@@ -11,7 +11,7 @@ import java.util.function.Consumer;
  * 基于本地联盟快照的联盟频道访问策略。
  * 快照缺失或 stale 时拒绝准入，避免非成员通过旧关系进入联盟频道。
  */
-public final class AllianceAwareChatChannelAccessPolicy implements EventAwareChatChannelAccessPolicy {
+public final class AllianceAwareChatChannelAccessPolicy implements EventAwareChatChannelAccessPolicy, AsyncChatChannelAccessPolicy {
     private final SceneAllianceAwarenessAgent alliances;
 
     public AllianceAwareChatChannelAccessPolicy(SceneAllianceAwarenessAgent alliances) {
@@ -34,6 +34,32 @@ public final class AllianceAwareChatChannelAccessPolicy implements EventAwareCha
             return ChatSendStatus.SENT;
         }
         return sendStatusOf(alliances.membershipOf(allianceId, request.senderId()));
+    }
+
+    @Override
+    public void inspectJoin(ChatJoinRequest request, Consumer<ChatJoinStatus> callback) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        long allianceId = allianceIdOf(request.channelId());
+        if (allianceId == 0) {
+            callback.accept(ChatJoinStatus.JOINED);
+            return;
+        }
+        alliances.readMembershipOf(allianceId, request.playerId(), decision ->
+                callback.accept(joinStatusOf(decision)));
+    }
+
+    @Override
+    public void inspectSend(ChatSendRequest request, Consumer<ChatSendStatus> callback) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        long allianceId = allianceIdOf(request.channelId());
+        if (allianceId == 0) {
+            callback.accept(ChatSendStatus.SENT);
+            return;
+        }
+        alliances.readMembershipOf(allianceId, request.senderId(), decision ->
+                callback.accept(sendStatusOf(decision)));
     }
 
     @Override

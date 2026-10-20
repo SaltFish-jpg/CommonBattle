@@ -8,6 +8,7 @@ import com.commonbattle.game.player.PlayerPushPayloads;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.DefaultChannelPromise;
 import io.netty.handler.codec.LengthFieldPrepender;
 import org.junit.jupiter.api.Test;
 
@@ -22,9 +23,29 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class NettyPlayerOutboundWriterTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+
+    @Test
+    void writeTrackerSettlesOnlyAfterChannelFutureCompletes() {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        NettyPlayerWriteTracker tracker = new NettyPlayerWriteTracker();
+        DefaultChannelPromise pending = new DefaultChannelPromise(channel);
+
+        tracker.trackWrite(() -> pending);
+
+        assertEquals(1, tracker.inFlightWrites());
+        pending.setSuccess();
+        assertEquals(0, tracker.inFlightWrites());
+
+        assertThrows(IllegalStateException.class, () -> tracker.trackWrite(() -> {
+            throw new IllegalStateException("write rejected");
+        }));
+        assertEquals(0, tracker.inFlightWrites());
+        channel.finishAndReleaseAll();
+    }
 
     @Test
     void playerOutboundHubWritesClientFrameThroughNettyWriter() {

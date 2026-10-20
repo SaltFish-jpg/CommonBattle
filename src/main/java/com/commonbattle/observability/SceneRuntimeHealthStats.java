@@ -12,6 +12,8 @@ public record SceneRuntimeHealthStats(
         int activePlayers,
         int shardCount,
         int maxShardPlayers,
+        int pendingShardTransfers,
+        long failedShardTransfers,
         int playerInterests,
         int allianceReferences,
         long duplicateEnters,
@@ -33,7 +35,7 @@ public record SceneRuntimeHealthStats(
         SceneProjectionStats allianceProjection
 ) {
     public static SceneRuntimeHealthStats empty() {
-        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        return new SceneRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 SceneProjectionStats.empty(), SceneProjectionStats.empty());
     }
 
@@ -53,6 +55,8 @@ public record SceneRuntimeHealthStats(
                 stats.activePlayers(),
                 stats.shardCount(),
                 stats.maxShardPlayers(),
+                stats.pendingShardTransfers(),
+                stats.failedShardTransfers(),
                 stats.playerInterests(),
                 stats.allianceReferences(),
                 stats.duplicateEnters(),

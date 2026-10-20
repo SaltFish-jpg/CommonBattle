@@ -2,6 +2,7 @@ package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
 
 import java.time.Clock;
@@ -9,6 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * 私聊会话 Actor。
@@ -27,8 +30,11 @@ public final class DirectChatSessionAgent {
     private final int maxHistoryMessages;
     private final List<ChatDelivery> history = new ArrayList<>();
     private long revision;
-    private long droppedHistoryMessages;
-    private ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
+    private long pendingDroppedHistoryMessages;
+    private volatile long retainedMessages;
+    private volatile long droppedHistoryMessages;
+    private volatile ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
+    private ChatAgentPersistence persistence;
 
     public DirectChatSessionAgent(
             AgentMessagePort messages,
@@ -102,7 +108,8 @@ public final class DirectChatSessionAgent {
         Objects.requireNonNull(callback, "callback");
         ensureParticipant(request.senderId());
         ensureParticipant(request.receiverId());
-        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(sendNow(request)));
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request), callback));
     }
 
     public void sendAfterAccessStatus(
@@ -116,11 +123,48 @@ public final class DirectChatSessionAgent {
         ensureParticipant(request.senderId());
         ensureParticipant(request.receiverId());
         messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
-                ignored -> callback.accept(sendNow(request, accessStatus)));
+                ignored -> executeSend(() -> sendNow(request, accessStatus), callback));
+    }
+
+    public AgentDeliveryResult trySendAfterAccessStatus(
+            DirectChatSendRequest request,
+            ChatSendStatus accessStatus,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureParticipant(request.senderId());
+        ensureParticipant(request.receiverId());
+        return messages.tryTellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request, accessStatus), callback));
     }
 
     public ChatChannelSnapshot snapshotNow() {
         return new ChatChannelSnapshot(sessionId, java.util.Set.of(firstPlayerId, secondPlayerId), history, revision);
+    }
+
+    void attachPersistence(ChatAgentPersistence persistence) {
+        if (this.persistence != null) {
+            throw new IllegalStateException("chat persistence already attached");
+        }
+        this.persistence = Objects.requireNonNull(persistence, "persistence");
+        persistence.start();
+    }
+
+    void restoreSnapshot(ChatChannelSnapshot restored) {
+        if (!sessionId.equals(restored.channelId())) {
+            throw new IllegalArgumentException("direct chat snapshot session mismatch");
+        }
+        java.util.Set<Long> expectedMembers = java.util.Set.of(firstPlayerId, secondPlayerId);
+        if (!expectedMembers.equals(restored.members())) {
+            throw new IllegalArgumentException("direct chat snapshot participants mismatch");
+        }
+        history.clear();
+        history.addAll(restored.history());
+        revision = restored.revision();
+        pendingDroppedHistoryMessages = 0;
+        publishCommittedState();
     }
 
     private ChatSendResult sendNow(DirectChatSendRequest request) {
@@ -152,16 +196,53 @@ public final class DirectChatSessionAgent {
         );
         history.add(delivery);
         trimHistory();
-        deliveryStats = deliveryStats.plus(deliverySink.deliver(new ChatDeliveryEnvelope(
-                sessionId,
-                java.util.Set.of(firstPlayerId, secondPlayerId),
-                delivery
-        )));
         return ChatSendResult.sent(delivery);
     }
 
+    private void executeSend(Supplier<ChatSendResult> mutation, Consumer<ChatSendResult> callback) {
+        executeMutation(
+                mutation,
+                callback,
+                error -> ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED),
+                result -> result.delivery().ifPresent(delivery -> deliveryStats = deliveryStats.plus(
+                        deliverySink.deliver(new ChatDeliveryEnvelope(
+                                sessionId,
+                                java.util.Set.of(firstPlayerId, secondPlayerId),
+                                delivery
+                        ))
+                ))
+        );
+    }
+
+    private <T> void executeMutation(
+            Supplier<T> mutation,
+            Consumer<T> callback,
+            Function<Throwable, T> failureResult,
+            Consumer<T> afterCommit
+    ) {
+        ChatAgentPersistence activePersistence = persistence;
+        if (activePersistence == null) {
+            T result = mutation.get();
+            publishCommittedState();
+            afterCommit.accept(result);
+            callback.accept(result);
+            return;
+        }
+        java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
+        activePersistence.submit(
+                () -> result.set(mutation.get()),
+                () -> {
+                    T committed = result.get();
+                    publishCommittedState();
+                    afterCommit.accept(committed);
+                    callback.accept(committed);
+                },
+                error -> callback.accept(failureResult.apply(error))
+        );
+    }
+
     long retainedMessages() {
-        return history.size();
+        return retainedMessages;
     }
 
     long droppedHistoryMessages() {
@@ -172,11 +253,21 @@ public final class DirectChatSessionAgent {
         return deliveryStats;
     }
 
+    ChatPersistenceStats persistenceStats() {
+        return persistence == null ? ChatPersistenceStats.empty() : persistence.stats();
+    }
+
     private void trimHistory() {
         while (history.size() > maxHistoryMessages) {
             history.removeFirst();
-            droppedHistoryMessages++;
+            pendingDroppedHistoryMessages++;
         }
+    }
+
+    private void publishCommittedState() {
+        droppedHistoryMessages += pendingDroppedHistoryMessages;
+        pendingDroppedHistoryMessages = 0;
+        retainedMessages = history.size();
     }
 
     private void ensureParticipant(long playerId) {

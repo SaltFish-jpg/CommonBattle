@@ -2,6 +2,7 @@ package com.commonbattle.game.chat;
 
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorTaskCategory;
+import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
 import com.commonbattle.game.scene.ScenePlayerInterest;
 import com.commonbattle.game.scene.ScenePlayerInterestCoordinator;
@@ -10,9 +11,12 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * 频道聊天 Actor。
@@ -29,12 +33,17 @@ public final class ChatChannelAgent {
     private final Clock clock;
     private final int maxHistoryMessages;
     private final Set<Long> members = new HashSet<>();
+    private final Map<Long, Long> memberAllianceIds = new java.util.HashMap<>();
+    private final Set<Long> interestedMembers = new HashSet<>();
     private final List<ChatDelivery> history = new ArrayList<>();
     private long revision;
-    private long droppedHistoryMessages;
-    private long allianceEventRemovedMembers;
-    private long allianceSnapshotRemovedMembers;
-    private ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
+    private long pendingDroppedHistoryMessages;
+    private volatile long retainedMessages;
+    private volatile long droppedHistoryMessages;
+    private volatile long allianceEventRemovedMembers;
+    private volatile long allianceSnapshotRemovedMembers;
+    private volatile ChatDeliveryResult deliveryStats = ChatDeliveryResult.empty();
+    private ChatAgentPersistence persistence;
 
     public ChatChannelAgent(
             AgentMessagePort messages,
@@ -105,7 +114,12 @@ public final class ChatChannelAgent {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
-        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(joinNow(request)));
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> executeMutation(
+                () -> joinNow(request), callback,
+                error -> new ChatJoinResult(ChatJoinStatus.BACKPRESSURED, channelId, request.playerId(), members.size()),
+                ignoredResult -> {
+                }
+        ));
     }
 
     public void joinAfterAccessStatus(
@@ -117,22 +131,49 @@ public final class ChatChannelAgent {
         Objects.requireNonNull(accessStatus, "accessStatus");
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
-        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
-                ignored -> callback.accept(joinNow(request, accessStatus)));
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> executeMutation(
+                () -> joinNow(request, accessStatus), callback,
+                error -> new ChatJoinResult(ChatJoinStatus.BACKPRESSURED, channelId, request.playerId(), members.size()),
+                ignoredResult -> {
+                }
+        ));
+    }
+
+    public AgentDeliveryResult tryJoinAfterAccessStatus(
+            ChatJoinRequest request,
+            ChatJoinStatus accessStatus,
+            Consumer<ChatJoinResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        return messages.tryTellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> executeMutation(
+                () -> joinNow(request, accessStatus), callback,
+                error -> new ChatJoinResult(ChatJoinStatus.BACKPRESSURED, channelId, request.playerId(), members.size()),
+                ignoredResult -> {
+                }
+        ));
     }
 
     public void leave(ChatLeaveRequest request, Consumer<ChatLeaveResult> callback) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
-        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(leaveNow(request)));
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> executeMutation(
+                () -> leaveNow(request), callback,
+                error -> new ChatLeaveResult(ChatLeaveStatus.BACKPRESSURED, channelId, request.playerId(), members.size()),
+                ignoredResult -> {
+                }
+        ));
     }
 
     public void send(ChatSendRequest request, Consumer<ChatSendResult> callback) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
-        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND, ignored -> callback.accept(sendNow(request)));
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request), callback));
     }
 
     public void sendAfterAccessStatus(
@@ -145,35 +186,114 @@ public final class ChatChannelAgent {
         Objects.requireNonNull(callback, "callback");
         ensureSameChannel(request.channelId());
         messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
-                ignored -> callback.accept(sendNow(request, accessStatus)));
+                ignored -> executeSend(() -> sendNow(request, accessStatus), callback));
+    }
+
+    public AgentDeliveryResult trySendAfterAccessStatus(
+            ChatSendRequest request,
+            ChatSendStatus accessStatus,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        return messages.tryTellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request, accessStatus), callback));
+    }
+
+    public void sendAfterMessageDecision(
+            ChatSendRequest request,
+            ChatMessageDecision decision,
+            Consumer<ChatSendResult> callback
+    ) {
+        sendAfterAccessAndMessageDecision(request, ChatSendStatus.SENT, decision, callback);
+    }
+
+    public void sendAfterAccessAndMessageDecision(
+            ChatSendRequest request,
+            ChatSendStatus accessStatus,
+            ChatMessageDecision decision,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(decision, "decision");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        messages.tellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request, accessStatus, decision), callback));
+    }
+
+    public AgentDeliveryResult trySendAfterMessageDecision(
+            ChatSendRequest request,
+            ChatMessageDecision decision,
+            Consumer<ChatSendResult> callback
+    ) {
+        return trySendAfterAccessAndMessageDecision(request, ChatSendStatus.SENT, decision, callback);
+    }
+
+    public AgentDeliveryResult trySendAfterAccessAndMessageDecision(
+            ChatSendRequest request,
+            ChatSendStatus accessStatus,
+            ChatMessageDecision decision,
+            Consumer<ChatSendResult> callback
+    ) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(accessStatus, "accessStatus");
+        Objects.requireNonNull(decision, "decision");
+        Objects.requireNonNull(callback, "callback");
+        ensureSameChannel(request.channelId());
+        return messages.tryTellLocal(self, ActorTaskCategory.PLAYER_COMMAND,
+                ignored -> executeSend(() -> sendNow(request, accessStatus, decision), callback));
     }
 
     public void snapshot(Consumer<ChatChannelSnapshot> callback) {
         Objects.requireNonNull(callback, "callback");
-        messages.tellLocal(self, ActorTaskCategory.OBSERVABILITY, ignored -> callback.accept(snapshotNow()));
+        messages.tellLocal(self, ActorTaskCategory.OBSERVABILITY, ignored -> executeMutation(
+                this::snapshotNow,
+                callback,
+                error -> snapshotNow(),
+                ignoredSnapshot -> {
+                }
+        ));
     }
 
     public void removeMemberDueToAllianceChange(long playerId) {
-        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> {
-            if (removeMemberNow(playerId)) {
-                allianceEventRemovedMembers++;
-            }
-        });
+        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> executeMutation(
+                () -> removeMemberNow(playerId),
+                removed -> {
+                },
+                error -> false,
+                removed -> {
+                    if (removed) {
+                        allianceEventRemovedMembers++;
+                    }
+                }
+        ));
     }
 
     public void retainMembersDueToAllianceSnapshot(Set<Long> memberIds) {
         Set<Long> retained = Set.copyOf(Objects.requireNonNull(memberIds, "memberIds"));
-        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> {
-            for (long memberId : Set.copyOf(members)) {
-                if (!retained.contains(memberId) && removeMemberNow(memberId)) {
-                    allianceSnapshotRemovedMembers++;
-                }
-            }
-        });
+        messages.tellLocal(self, ActorTaskCategory.EVENT, ignored -> executeMutation(
+                () -> retainMembersNow(retained),
+                removed -> {
+                },
+                error -> 0L,
+                removed -> allianceSnapshotRemovedMembers += removed
+        ));
     }
 
     public ChatChannelSnapshot snapshotNow() {
-        return new ChatChannelSnapshot(channelId, members, history, revision);
+        return new ChatChannelSnapshot(channelId, members, history, revision, memberAllianceIds);
+    }
+
+    void attachPersistence(ChatAgentPersistence persistence) {
+        if (this.persistence != null) {
+            throw new IllegalStateException("chat persistence already attached");
+        }
+        this.persistence = Objects.requireNonNull(persistence, "persistence");
+        persistence.start();
     }
 
     private ChatJoinResult joinNow(ChatJoinRequest request) {
@@ -186,11 +306,7 @@ public final class ChatChannelAgent {
         }
         boolean added = members.add(request.playerId());
         if (added) {
-            interests.enter(ScenePlayerInterest.withAlliance(
-                    request.playerId(),
-                    interestKey(),
-                    request.allianceId()
-            ));
+            memberAllianceIds.put(request.playerId(), request.allianceId());
         }
         return new ChatJoinResult(
                 added ? ChatJoinStatus.JOINED : ChatJoinStatus.ALREADY_JOINED,
@@ -213,7 +329,7 @@ public final class ChatChannelAgent {
     private boolean removeMemberNow(long playerId) {
         boolean removed = members.remove(playerId);
         if (removed) {
-            interests.leave(playerId, interestKey());
+            memberAllianceIds.remove(playerId);
         }
         return removed;
     }
@@ -232,7 +348,16 @@ public final class ChatChannelAgent {
         if (accessStatus != ChatSendStatus.SENT) {
             return ChatSendResult.rejected(accessStatus);
         }
-        ChatMessageDecision decision = messagePolicy.inspect(request);
+        return sendNow(request, accessStatus, messagePolicy.inspect(request));
+    }
+
+    private ChatSendResult sendNow(ChatSendRequest request, ChatSendStatus accessStatus, ChatMessageDecision decision) {
+        if (!members.contains(request.senderId())) {
+            return ChatSendResult.rejected(ChatSendStatus.NOT_IN_CHANNEL);
+        }
+        if (accessStatus != ChatSendStatus.SENT) {
+            return ChatSendResult.rejected(accessStatus);
+        }
         if (decision.status() != ChatSendStatus.SENT) {
             return ChatSendResult.rejected(decision.status());
         }
@@ -247,12 +372,85 @@ public final class ChatChannelAgent {
         );
         history.add(delivery);
         trimHistory();
-        deliveryStats = deliveryStats.plus(deliverySink.deliver(new ChatDeliveryEnvelope(channelId, members, delivery)));
         return ChatSendResult.sent(delivery);
     }
 
+    private long retainMembersNow(Set<Long> retained) {
+        long removed = 0;
+        for (long memberId : Set.copyOf(members)) {
+            if (!retained.contains(memberId) && removeMemberNow(memberId)) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    void restoreSnapshot(ChatChannelSnapshot restored) {
+        if (!channelId.equals(restored.channelId())) {
+            throw new IllegalArgumentException("chat snapshot channel mismatch");
+        }
+        members.clear();
+        members.addAll(restored.members());
+        memberAllianceIds.clear();
+        memberAllianceIds.putAll(restored.memberAllianceIds());
+        history.clear();
+        history.addAll(restored.history());
+        revision = restored.revision();
+        pendingDroppedHistoryMessages = 0;
+        publishCommittedState();
+    }
+
+    private long allianceId() {
+        if (!channelId.startsWith("alliance:")) {
+            return ScenePlayerInterest.NO_ALLIANCE;
+        }
+        try {
+            return Long.parseLong(channelId.substring("alliance:".length()));
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("invalid alliance channel id: " + channelId, e);
+        }
+    }
+
+    private void executeSend(Supplier<ChatSendResult> mutation, Consumer<ChatSendResult> callback) {
+        executeMutation(
+                mutation,
+                callback,
+                error -> ChatSendResult.rejected(ChatSendStatus.BACKPRESSURED),
+                result -> result.delivery().ifPresent(delivery -> deliveryStats = deliveryStats.plus(
+                        deliverySink.deliver(new ChatDeliveryEnvelope(channelId, members, delivery))
+                ))
+        );
+    }
+
+    private <T> void executeMutation(
+            Supplier<T> mutation,
+            Consumer<T> callback,
+            Function<Throwable, T> failureResult,
+            Consumer<T> afterCommit
+    ) {
+        ChatAgentPersistence activePersistence = persistence;
+        if (activePersistence == null) {
+            T result = mutation.get();
+            publishCommittedState();
+            afterCommit.accept(result);
+            callback.accept(result);
+            return;
+        }
+        java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
+        activePersistence.submit(
+                () -> result.set(mutation.get()),
+                () -> {
+                    T committed = result.get();
+                    publishCommittedState();
+                    afterCommit.accept(committed);
+                    callback.accept(committed);
+                },
+                error -> callback.accept(failureResult.apply(error))
+        );
+    }
+
     long retainedMessages() {
-        return history.size();
+        return retainedMessages;
     }
 
     long droppedHistoryMessages() {
@@ -271,10 +469,39 @@ public final class ChatChannelAgent {
         return allianceSnapshotRemovedMembers;
     }
 
+    ChatPersistenceStats persistenceStats() {
+        return persistence == null ? ChatPersistenceStats.empty() : persistence.stats();
+    }
+
     private void trimHistory() {
         while (history.size() > maxHistoryMessages) {
             history.removeFirst();
-            droppedHistoryMessages++;
+            pendingDroppedHistoryMessages++;
+        }
+    }
+
+    private void publishCommittedState() {
+        droppedHistoryMessages += pendingDroppedHistoryMessages;
+        pendingDroppedHistoryMessages = 0;
+        retainedMessages = history.size();
+        reconcileInterests();
+    }
+
+    private void reconcileInterests() {
+        for (long playerId : Set.copyOf(interestedMembers)) {
+            if (!members.contains(playerId)) {
+                interests.leave(playerId, interestKey());
+                interestedMembers.remove(playerId);
+            }
+        }
+        for (long playerId : members) {
+            if (interestedMembers.add(playerId)) {
+                interests.enter(ScenePlayerInterest.withAlliance(
+                        playerId,
+                        interestKey(),
+                        memberAllianceIds.getOrDefault(playerId, allianceId())
+                ));
+            }
         }
     }
 

@@ -4,6 +4,9 @@ import com.commonbattle.battle.log.BattleLogEntry;
 import com.commonbattle.cluster.protocol.EncodedPayload;
 import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.protocol.PayloadEncoding;
+import com.commonbattle.game.activity.ActivityClaimResult;
+import com.commonbattle.game.activity.AsyncActivityClaimResult;
+import com.commonbattle.game.activity.AsyncActivityClaimStatus;
 import com.commonbattle.game.bag.BagChange;
 import com.commonbattle.game.bag.BagResult;
 import com.commonbattle.game.battle.BattleSettlementResult;
@@ -11,6 +14,7 @@ import com.commonbattle.game.battle.BattleSettlementStatus;
 import com.commonbattle.game.shop.ShopPurchaseResult;
 import com.commonbattle.game.shop.ShopPurchaseStatus;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandStatus;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -63,6 +67,25 @@ class PlayerBusinessCommandPayloadCodecsTest {
     }
 
     @Test
+    void encodesAndDecodesPlayerBusinessResponseQuery() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        PlayerBusinessResponseQuery query = new PlayerBusinessResponseQuery(
+                10001L,
+                "session-1",
+                1,
+                8,
+                PlayerBusinessOperations.ACTIVITY_PROGRESS
+        );
+
+        EncodedPayload encoded = registry.encode(query);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        PlayerBusinessResponseQuery envelope = assertInstanceOf(PlayerBusinessResponseQuery.class, decoded);
+        assertEquals(PayloadEncoding.PROTOBUF, encoded.codecName());
+        assertEquals(query, envelope);
+    }
+
+    @Test
     void encodesAndDecodesClaimActivityCommand() {
         PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
         ClaimActivityCommand command = new ClaimActivityCommand("daily-login");
@@ -71,6 +94,19 @@ class PlayerBusinessCommandPayloadCodecsTest {
         Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
 
         ClaimActivityCommand claim = assertInstanceOf(ClaimActivityCommand.class, decoded);
+        assertEquals(PlayerBusinessOperations.ACTIVITY_CLAIM, claim.operation());
+        assertEquals(command, claim);
+    }
+
+    @Test
+    void encodesAndDecodesClaimActivityAsyncCommand() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        ClaimActivityAsyncCommand command = new ClaimActivityAsyncCommand("daily-login");
+
+        EncodedPayload encoded = registry.encode(command);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        ClaimActivityAsyncCommand claim = assertInstanceOf(ClaimActivityAsyncCommand.class, decoded);
         assertEquals(PlayerBusinessOperations.ACTIVITY_CLAIM, claim.operation());
         assertEquals(command, claim);
     }
@@ -243,6 +279,38 @@ class PlayerBusinessCommandPayloadCodecsTest {
     }
 
     @Test
+    void encodesAndDecodesRedirectBusinessResponseEnvelope() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        PlayerBusinessRedirect redirect = new PlayerBusinessRedirect(
+                "game:r1:game-3",
+                "player-10001",
+                "owner_redirect"
+        );
+        PlayerBusinessResponse response = new PlayerBusinessResponse(
+                10001L,
+                "session-1",
+                1,
+                11,
+                PlayerBusinessOperations.ACTIVITY_PROGRESS,
+                PlayerBusinessResponseStatus.FAILED,
+                PlayerCommandStatus.ROUTED_REMOTE.name(),
+                "ROUTED_REMOTE",
+                0,
+                redirect
+        );
+
+        EncodedPayload encoded = registry.encode(response);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        PlayerBusinessResponse envelope = assertInstanceOf(PlayerBusinessResponse.class, decoded);
+        PlayerBusinessRedirect payload = assertInstanceOf(PlayerBusinessRedirect.class, envelope.payload());
+        assertEquals(PlayerCommandStatus.ROUTED_REMOTE.name(), envelope.code());
+        assertEquals("game:r1:game-3", payload.targetService());
+        assertEquals("player-10001", payload.targetActor());
+        assertEquals("owner_redirect", payload.reason());
+    }
+
+    @Test
     void encodesAndDecodesBusinessResponseEnvelopeWithShopResultPayload() {
         PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
         ShopPurchaseResult result = new ShopPurchaseResult(
@@ -301,5 +369,23 @@ class PlayerBusinessCommandPayloadCodecsTest {
 
         assertEquals(PayloadEncoding.PROTOBUF, encoded.codecName());
         assertEquals(result, decoded);
+    }
+
+    @Test
+    void encodesAndDecodesAsyncActivityClaimResultPayload() {
+        PayloadCodecRegistry registry = PlayerBusinessCommandPayloadCodecs.registerTo(PayloadCodecRegistry.commonDefaults());
+        AsyncActivityClaimResult result = AsyncActivityClaimResult.claimed(new ActivityClaimResult(
+                "daily-login",
+                1,
+                new BagResult(List.of(new BagChange("gold", 0, 100)))
+        ));
+
+        EncodedPayload encoded = registry.encode(result);
+        Object decoded = registry.decode(encoded.codecName(), encoded.typeName(), encoded.bytes());
+
+        AsyncActivityClaimResult claim = assertInstanceOf(AsyncActivityClaimResult.class, decoded);
+        assertEquals(PayloadEncoding.PROTOBUF, encoded.codecName());
+        assertEquals(AsyncActivityClaimStatus.CLAIMED, claim.status());
+        assertEquals(result, claim);
     }
 }

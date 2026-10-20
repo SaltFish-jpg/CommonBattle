@@ -230,8 +230,7 @@ public final class AgentMigrationCoordinator {
     }
 
     private boolean rollback(AgentMigrationTask task) {
-        if (directory.move(task.identity(), task.target(), task.source())) {
-            sourceLifecycles.resumeAfterMigrationRollback(task.identity(), task.source());
+        if (sourceLifecycles.rollbackMigration(task.identity(), task.target(), task.source())) {
             try {
                 sourceHook.rollbackRestored(task);
                 metrics.rollbackSucceeded();

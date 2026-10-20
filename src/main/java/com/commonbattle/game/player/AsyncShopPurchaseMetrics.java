@@ -20,6 +20,7 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
     private final AtomicLong abandonedPendingCommands = new AtomicLong();
     private final AtomicLong releasedReservations = new AtomicLong();
     private final AtomicLong releaseFailures = new AtomicLong();
+    private final AtomicLong callbackDeliveryFailures = new AtomicLong();
 
     void startedPurchase() {
         startedPurchases.incrementAndGet();
@@ -77,6 +78,10 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
         releaseFailures.incrementAndGet();
     }
 
+    void callbackDeliveryFailure() {
+        callbackDeliveryFailures.incrementAndGet();
+    }
+
     @Override
     public AsyncShopPurchaseStats stats() {
         return new AsyncShopPurchaseStats(
@@ -92,7 +97,8 @@ public final class AsyncShopPurchaseMetrics implements AsyncShopPurchaseView {
                 rejectedPurchases.get(),
                 abandonedPendingCommands.get(),
                 releasedReservations.get(),
-                releaseFailures.get()
+                releaseFailures.get(),
+                callbackDeliveryFailures.get()
         );
     }
 }

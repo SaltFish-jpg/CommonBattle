@@ -20,11 +20,12 @@ public record AsyncShopPurchaseHealthStats(
         long abandonedPendingCommands,
         long releasedReservations,
         long releaseFailures,
+        long callbackDeliveryFailures,
         long stockReservationCallbackGap,
         long compensationAttempts
 ) {
     public static AsyncShopPurchaseHealthStats empty() {
-        return new AsyncShopPurchaseHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new AsyncShopPurchaseHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static AsyncShopPurchaseHealthStats from(int viewCount, AsyncShopPurchaseStats stats) {
@@ -33,7 +34,8 @@ public record AsyncShopPurchaseHealthStats(
                 - stats.outOfStockCallbacks()
                 - stats.rpcFailures()
                 - stats.lateCallbacks()
-                - stats.abandonedPendingCommands());
+                - stats.abandonedPendingCommands()
+                - stats.callbackDeliveryFailures());
         long compensationAttempts = stats.releasedReservations() + stats.releaseFailures();
         return new AsyncShopPurchaseHealthStats(
                 viewCount,
@@ -50,6 +52,7 @@ public record AsyncShopPurchaseHealthStats(
                 stats.abandonedPendingCommands(),
                 stats.releasedReservations(),
                 stats.releaseFailures(),
+                stats.callbackDeliveryFailures(),
                 callbackGap,
                 compensationAttempts
         );

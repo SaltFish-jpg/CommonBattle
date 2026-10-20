@@ -18,9 +18,43 @@ public record BusinessAgentMessageStats(
         long remoteTimedOutResponses,
         long lateRemoteResponses,
         long callbackDeliveryFailures,
-        Map<AgentDeliveryStatus, Long> callbackDeliveryFailuresByStatus
+        Map<AgentDeliveryStatus, Long> callbackDeliveryFailuresByStatus,
+        BusinessAgentLocalIdempotencyStats localIdempotency
 ) {
+    public BusinessAgentMessageStats(
+            long submittedRequests,
+            long localRequests,
+            long remoteRequests,
+            long rejectedRequests,
+            long remoteSuccessResponses,
+            long remoteFailureResponses,
+            long remoteTimedOutResponses,
+            long lateRemoteResponses,
+            long callbackDeliveryFailures,
+            Map<AgentDeliveryStatus, Long> callbackDeliveryFailuresByStatus
+    ) {
+        this(submittedRequests, localRequests, remoteRequests, rejectedRequests, remoteSuccessResponses,
+                remoteFailureResponses, remoteTimedOutResponses, lateRemoteResponses, callbackDeliveryFailures,
+                callbackDeliveryFailuresByStatus, BusinessAgentLocalIdempotencyStats.empty());
+    }
+
     public static BusinessAgentMessageStats empty() {
         return new BusinessAgentMessageStats(0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of());
+    }
+
+    public BusinessAgentMessageStats withLocalIdempotency(BusinessAgentLocalIdempotencyStats stats) {
+        return new BusinessAgentMessageStats(
+                submittedRequests,
+                localRequests,
+                remoteRequests,
+                rejectedRequests,
+                remoteSuccessResponses,
+                remoteFailureResponses,
+                remoteTimedOutResponses,
+                lateRemoteResponses,
+                callbackDeliveryFailures,
+                callbackDeliveryFailuresByStatus,
+                stats
+        );
     }
 }

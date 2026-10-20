@@ -9,6 +9,8 @@ public record SceneRuntimeStats(
         int activePlayers,
         int shardCount,
         int maxShardPlayers,
+        int pendingShardTransfers,
+        long failedShardTransfers,
         int playerInterests,
         int allianceReferences,
         long duplicateEnters,
@@ -28,7 +30,7 @@ public record SceneRuntimeStats(
         long projectionFreshReadRemoteMisses
 ) {
     public SceneRuntimeStats(int activeScenes, int activePlayers, int shardCount, int maxShardPlayers) {
-        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0,
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
@@ -42,7 +44,7 @@ public record SceneRuntimeStats(
             long duplicateEnters,
             long missingLeaves
     ) {
-        this(activeScenes, activePlayers, shardCount, maxShardPlayers, playerInterests, allianceReferences,
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, playerInterests, allianceReferences,
                 duplicateEnters, missingLeaves, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
@@ -64,14 +66,46 @@ public record SceneRuntimeStats(
             long projectionIgnoredSnapshots,
             int projectionStaleViews
     ) {
-        this(activeScenes, activePlayers, shardCount, maxShardPlayers, playerInterests, allianceReferences,
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, playerInterests, allianceReferences,
                 duplicateEnters, missingLeaves, projectionReceivedEvents, projectionAppliedEvents,
                 projectionDuplicateEvents, projectionGapEvents, projectionRepairRequests, projectionAppliedSnapshots,
                 projectionIgnoredSnapshots, projectionStaleViews, 0, 0, 0, 0, 0);
     }
 
+    public SceneRuntimeStats(
+            int activeScenes,
+            int activePlayers,
+            int shardCount,
+            int maxShardPlayers,
+            int playerInterests,
+            int allianceReferences,
+            long duplicateEnters,
+            long missingLeaves,
+            long projectionReceivedEvents,
+            long projectionAppliedEvents,
+            long projectionDuplicateEvents,
+            long projectionGapEvents,
+            long projectionRepairRequests,
+            long projectionAppliedSnapshots,
+            long projectionIgnoredSnapshots,
+            int projectionStaleViews,
+            long projectionFreshReadRequests,
+            long projectionFreshReadLocalHits,
+            long projectionFreshReadRefreshes,
+            long projectionFreshReadRemoteStale,
+            long projectionFreshReadRemoteMisses
+    ) {
+        this(activeScenes, activePlayers, shardCount, maxShardPlayers, 0, 0, playerInterests, allianceReferences,
+                duplicateEnters, missingLeaves, projectionReceivedEvents, projectionAppliedEvents,
+                projectionDuplicateEvents, projectionGapEvents, projectionRepairRequests, projectionAppliedSnapshots,
+                projectionIgnoredSnapshots, projectionStaleViews, projectionFreshReadRequests,
+                projectionFreshReadLocalHits, projectionFreshReadRefreshes, projectionFreshReadRemoteStale,
+                projectionFreshReadRemoteMisses);
+    }
+
     public SceneRuntimeStats {
         if (activeScenes < 0 || activePlayers < 0 || shardCount < 0 || maxShardPlayers < 0
+                || pendingShardTransfers < 0 || failedShardTransfers < 0
                 || playerInterests < 0 || allianceReferences < 0 || duplicateEnters < 0 || missingLeaves < 0
                 || projectionReceivedEvents < 0 || projectionAppliedEvents < 0 || projectionDuplicateEvents < 0
                 || projectionGapEvents < 0 || projectionRepairRequests < 0 || projectionAppliedSnapshots < 0
@@ -83,7 +117,7 @@ public record SceneRuntimeStats(
     }
 
     public static SceneRuntimeStats empty() {
-        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new SceneRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public SceneRuntimeStats plus(SceneRuntimeStats other) {
@@ -92,6 +126,8 @@ public record SceneRuntimeStats(
                 activePlayers + other.activePlayers,
                 shardCount + other.shardCount,
                 Math.max(maxShardPlayers, other.maxShardPlayers),
+                pendingShardTransfers + other.pendingShardTransfers,
+                failedShardTransfers + other.failedShardTransfers,
                 playerInterests + other.playerInterests,
                 allianceReferences + other.allianceReferences,
                 duplicateEnters + other.duplicateEnters,

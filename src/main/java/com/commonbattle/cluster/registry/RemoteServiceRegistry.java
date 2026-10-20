@@ -165,7 +165,9 @@ public final class RemoteServiceRegistry implements ServiceRegistry {
                     new RegistryReplayRequest(local, kind, versions.get(kind)),
                     RegistryReplayResponse.class
             ));
-            if (replay.compacted()) {
+            long knownVersion = versions.get(kind);
+            if (replay.compacted() || replay.currentVersion() < knownVersion) {
+                // 中心服重启后版本时钟可能回退；必须丢弃旧 epoch 的本地版本并全量刷新。
                 refresh(kind);
             } else {
                 replay.events().forEach(this::apply);

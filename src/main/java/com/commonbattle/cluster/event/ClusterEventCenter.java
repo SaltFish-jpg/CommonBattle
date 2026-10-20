@@ -3,6 +3,7 @@ package com.commonbattle.cluster.event;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.network.ClusterEnvelope;
+import com.commonbattle.cluster.network.ClusterSendCallback;
 import com.commonbattle.cluster.network.ClusterTransport;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.cluster.rpc.RpcResponder;
@@ -11,8 +12,6 @@ import com.commonbattle.game.event.VersionedEvent;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -32,14 +31,16 @@ public final class ClusterEventCenter {
     private final ServiceDescriptor local;
     private final ClusterTransport transport;
     private final ClusterEventHistoryPolicy historyPolicy;
+    private final ClusterEventJournal journal;
     private final Clock clock;
     private final Duration subscriptionLeaseTtl;
     private final Map<String, Set<ServiceId>> topicSubscribers = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Set<ServiceId>>> ownerSubscribers = new ConcurrentHashMap<>();
     private final Map<SubscriptionKey, Map<ServiceId, Instant>> subscriptionLeases = new ConcurrentHashMap<>();
-    private final Map<String, ArrayDeque<VersionedEvent>> history = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> publishedByTopic = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> droppedByTopic = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> duplicatePublishesByTopic = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> journalFailuresByTopic = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> deliveryFailuresByTopic = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> expiredSubscriptionsByTopic = new ConcurrentHashMap<>();
 
@@ -73,9 +74,23 @@ public final class ClusterEventCenter {
             Clock clock,
             Duration subscriptionLeaseTtl
     ) {
+        this(local, transport, gateway, historyPolicy, clock, subscriptionLeaseTtl,
+                new InMemoryClusterEventJournal());
+    }
+
+    public ClusterEventCenter(
+            ServiceDescriptor local,
+            ClusterTransport transport,
+            ClusterRpcGateway gateway,
+            ClusterEventHistoryPolicy historyPolicy,
+            Clock clock,
+            Duration subscriptionLeaseTtl,
+            ClusterEventJournal journal
+    ) {
         this.local = Objects.requireNonNull(local, "local");
         this.transport = Objects.requireNonNull(transport, "transport");
         this.historyPolicy = Objects.requireNonNull(historyPolicy, "historyPolicy");
+        this.journal = Objects.requireNonNull(journal, "journal");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.subscriptionLeaseTtl = positive(subscriptionLeaseTtl, "subscriptionLeaseTtl");
         Objects.requireNonNull(gateway, "gateway");
@@ -92,22 +107,18 @@ public final class ClusterEventCenter {
     }
 
     public int historySize(String topic) {
-        ArrayDeque<VersionedEvent> topicHistory = history.get(topic);
-        if (topicHistory == null) {
-            return 0;
-        }
-        synchronized (topicHistory) {
-            return topicHistory.size();
-        }
+        return retained(topic).size();
     }
 
     public ClusterEventCenterStats stats() {
         Set<String> topics = new HashSet<>();
-        topics.addAll(history.keySet());
+        topics.addAll(journal.topics());
         topics.addAll(topicSubscribers.keySet());
         topics.addAll(ownerSubscribers.keySet());
         topics.addAll(publishedByTopic.keySet());
         topics.addAll(droppedByTopic.keySet());
+        topics.addAll(duplicatePublishesByTopic.keySet());
+        topics.addAll(journalFailuresByTopic.keySet());
         topics.addAll(deliveryFailuresByTopic.keySet());
         topics.addAll(expiredSubscriptionsByTopic.keySet());
         Map<String, ClusterEventTopicStats> topicStats = new HashMap<>();
@@ -157,14 +168,18 @@ public final class ClusterEventCenter {
 
     private void publish(ClusterEnvelope request, RpcResponder responder) {
         EventPublishRequest payload = (EventPublishRequest) request.payload();
-        deliver(payload);
-        responder.success("published");
+        try {
+            deliver(payload);
+            responder.success("published");
+        } catch (RuntimeException error) {
+            responder.failure(error);
+        }
     }
 
     private void replay(ClusterEnvelope request, RpcResponder responder) {
         EventReplayRequest payload = (EventReplayRequest) request.payload();
         List<VersionedEvent> retained = retained(payload.topic());
-        Set<String> unavailableOwnerKeys = unavailableOwnerKeys(retained, payload.knownRevisions());
+        Set<String> unavailableOwnerKeys = unavailableOwnerKeys(payload.topic(), retained, payload.knownRevisions());
         int delivered = 0;
         for (VersionedEvent event : retained) {
             if (!payload.ownerKeys().isEmpty() && !payload.ownerKeys().contains(event.ownerKey())) {
@@ -181,8 +196,20 @@ public final class ClusterEventCenter {
 
     private void deliver(EventPublishRequest payload) {
         var event = payload.event();
+        ClusterEventJournalAppendResult appended;
+        try {
+            appended = journal.appendAndTrim(event, historyPolicy.limitOf(event.topic()));
+        } catch (RuntimeException error) {
+            journalFailuresByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
+            throw error;
+        }
+        droppedByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong())
+                .addAndGet(appended.trimmedEvents());
+        if (appended.status() == ClusterEventJournalAppendStatus.DUPLICATE) {
+            duplicatePublishesByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
+            return;
+        }
         publishedByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
-        record(event);
         subscribers(event.topic(), event.ownerKey()).forEach(subscriber -> sendSafely(subscriber, event));
     }
 
@@ -206,21 +233,30 @@ public final class ClusterEventCenter {
     }
 
     private void send(ServiceId subscriber, VersionedEvent event) {
+        send(subscriber, event, ClusterSendCallback.NOOP);
+    }
+
+    private void send(ServiceId subscriber, VersionedEvent event, ClusterSendCallback callback) {
         transport.send(subscriber, new ClusterEnvelope(
                 0,
                 local.id(),
                 subscriber,
                 ClusterEventOperations.DELIVER,
                 new EventDeliverRequest(event)
-        ));
+        ), callback);
     }
 
     private void sendSafely(ServiceId subscriber, VersionedEvent event) {
-        try {
-            send(subscriber, event);
-        } catch (RuntimeException e) {
-            deliveryFailuresByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
-        }
+        send(subscriber, event, new ClusterSendCallback() {
+            @Override
+            public void success() {
+            }
+
+            @Override
+            public void failure(Throwable error) {
+                deliveryFailuresByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
+            }
+        });
     }
 
     private void renewLease(SubscriptionKey key, ServiceId subscriber, Duration requestedTtl) {
@@ -247,29 +283,15 @@ public final class ClusterEventCenter {
                 .remove(subscriber);
     }
 
-    private void record(VersionedEvent event) {
-        ArrayDeque<VersionedEvent> topicHistory = history.computeIfAbsent(event.topic(), ignored -> new ArrayDeque<>());
-        int historyLimit = historyPolicy.limitOf(event.topic());
-        synchronized (topicHistory) {
-            while (topicHistory.size() >= historyLimit) {
-                topicHistory.removeFirst();
-                droppedByTopic.computeIfAbsent(event.topic(), ignored -> new AtomicLong()).incrementAndGet();
-            }
-            topicHistory.addLast(event);
-        }
-    }
-
     private List<VersionedEvent> retained(String topic) {
-        ArrayDeque<VersionedEvent> topicHistory = history.get(topic);
-        if (topicHistory == null) {
-            return List.of();
-        }
-        synchronized (topicHistory) {
-            return new ArrayList<>(topicHistory);
-        }
+        return journal.retained(topic);
     }
 
-    private Set<String> unavailableOwnerKeys(List<VersionedEvent> retained, Map<String, Long> knownRevisions) {
+    private Set<String> unavailableOwnerKeys(
+            String topic,
+            List<VersionedEvent> retained,
+            Map<String, Long> knownRevisions
+    ) {
         Map<String, Long> firstRetainedRevision = new HashMap<>();
         for (VersionedEvent event : retained) {
             firstRetainedRevision.merge(event.ownerKey(), event.revision(), Math::min);
@@ -278,6 +300,9 @@ public final class ClusterEventCenter {
         for (Map.Entry<String, Long> entry : knownRevisions.entrySet()) {
             Long firstRevision = firstRetainedRevision.get(entry.getKey());
             if (firstRevision != null && firstRevision > entry.getValue() + 1) {
+                unavailable.add(entry.getKey());
+            } else if (firstRevision == null
+                    && journal.highWaterMark(topic, entry.getKey()) > entry.getValue()) {
                 unavailable.add(entry.getKey());
             }
         }
@@ -302,6 +327,8 @@ public final class ClusterEventCenter {
                 subscribers(topic).size(),
                 publishedByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 droppedByTopic.getOrDefault(topic, new AtomicLong()).get(),
+                duplicatePublishesByTopic.getOrDefault(topic, new AtomicLong()).get(),
+                journalFailuresByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 deliveryFailuresByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 expiredSubscriptionsByTopic.getOrDefault(topic, new AtomicLong()).get(),
                 minRevision == Long.MAX_VALUE ? 0 : minRevision,

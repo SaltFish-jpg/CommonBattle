@@ -19,17 +19,20 @@ public final class AchievementService {
         this.bagService = Objects.requireNonNull(bagService, "bagService");
     }
 
-    public void onEvent(PlayerAchievements achievements, PlayerDomainEvent event) {
+    public int onEvent(PlayerAchievements achievements, PlayerDomainEvent event) {
         Objects.requireNonNull(achievements, "achievements");
         Objects.requireNonNull(event, "event");
         if (event.delta() <= 0 || event.replayed()) {
-            return;
+            return 0;
         }
+        int progressed = 0;
         for (AchievementDefinition definition : catalog.definitions()) {
             if (definition.progressRule().matches(event)) {
                 achievements.progress(definition.achievementId()).increase(event.delta());
+                progressed++;
             }
         }
+        return progressed;
     }
 
     public AchievementClaimResult claim(PlayerAchievements achievements, PlayerBag bag, String achievementId) {

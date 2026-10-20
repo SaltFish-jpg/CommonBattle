@@ -25,16 +25,24 @@ import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.ReliableVersionedEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
+import com.commonbattle.game.event.VersionedEventRetryPolicy;
 import com.commonbattle.game.player.event.BagChangedEvent;
 import com.commonbattle.game.player.event.BagChangeAuditEventHandler;
+import com.commonbattle.game.player.event.EventProgressRule;
 import com.commonbattle.game.player.event.PlayerDomainEventProcessor;
 import com.commonbattle.game.player.event.PlayerDomainVersionedEvent;
+import com.commonbattle.game.player.event.ShopItemPurchasedEvent;
 import com.commonbattle.game.session.PlayerOutboundDeliveryResult;
 import com.commonbattle.game.session.PlayerOutboundTopicPolicies;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.shop.ShopPurchaseResult;
+import com.commonbattle.game.shop.ShopPurchaseStatus;
 import com.commonbattle.game.task.TaskClaimResult;
+import com.commonbattle.game.task.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -215,10 +223,38 @@ class PlayerGameAgentConfigRuntimeTest {
         assertEquals(List.of(
                 PlayerOutboundTopicPolicies.GROWTH_SNAPSHOT,
                 PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS,
-                PlayerOutboundTopicPolicies.BATTLE_SNAPSHOT,
-                PlayerOutboundTopicPolicies.BAG_SNAPSHOT,
                 PlayerOutboundTopicPolicies.TASK_PROGRESS,
-                PlayerOutboundTopicPolicies.ACHIEVEMENT_PROGRESS
+                PlayerOutboundTopicPolicies.ACHIEVEMENT_PROGRESS,
+                PlayerOutboundTopicPolicies.BATTLE_SNAPSHOT,
+                PlayerOutboundTopicPolicies.BAG_SNAPSHOT
+        ), pushes.messages.stream().map(PushedMessage::topic).toList());
+    }
+
+    @Test
+    void shopEventPushesTaskAndAchievementProgressBeforePurchaseSnapshots() {
+        RecordingExecutor executor = new RecordingExecutor();
+        GameConfigRegistry registry = registry();
+        registry.publish(shopProgressConfig(1));
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, registry, pushes);
+        AtomicReference<ShopPurchaseResult> purchase = new AtomicReference<>();
+
+        agent.onLogin("daily-login", ignored -> {
+        });
+        executor.runNext();
+        pushes.messages.clear();
+
+        agent.buyShopItem("order-10001-growth-pack", "growth_pack", 1, purchase::set);
+        executor.runNext();
+
+        assertEquals(ShopPurchaseStatus.SUCCESS, purchase.get().status());
+        assertEquals(1, agent.profile().tasks().progress("task-buy-growth-pack").value());
+        assertEquals(1, agent.profile().achievements().progress("achievement-buy-growth-pack").value());
+        assertEquals(List.of(
+                PlayerOutboundTopicPolicies.TASK_PROGRESS,
+                PlayerOutboundTopicPolicies.ACHIEVEMENT_PROGRESS,
+                PlayerOutboundTopicPolicies.SHOP_SNAPSHOT,
+                PlayerOutboundTopicPolicies.BAG_SNAPSHOT
         ), pushes.messages.stream().map(PushedMessage::topic).toList());
     }
 
@@ -231,7 +267,14 @@ class PlayerGameAgentConfigRuntimeTest {
         List<VersionedEvent> published = new ArrayList<>();
         ReliableVersionedEventPublisher publisher = new ReliableVersionedEventPublisher(
                 outbox,
-                new FailingOncePublisher(published)
+                new FailingOncePublisher(published),
+                new VersionedEventRetryPolicy(
+                        3,
+                        Duration.ZERO,
+                        Duration.ZERO,
+                        10
+                ),
+                CLOCK
         );
         PlayerGameAgent agent = createAgent(executor, registry, publisher, 0, 0);
 
@@ -328,6 +371,46 @@ class PlayerGameAgentConfigRuntimeTest {
                         Reward.of(new ItemStack("gold", 100), new ItemStack("exp_potion", 1))
                 )),
                 new GrowthTuning("exp_potion", expPerItem, 100),
+                CLOCK.instant()
+        );
+    }
+
+    private static GameConfigPackage shopProgressConfig(long version) {
+        return new GameConfigPackage(
+                version,
+                List.of(
+                        new ItemDefinition("gold", "currency", 999999),
+                        new ItemDefinition("exp_potion", "growth", 999),
+                        new ItemDefinition("gem", "currency", 999999)
+                ),
+                List.of(new ActivityDefinition(
+                        "daily-login",
+                        ActivityType.LOGIN,
+                        1,
+                        Reward.of(new ItemStack("gold", 100))
+                )),
+                List.of(new ShopItemDefinition(
+                        "growth_pack",
+                        new ItemStack("gold", 50),
+                        Reward.of(new ItemStack("exp_potion", 1)),
+                        2,
+                        1,
+                        ShopItemDefinition.UNLIMITED_STOCK
+                )),
+                List.of(),
+                List.of(new TaskDefinition(
+                        "task-buy-growth-pack",
+                        EventProgressRule.of(ShopItemPurchasedEvent.TYPE, "growth_pack"),
+                        1,
+                        Reward.of(new ItemStack("gem", 1))
+                )),
+                List.of(new com.commonbattle.game.achievement.AchievementDefinition(
+                        "achievement-buy-growth-pack",
+                        EventProgressRule.of(ShopItemPurchasedEvent.TYPE, "growth_pack"),
+                        1,
+                        Reward.of(new ItemStack("gem", 2))
+                )),
+                new GrowthTuning("exp_potion", 60, 100),
                 CLOCK.instant()
         );
     }

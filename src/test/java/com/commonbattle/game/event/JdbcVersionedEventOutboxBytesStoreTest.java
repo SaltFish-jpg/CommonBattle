@@ -51,13 +51,14 @@ class JdbcVersionedEventOutboxBytesStoreTest {
         long second = store.nextId();
         store.save(first, new byte[]{1, 2});
         store.save(second, new byte[]{3});
+        store.save(first, new byte[]{4, 5});
 
         byte[] loaded = store.load(first).orElseThrow();
         loaded[0] = 9;
 
         assertEquals(1, first);
         assertEquals(2, second);
-        assertArrayEquals(new byte[]{1, 2}, store.load(first).orElseThrow());
+        assertArrayEquals(new byte[]{4, 5}, store.load(first).orElseThrow());
         assertEquals(2, store.loadAll().size());
         store.delete(first);
         assertTrue(store.load(first).isEmpty());
@@ -146,6 +147,14 @@ class JdbcVersionedEventOutboxBytesStoreTest {
         }
 
         private int executeUpdate(String sql, Map<Integer, Object> parameters) throws Exception {
+            if (sql.startsWith("UPDATE versioned_event_outbox SET payload = ?")) {
+                Long outboxId = (Long) parameters.get(2);
+                if (!rows.containsKey(outboxId)) {
+                    return 0;
+                }
+                rows.put(outboxId, copyBytes(parameters.get(1)));
+                return 1;
+            }
             if (sql.startsWith("UPDATE versioned_event_outbox_sequence SET next_value = ?")) {
                 if (nextValue == null || nextValue != (Long) parameters.get(3)) {
                     return 0;

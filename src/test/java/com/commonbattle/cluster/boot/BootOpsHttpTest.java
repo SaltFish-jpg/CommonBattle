@@ -140,7 +140,7 @@ class BootOpsHttpTest {
                 local,
                 actors,
                 directory,
-                runtime.healthRegistry()
+                runtime
         ))) {
             String health = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/health"))
@@ -151,7 +151,7 @@ class BootOpsHttpTest {
 
             assertTrue(health.contains("\"configCaches\":{\"cacheCount\":1,\"activeCaches\":1"));
             assertTrue(health.contains("\"eventSubscriptions\":{\"managerCount\":1,\"registered\":1"));
-            assertTrue(health.contains("\"outbox\":{\"pendingEvents\":1,\"failedAttempts\":1"));
+            assertTrue(health.contains("\"outbox\":{\"pendingEvents\":1,\"deadLetterEvents\":0,\"failedAttempts\":1"));
             assertTrue(health.contains("\"bagChangeAudits\":{\"auditCount\":1,\"retained\":1"));
             HttpResult bagAudit = get(server, "/bag-change-audit?playerId=10001");
             assertEquals(200, bagAudit.statusCode());
@@ -194,7 +194,7 @@ class BootOpsHttpTest {
                 local,
                 actors,
                 directory,
-                runtime.healthRegistry()
+                runtime
         ))) {
             HttpResult unauthDrain = post(server, "/drain", null);
             HttpResult authDrain = post(server, "/drain", "secret");
@@ -239,7 +239,7 @@ class BootOpsHttpTest {
                     local,
                     actors,
                     directory,
-                    runtime.healthRegistry()
+                    runtime
             ))) {
                 HttpResult isolated = get(server, "/owner-repair/isolated");
                 HttpResult release = post(server, "/owner-repair/release?ownerKey=profile%3A10001", null);

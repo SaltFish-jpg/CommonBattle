@@ -6,5 +6,6 @@ package com.commonbattle.observability;
 public enum ActorHotspotReason {
     QUEUE_BACKLOG,
     SLOW_TASK_COUNT,
-    SLOW_TASK_MILLIS
+    SLOW_TASK_MILLIS,
+    MAILBOX_BATCH_YIELD
 }

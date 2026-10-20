@@ -26,8 +26,10 @@ import com.commonbattle.game.config.GrowthTuning;
 import com.commonbattle.game.session.InMemoryPlayerCommandAuditLog;
 import com.commonbattle.game.session.InMemoryPlayerSessionRegistry;
 import com.commonbattle.game.session.PlayerCommand;
+import com.commonbattle.game.session.PlayerCommandAuditSink;
 import com.commonbattle.game.session.PlayerCommandDispatcher;
 import com.commonbattle.game.session.PlayerCommandSequencer;
+import com.commonbattle.game.session.PlayerCommandSequencerSnapshot;
 import com.commonbattle.game.shop.ShopItemDefinition;
 import com.commonbattle.game.shop.ShopPurchaseResult;
 import com.commonbattle.game.shop.ShopPurchaseStatus;
@@ -115,12 +117,44 @@ class AsyncShopBuyGatewayTest {
         }
     }
 
+    @Test
+    void pendingLimitRejectsSecondLimitedStockBuyBeforeCallingStockService() {
+        Fixture fixture = Fixture.create(
+                PlayerBusinessCommandGateway.DEFAULT_RESPONSE_TIMEOUT,
+                AsyncBusinessCommandPolicy.maxPendingForOperation(PlayerBusinessOperations.SHOP_BUY, 1)
+        );
+        try {
+            fixture.agent.profile().bag().restore(new BagSnapshot(java.util.Map.of("gold", 200)));
+            RecordingCallback first = new RecordingCallback();
+            RecordingCallback second = new RecordingCallback();
+
+            fixture.gateway.submit(command(new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1), 1), first);
+            fixture.executor.runNext();
+            fixture.gateway.submit(command(new BuyShopItemAsyncCommand("order-10001-2", "limited_pack", 1), 2), second);
+            fixture.executor.runNext();
+
+            assertNull(first.response.get());
+            assertEquals(1, fixture.stocks.reserveCalls);
+            PlayerBusinessResponse rejected = second.response.get();
+            assertEquals(PlayerBusinessResponseStatus.FAILED, rejected.status());
+            assertEquals(AsyncBusinessCommandRejectedException.CODE, rejected.code());
+            assertEquals(200, fixture.agent.profile().bag().count("gold"));
+            assertEquals(0, fixture.agent.profile().bag().count("ticket"));
+        } finally {
+            fixture.gateway.close();
+        }
+    }
+
     private static PlayerCommand command(PlayerBusinessCommand<?> payload) {
+        return command(payload, 1);
+    }
+
+    private static PlayerCommand command(PlayerBusinessCommand<?> payload, long sequence) {
         return new PlayerCommand(
                 10001L,
                 "session-1",
                 1,
-                1,
+                sequence,
                 payload.operation(),
                 payload
         );
@@ -134,6 +168,10 @@ class AsyncShopBuyGatewayTest {
             RecordingShopStockAsyncClient stocks
     ) {
         private static Fixture create(Duration timeout) {
+            return create(timeout, AsyncBusinessCommandPolicy.unlimited());
+        }
+
+        private static Fixture create(Duration timeout, AsyncBusinessCommandPolicy asyncCommandPolicy) {
             RecordingExecutor executor = new RecordingExecutor();
             ActorSystem actors = new ActorSystem(executor, 64);
             ActorRef self = actors.actor("player-10001");
@@ -156,7 +194,13 @@ class AsyncShopBuyGatewayTest {
                     0,
                     0,
                     null,
-                    stocks
+                    stocks,
+                    new AsyncShopPurchaseMetrics(),
+                    new AsyncBusinessCommandMetrics(),
+                    asyncCommandPolicy,
+                    PlayerPushPort.NOOP,
+                    PlayerCommandAuditSink.NOOP,
+                    PlayerCommandSequencerSnapshot::empty
             );
             InMemoryPlayerSessionRegistry sessions = new InMemoryPlayerSessionRegistry(CLOCK);
             sessions.bind(10001L, "session-1");
@@ -231,6 +275,7 @@ class AsyncShopBuyGatewayTest {
 
     private static final class RecordingShopStockAsyncClient implements ShopStockAsyncClient {
         private ShopStockCallback<ShopStockReserveResponse> reserveCallback;
+        private int reserveCalls;
         private final List<String> releases = new ArrayList<>();
 
         @Override
@@ -240,6 +285,7 @@ class AsyncShopBuyGatewayTest {
                 int count,
                 ShopStockCallback<ShopStockReserveResponse> callback
         ) {
+            reserveCalls++;
             reserveCallback = callback;
         }
 

@@ -29,6 +29,10 @@ public final class ShopStockReservationRetentionService implements ShopRuntimeVi
         }
     }
 
+    void rejected() {
+        failedRuns.increment();
+    }
+
     @Override
     public ShopRuntimeStats stats() {
         return new ShopRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

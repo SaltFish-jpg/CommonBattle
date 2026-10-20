@@ -12,21 +12,19 @@ import com.commonbattle.actor.backpressure.InboundAdmissionController;
 import com.commonbattle.actor.agent.lifecycle.LifecycleAwareAgentRouter;
 import com.commonbattle.actor.message.AgentDeliveryResult;
 import com.commonbattle.actor.message.AgentMessagePort;
-import com.commonbattle.actor.message.AskTimeoutScheduler;
-import com.commonbattle.actor.message.ExecutorAskTimeoutScheduler;
 import com.commonbattle.actor.message.LocalAsk;
 import com.commonbattle.actor.message.LocalAskCallback;
-import com.commonbattle.actor.message.RemoteAgentCallback;
-import com.commonbattle.actor.message.ScheduledAskTimeout;
-import com.commonbattle.actor.rpc.RpcCallback;
+import com.commonbattle.actor.message.RemoteActorCallback;
+import com.commonbattle.actor.message.RemoteActorCallOptions;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.player.PlayerBusinessCommandGateway;
 import com.commonbattle.game.player.PlayerBusinessResponse;
 import com.commonbattle.game.session.PlayerCommand;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 默认游戏业务 Agent 通信端口。
@@ -38,7 +36,7 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     private final LifecycleAwareAgentRouter router;
     private final BusinessAgentHandlerRegistry handlers;
     private final InboundAdmissionController admissions;
-    private final AskTimeoutScheduler remoteTimeouts;
+    private final BusinessAgentLocalIdempotencyCache localIdempotency;
     private final BusinessAgentMessageMetrics metrics = new BusinessAgentMessageMetrics();
 
     public DefaultBusinessAgentMessagePort(AgentMessagePort messages, PlayerBusinessCommandGateway playerCommands) {
@@ -61,7 +59,8 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             BusinessAgentHandlerRegistry handlers,
             InboundAdmissionController admissions
     ) {
-        this(messages, playerCommands, router, handlers, admissions, new ExecutorAskTimeoutScheduler());
+        this(messages, playerCommands, router, handlers, admissions,
+                BusinessAgentIdempotencyConfig.defaults(), Clock.systemUTC());
     }
 
     public DefaultBusinessAgentMessagePort(
@@ -70,14 +69,15 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             LifecycleAwareAgentRouter router,
             BusinessAgentHandlerRegistry handlers,
             InboundAdmissionController admissions,
-            AskTimeoutScheduler remoteTimeouts
+            BusinessAgentIdempotencyConfig idempotencyConfig,
+            Clock clock
     ) {
         this.messages = Objects.requireNonNull(messages, "messages");
         this.playerCommands = Objects.requireNonNull(playerCommands, "playerCommands");
         this.router = router;
         this.handlers = handlers;
         this.admissions = Objects.requireNonNull(admissions, "admissions");
-        this.remoteTimeouts = Objects.requireNonNull(remoteTimeouts, "remoteTimeouts");
+        this.localIdempotency = new BusinessAgentLocalIdempotencyCache(idempotencyConfig, clock);
     }
 
     @Override
@@ -125,13 +125,13 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     }
 
     @Override
-    public <T> void callRemote(RpcRequest<T> request, RpcCallback<T> callback) {
-        messages.callRemote(request, callback);
-    }
-
-    @Override
-    public <T> void callRemote(RpcRequest<T> request, RemoteAgentCallback<T> callback) {
-        messages.callRemote(request, callback);
+    public <T> void callRemote(
+            ActorRef requester,
+            RpcRequest<T> request,
+            RemoteActorCallOptions options,
+            RemoteActorCallback<T> callback
+    ) {
+        messages.callRemote(requester, request, options, callback);
     }
 
     @Override
@@ -177,16 +177,6 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     }
 
     @Override
-    public void sendPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback) {
-        playerCommands.submit(command, callback);
-    }
-
-    @Override
-    public void sendLocalPlayerCommand(PlayerCommand command, RpcCallback<PlayerBusinessResponse> callback) {
-        playerCommands.submitLocalOnly(command, callback);
-    }
-
-    @Override
     public <T> void requestPlayerCommand(
             ActorRef requester,
             PlayerCommand command,
@@ -207,10 +197,77 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
     }
 
     public BusinessAgentMessageStats stats() {
-        return metrics.snapshot();
+        return metrics.snapshot().withLocalIdempotency(localIdempotency.stats());
     }
 
     private <T> void askLocalAgent(
+            ActorRef requester,
+            AgentLocation location,
+            BusinessAgentRequest request,
+            Class<T> responseType,
+            BusinessAgentCallOptions options,
+            LocalAskCallback<T> callback
+    ) {
+        if (request.idempotencyKey().isBlank() || !localIdempotency.enabled()) {
+            askLocalAgentOnce(requester, location, request, responseType, options, callback);
+            return;
+        }
+        BusinessAgentLocalIdempotencyCache.Key key = new BusinessAgentLocalIdempotencyCache.Key(
+                requester.id(),
+                request.target(),
+                request.operation(),
+                request.idempotencyKey()
+        );
+        BusinessAgentLocalIdempotencyCache.Waiter waiter = (context, result) ->
+                completeLocalAgentRequest(context, result, responseType, callback);
+        BusinessAgentLocalIdempotencyCache.Begin begin = localIdempotency.begin(key, waiter);
+        if (begin.state() == BusinessAgentLocalIdempotencyCache.State.JOINED) {
+            return;
+        }
+        if (begin.state() == BusinessAgentLocalIdempotencyCache.State.REPLAY) {
+            recordCallbackDelivery(messages.tryTellLocal(
+                    requester,
+                    options.callbackCategory(),
+                    context -> waiter.complete(context, begin.result())
+            ));
+            return;
+        }
+        messages.askLocal(
+                requester,
+                location.actorRef(),
+                options.timeout(),
+                options.requestCategory(),
+                options.callbackCategory(),
+                context -> handlers.dispatch(context, request),
+                new LocalAskCallback<>() {
+                    @Override
+                    public void success(com.commonbattle.actor.ActorContext context, Object response) {
+                        completeLocalIdempotentRequest(
+                                context,
+                                key,
+                                BusinessAgentLocalIdempotencyCache.Result.success(response)
+                        );
+                    }
+
+                    @Override
+                    public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                        completeLocalIdempotentRequest(
+                                context,
+                                key,
+                                BusinessAgentLocalIdempotencyCache.Result.failure(error)
+                        );
+                    }
+
+                    @Override
+                    public void callbackDeliveryFailed(AgentDeliveryResult delivery) {
+                        localIdempotency.abandon(key);
+                        recordCallbackDelivery(delivery);
+                    }
+                }
+        );
+    }
+
+    private <T> void askLocalAgentOnce(
             ActorRef requester,
             AgentLocation location,
             BusinessAgentRequest request,
@@ -229,6 +286,34 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
         );
     }
 
+    private void completeLocalIdempotentRequest(
+            com.commonbattle.actor.ActorContext context,
+            BusinessAgentLocalIdempotencyCache.Key key,
+            BusinessAgentLocalIdempotencyCache.Result result
+    ) {
+        List<BusinessAgentLocalIdempotencyCache.Waiter> waiters = localIdempotency.complete(key, result);
+        for (BusinessAgentLocalIdempotencyCache.Waiter waiter : waiters) {
+            waiter.complete(context, result);
+        }
+    }
+
+    private static <T> void completeLocalAgentRequest(
+            com.commonbattle.actor.ActorContext context,
+            BusinessAgentLocalIdempotencyCache.Result result,
+            Class<T> responseType,
+            LocalAskCallback<T> callback
+    ) {
+        if (!result.success()) {
+            callback.failure(context, result.error());
+            return;
+        }
+        try {
+            callback.success(context, responseType.cast(result.response()));
+        } catch (RuntimeException e) {
+            callback.failure(context, e);
+        }
+    }
+
     private <T> void callRemoteAgent(
             ActorRef requester,
             AgentLocation location,
@@ -237,43 +322,44 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
             BusinessAgentCallOptions options,
             LocalAskCallback<T> callback
     ) {
-        AtomicBoolean completed = new AtomicBoolean();
-        ScheduledAskTimeout scheduledTimeout = remoteTimeouts.schedule(options.timeout(), () -> {
-            if (completed.compareAndSet(false, true)) {
-                metrics.remoteTimedOutResponse();
-                failOnRequesterMailbox(
-                        requester,
-                        options,
-                        callback,
-                        new BusinessAgentRequestTimeoutException(request.target(), request.operation(), options.timeout())
-                );
-            }
-        });
         messages.callRemote(
+                requester,
                 RpcRequest.toService(location.serviceId(), BusinessAgentRpcOperations.DISPATCH, request, responseType),
-            new RpcCallback<>() {
+                new RemoteActorCallOptions(options.timeout(), options.callbackCategory()),
+                new RemoteActorCallback<>() {
                     @Override
-                    public void success(T response) {
-                        if (!completed.compareAndSet(false, true)) {
-                            metrics.lateRemoteResponse();
-                            return;
-                        }
-                        scheduledTimeout.cancel();
+                    public void success(com.commonbattle.actor.ActorContext context, T response) {
                         metrics.remoteSuccessResponse();
-                        recordCallbackDelivery(messages.tryTellLocal(requester, options.callbackCategory(),
-                                context -> callback.success(context, response)));
+                        callback.success(context, response);
                     }
 
                     @Override
-                    public void failure(Throwable error) {
-                        if (!completed.compareAndSet(false, true)) {
-                            metrics.lateRemoteResponse();
+                    public void failure(
+                            com.commonbattle.actor.ActorContext context,
+                            AgentDeliveryResult delivery,
+                            Throwable error
+                    ) {
+                        if (delivery.status() == com.commonbattle.actor.message.AgentDeliveryStatus.TIMEOUT) {
+                            metrics.remoteTimedOutResponse();
+                            callback.failure(context, new BusinessAgentRequestTimeoutException(
+                                    request.target(),
+                                    request.operation(),
+                                    options.timeout()
+                            ));
                             return;
                         }
-                        scheduledTimeout.cancel();
                         metrics.remoteFailureResponse();
-                        recordCallbackDelivery(messages.tryTellLocal(requester, options.callbackCategory(),
-                                context -> callback.failure(context, error)));
+                        callback.failure(context, error);
+                    }
+
+                    @Override
+                    public void callbackDeliveryFailed(AgentDeliveryResult delivery) {
+                        recordCallbackDelivery(delivery);
+                    }
+
+                    @Override
+                    public void lateResponse() {
+                        metrics.lateRemoteResponse();
                     }
                 }
         );
@@ -319,7 +405,6 @@ public final class DefaultBusinessAgentMessagePort implements BusinessAgentMessa
 
     @Override
     public void close() {
-        remoteTimeouts.close();
     }
 
     private void recordCallbackDelivery(AgentDeliveryResult delivery) {

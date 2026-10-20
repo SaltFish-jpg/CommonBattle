@@ -1,6 +1,7 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.actor.rpc.ActorRpcClient;
+import com.commonbattle.actor.message.AgentMessagePortView;
 import com.commonbattle.actor.ActorScheduleView;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureView;
 import com.commonbattle.actor.backpressure.ActorHotspotAdmissionView;
@@ -17,6 +18,7 @@ import com.commonbattle.cluster.ClusterNode;
 import com.commonbattle.cluster.event.ClusterEventCenter;
 import com.commonbattle.cluster.event.ClusterEventSubscriptionManager;
 import com.commonbattle.cluster.netty.NettyClusterTransport;
+import com.commonbattle.cluster.network.ForwardingProxy;
 import com.commonbattle.cluster.registry.RegistryLeaseReaper;
 import com.commonbattle.cluster.registry.RegistryLeaseRenewer;
 import com.commonbattle.cluster.registry.RegistryHistoryView;
@@ -32,6 +34,8 @@ import com.commonbattle.game.bag.BagChangeAuditView;
 import com.commonbattle.game.config.GameConfigAutoRecovery;
 import com.commonbattle.game.event.ActorEventSubscriberView;
 import com.commonbattle.game.event.EventGatedCommandAuditView;
+import com.commonbattle.game.event.EventInboxDeadLetterAdmin;
+import com.commonbattle.game.event.EventOutboxDeadLetterAdmin;
 import com.commonbattle.game.event.OwnerActorEventSubscriptionView;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
 import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
@@ -42,13 +46,17 @@ import com.commonbattle.game.event.VersionedEventOutboxReplayScheduler;
 import com.commonbattle.game.config.LocalGameConfigCache;
 import com.commonbattle.game.chat.ChatRuntimeView;
 import com.commonbattle.game.player.PlayerAgentDrainService;
+import com.commonbattle.game.player.PlayerAgentMigrationRetryService;
 import com.commonbattle.game.player.PlayerAutoSaveScheduler;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.AsyncBusinessCommandView;
 import com.commonbattle.game.player.PlayerBusinessCommandCatalogView;
 import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessResponseView;
 import com.commonbattle.game.player.PlayerGatewayView;
 import com.commonbattle.game.player.PlayerGameAgentManager;
+import com.commonbattle.game.player.PlayerMutationRepositoryView;
+import com.commonbattle.game.player.PlayerMutationReplayScheduler;
 import com.commonbattle.game.profile.ProfileInterestView;
 import com.commonbattle.game.profile.ProfileRuntimeView;
 import com.commonbattle.game.session.PlayerCommandAuditView;
@@ -72,6 +80,7 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<ResilientRpcGateway> resilientRpcGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RpcRoutePolicyView> rpcRoutePolicies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ActorRpcClient> actorRpcClients = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<AgentMessagePortView> agentMessagePorts = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<BusinessAgentMessageView> businessAgentMessages = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<BusinessAgentRpcEndpointView> businessAgentRpcEndpoints =
             new CopyOnWriteArrayList<>();
@@ -87,6 +96,7 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<AgentLifecycleManager> lifecycleManagers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerCommandDispatcher> commandDispatchers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<NettyClusterTransport> networkTransports = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ForwardingProxy> forwardingProxies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RegistryLeaseRenewer> leaseRenewers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RegistryHistoryView> registryHistories = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RegistrySubscriptionView> registrySubscriptions = new CopyOnWriteArrayList<>();
@@ -120,8 +130,14 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<SceneRuntimeView> sceneRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ShopRuntimeView> shopRuntimes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerGameAgentManager> playerAgentManagers = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerMutationRepositoryView> playerMutationRepositories =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerMutationReplayScheduler> playerMutationReplaySchedulers =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAutoSaveScheduler> playerAutoSaves = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerAgentDrainService> playerAgentDrains = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PlayerAgentMigrationRetryService> playerAgentMigrationRetries =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerBusinessCommandCatalogView> playerBusinessCommandCatalogs =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerBusinessCommandGatewayView> playerBusinessCommandGateways =
@@ -130,6 +146,7 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<PlayerOutboundDeliveryView> playerOutboundDeliveries = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<PlayerGatewayView> playerGateways = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AsyncShopPurchaseView> asyncShopPurchases = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<AsyncBusinessCommandView> asyncBusinessCommands = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<DrainableComponent> drainableComponents = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<ServiceDescriptorPublisher> serviceDescriptorPublishers = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<AgentMigrationCoordinator> migrationCoordinators = new CopyOnWriteArrayList<>();
@@ -143,6 +160,10 @@ public final class RuntimeHealthRegistry {
     private final CopyOnWriteArrayList<VersionedEventOutbox> outboxes = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<VersionedEventOutboxReplayScheduler> outboxReplaySchedulers =
             new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<EventOutboxDeadLetterAdmin> eventOutboxDeadLetterAdmins =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<EventInboxDeadLetterAdmin> eventInboxDeadLetterAdmins =
+            new CopyOnWriteArrayList<>();
 
     public void register(Object component) {
         Objects.requireNonNull(component, "component");
@@ -154,6 +175,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, ResilientRpcGateway.class, resilientRpcGateways);
         addIf(component, RpcRoutePolicyView.class, rpcRoutePolicies);
         addIf(component, ActorRpcClient.class, actorRpcClients);
+        addIf(component, AgentMessagePortView.class, agentMessagePorts);
         addIf(component, BusinessAgentMessageView.class, businessAgentMessages);
         addIf(component, BusinessAgentRpcEndpointView.class, businessAgentRpcEndpoints);
         addIf(component, ActorScheduleView.class, actorSchedules);
@@ -166,6 +188,7 @@ public final class RuntimeHealthRegistry {
         addIf(component, AgentLifecycleManager.class, lifecycleManagers);
         addIf(component, PlayerCommandDispatcher.class, commandDispatchers);
         addIf(component, NettyClusterTransport.class, networkTransports);
+        addIf(component, ForwardingProxy.class, forwardingProxies);
         addIf(component, RegistryLeaseRenewer.class, leaseRenewers);
         addIf(component, RegistryHistoryView.class, registryHistories);
         addIf(component, RegistrySubscriptionView.class, registrySubscriptions);
@@ -192,14 +215,18 @@ public final class RuntimeHealthRegistry {
         addIf(component, SceneRuntimeView.class, sceneRuntimes);
         addIf(component, ShopRuntimeView.class, shopRuntimes);
         addIf(component, PlayerGameAgentManager.class, playerAgentManagers);
+        addIf(component, PlayerMutationRepositoryView.class, playerMutationRepositories);
+        addIf(component, PlayerMutationReplayScheduler.class, playerMutationReplaySchedulers);
         addIf(component, PlayerAutoSaveScheduler.class, playerAutoSaves);
         addIf(component, PlayerAgentDrainService.class, playerAgentDrains);
+        addIf(component, PlayerAgentMigrationRetryService.class, playerAgentMigrationRetries);
         addIf(component, PlayerBusinessCommandCatalogView.class, playerBusinessCommandCatalogs);
         addIf(component, PlayerBusinessCommandGatewayView.class, playerBusinessCommandGateways);
         addIf(component, PlayerBusinessResponseView.class, playerBusinessResponses);
         addIf(component, PlayerOutboundDeliveryView.class, playerOutboundDeliveries);
         addIf(component, PlayerGatewayView.class, playerGateways);
         addIf(component, AsyncShopPurchaseView.class, asyncShopPurchases);
+        addIf(component, AsyncBusinessCommandView.class, asyncBusinessCommands);
         addIf(component, DrainableComponent.class, drainableComponents);
         addIf(component, ServiceDescriptorPublisher.class, serviceDescriptorPublishers);
         addIf(component, AgentMigrationCoordinator.class, migrationCoordinators);
@@ -210,6 +237,8 @@ public final class RuntimeHealthRegistry {
         addIf(component, AgentMigrationTaskStore.class, migrationTaskStores);
         addIf(component, VersionedEventOutbox.class, outboxes);
         addIf(component, VersionedEventOutboxReplayScheduler.class, outboxReplaySchedulers);
+        addIf(component, EventOutboxDeadLetterAdmin.class, eventOutboxDeadLetterAdmins);
+        addIf(component, EventInboxDeadLetterAdmin.class, eventInboxDeadLetterAdmins);
     }
 
     public List<ClusterRpcGateway> rpcGateways() {
@@ -226,6 +255,10 @@ public final class RuntimeHealthRegistry {
 
     public List<ActorRpcClient> actorRpcClients() {
         return List.copyOf(actorRpcClients);
+    }
+
+    public List<AgentMessagePortView> agentMessagePorts() {
+        return List.copyOf(agentMessagePorts);
     }
 
     public List<BusinessAgentMessageView> businessAgentMessages() {
@@ -274,6 +307,10 @@ public final class RuntimeHealthRegistry {
 
     public List<NettyClusterTransport> networkTransports() {
         return List.copyOf(networkTransports);
+    }
+
+    public List<ForwardingProxy> forwardingProxies() {
+        return List.copyOf(forwardingProxies);
     }
 
     public List<RegistryLeaseRenewer> leaseRenewers() {
@@ -384,12 +421,24 @@ public final class RuntimeHealthRegistry {
         return List.copyOf(playerAgentManagers);
     }
 
+    public List<PlayerMutationRepositoryView> playerMutationRepositories() {
+        return List.copyOf(playerMutationRepositories);
+    }
+
+    public List<PlayerMutationReplayScheduler> playerMutationReplaySchedulers() {
+        return List.copyOf(playerMutationReplaySchedulers);
+    }
+
     public List<PlayerAutoSaveScheduler> playerAutoSaves() {
         return List.copyOf(playerAutoSaves);
     }
 
     public List<PlayerAgentDrainService> playerAgentDrains() {
         return List.copyOf(playerAgentDrains);
+    }
+
+    public List<PlayerAgentMigrationRetryService> playerAgentMigrationRetries() {
+        return List.copyOf(playerAgentMigrationRetries);
     }
 
     public List<PlayerBusinessCommandCatalogView> playerBusinessCommandCatalogs() {
@@ -414,6 +463,10 @@ public final class RuntimeHealthRegistry {
 
     public List<AsyncShopPurchaseView> asyncShopPurchases() {
         return List.copyOf(asyncShopPurchases);
+    }
+
+    public List<AsyncBusinessCommandView> asyncBusinessCommands() {
+        return List.copyOf(asyncBusinessCommands);
     }
 
     public List<DrainableComponent> drainableComponents() {
@@ -460,6 +513,14 @@ public final class RuntimeHealthRegistry {
 
     public List<VersionedEventOutboxReplayScheduler> outboxReplaySchedulers() {
         return List.copyOf(outboxReplaySchedulers);
+    }
+
+    public List<EventOutboxDeadLetterAdmin> eventOutboxDeadLetterAdmins() {
+        return List.copyOf(eventOutboxDeadLetterAdmins);
+    }
+
+    public List<EventInboxDeadLetterAdmin> eventInboxDeadLetterAdmins() {
+        return List.copyOf(eventInboxDeadLetterAdmins);
     }
 
     private static <T> void addIf(Object component, Class<T> type, CopyOnWriteArrayList<T> target) {

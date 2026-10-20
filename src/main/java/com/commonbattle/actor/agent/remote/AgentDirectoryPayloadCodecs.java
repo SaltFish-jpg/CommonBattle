@@ -1,6 +1,7 @@
 package com.commonbattle.actor.agent.remote;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.agent.AgentDirectoryLease;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.actor.agent.AgentLocation;
 import com.commonbattle.cluster.ServiceId;
@@ -12,6 +13,7 @@ import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
 
 import java.io.IOException;
+import java.time.Instant;
 
 /**
  * AgentDirectory RPC payload codec。
@@ -27,6 +29,11 @@ public final class AgentDirectoryPayloadCodecs {
         registry.register(new LocateRequestCodec());
         registry.register(new BooleanResponseCodec());
         registry.register(new LocateResponseCodec());
+        registry.register(new LeaseAcquireRequestCodec());
+        registry.register(new LeaseRenewRequestCodec());
+        registry.register(new LeaseTransferRequestCodec());
+        registry.register(new LeaseReleaseRequestCodec());
+        registry.register(new LeaseResponseCodec());
         return registry;
     }
 
@@ -107,6 +114,60 @@ public final class AgentDirectoryPayloadCodecs {
 
     private static int stringSize(int fieldNumber, String value) {
         return CodedOutputStream.computeStringSize(fieldNumber, value);
+    }
+
+    private static byte[] lease(AgentDirectoryLease lease) {
+        byte[] identity = identity(lease.identity());
+        byte[] location = location(lease.location());
+        int size = CodedOutputStream.computeByteArraySize(1, identity)
+                + CodedOutputStream.computeByteArraySize(2, location)
+                + stringSize(3, lease.ownerSession())
+                + CodedOutputStream.computeInt64Size(4, lease.fencingToken())
+                + CodedOutputStream.computeInt64Size(5, lease.expiresAt().toEpochMilli());
+        byte[] bytes = new byte[size];
+        try {
+            CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+            output.writeByteArray(1, identity);
+            output.writeByteArray(2, location);
+            output.writeString(3, lease.ownerSession());
+            output.writeInt64(4, lease.fencingToken());
+            output.writeInt64(5, lease.expiresAt().toEpochMilli());
+            output.flush();
+            return bytes;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to encode agent directory lease", e);
+        }
+    }
+
+    private static AgentDirectoryLease lease(byte[] bytes) {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        byte[] identity = new byte[0];
+        byte[] location = new byte[0];
+        String ownerSession = "";
+        long fencingToken = 0;
+        long expiresAtMillis = 0;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                switch (WireFormat.getTagFieldNumber(tag)) {
+                    case 1 -> identity = input.readByteArray();
+                    case 2 -> location = input.readByteArray();
+                    case 3 -> ownerSession = input.readString();
+                    case 4 -> fencingToken = input.readInt64();
+                    case 5 -> expiresAtMillis = input.readInt64();
+                    default -> input.skipField(tag);
+                }
+            }
+            return new AgentDirectoryLease(
+                    identity(identity),
+                    location(location),
+                    ownerSession,
+                    fencingToken,
+                    Instant.ofEpochMilli(expiresAtMillis)
+            );
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode agent directory lease", e);
+        }
     }
 
     private static final class ClaimRequestCodec implements PayloadCodec<AgentDirectoryClaimRequest> {
@@ -320,6 +381,246 @@ public final class AgentDirectoryPayloadCodecs {
                 return new AgentDirectoryLocateResponse(location);
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to decode agent directory locate response", e);
+            }
+        }
+    }
+
+    private static final class LeaseAcquireRequestCodec implements PayloadCodec<AgentDirectoryLeaseAcquireRequest> {
+        @Override
+        public String typeName() {
+            return AgentDirectoryLeaseAcquireRequest.class.getName();
+        }
+
+        @Override
+        public Class<AgentDirectoryLeaseAcquireRequest> javaType() {
+            return AgentDirectoryLeaseAcquireRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AgentDirectoryLeaseAcquireRequest payload) {
+            byte[] identity = identity(payload.identity());
+            byte[] location = location(payload.location());
+            int size = CodedOutputStream.computeByteArraySize(1, identity)
+                    + CodedOutputStream.computeByteArraySize(2, location)
+                    + stringSize(3, payload.ownerSession())
+                    + CodedOutputStream.computeInt64Size(4, payload.leaseTtlMillis());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, identity);
+                output.writeByteArray(2, location);
+                output.writeString(3, payload.ownerSession());
+                output.writeInt64(4, payload.leaseTtlMillis());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode agent directory lease acquire request", e);
+            }
+        }
+
+        @Override
+        public AgentDirectoryLeaseAcquireRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            byte[] identity = new byte[0];
+            byte[] location = new byte[0];
+            String ownerSession = "";
+            long leaseTtlMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> identity = input.readByteArray();
+                        case 2 -> location = input.readByteArray();
+                        case 3 -> ownerSession = input.readString();
+                        case 4 -> leaseTtlMillis = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new AgentDirectoryLeaseAcquireRequest(
+                        identity(identity), location(location), ownerSession, leaseTtlMillis
+                );
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode agent directory lease acquire request", e);
+            }
+        }
+    }
+
+    private static final class LeaseRenewRequestCodec implements PayloadCodec<AgentDirectoryLeaseRenewRequest> {
+        @Override
+        public String typeName() {
+            return AgentDirectoryLeaseRenewRequest.class.getName();
+        }
+
+        @Override
+        public Class<AgentDirectoryLeaseRenewRequest> javaType() {
+            return AgentDirectoryLeaseRenewRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AgentDirectoryLeaseRenewRequest payload) {
+            byte[] lease = lease(payload.lease());
+            int size = CodedOutputStream.computeByteArraySize(1, lease)
+                    + CodedOutputStream.computeInt64Size(2, payload.leaseTtlMillis());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, lease);
+                output.writeInt64(2, payload.leaseTtlMillis());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode agent directory lease renew request", e);
+            }
+        }
+
+        @Override
+        public AgentDirectoryLeaseRenewRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            byte[] lease = new byte[0];
+            long leaseTtlMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> lease = input.readByteArray();
+                        case 2 -> leaseTtlMillis = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new AgentDirectoryLeaseRenewRequest(lease(lease), leaseTtlMillis);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode agent directory lease renew request", e);
+            }
+        }
+    }
+
+    private static final class LeaseReleaseRequestCodec implements PayloadCodec<AgentDirectoryLeaseReleaseRequest> {
+        @Override
+        public String typeName() {
+            return AgentDirectoryLeaseReleaseRequest.class.getName();
+        }
+
+        @Override
+        public Class<AgentDirectoryLeaseReleaseRequest> javaType() {
+            return AgentDirectoryLeaseReleaseRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AgentDirectoryLeaseReleaseRequest payload) {
+            return lease(payload.lease());
+        }
+
+        @Override
+        public AgentDirectoryLeaseReleaseRequest decode(byte[] bytes) {
+            return new AgentDirectoryLeaseReleaseRequest(lease(bytes));
+        }
+    }
+
+    private static final class LeaseTransferRequestCodec
+            implements PayloadCodec<AgentDirectoryLeaseTransferRequest> {
+        @Override
+        public String typeName() {
+            return AgentDirectoryLeaseTransferRequest.class.getName();
+        }
+
+        @Override
+        public Class<AgentDirectoryLeaseTransferRequest> javaType() {
+            return AgentDirectoryLeaseTransferRequest.class;
+        }
+
+        @Override
+        public byte[] encode(AgentDirectoryLeaseTransferRequest payload) {
+            byte[] lease = lease(payload.lease());
+            byte[] location = location(payload.nextLocation());
+            int size = CodedOutputStream.computeByteArraySize(1, lease)
+                    + CodedOutputStream.computeByteArraySize(2, location)
+                    + stringSize(3, payload.nextOwnerSession())
+                    + CodedOutputStream.computeInt64Size(4, payload.leaseTtlMillis());
+            byte[] bytes = new byte[size];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, lease);
+                output.writeByteArray(2, location);
+                output.writeString(3, payload.nextOwnerSession());
+                output.writeInt64(4, payload.leaseTtlMillis());
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode agent directory lease transfer request", e);
+            }
+        }
+
+        @Override
+        public AgentDirectoryLeaseTransferRequest decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            byte[] lease = new byte[0];
+            byte[] location = new byte[0];
+            String nextOwnerSession = "";
+            long leaseTtlMillis = 0;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    switch (WireFormat.getTagFieldNumber(tag)) {
+                        case 1 -> lease = input.readByteArray();
+                        case 2 -> location = input.readByteArray();
+                        case 3 -> nextOwnerSession = input.readString();
+                        case 4 -> leaseTtlMillis = input.readInt64();
+                        default -> input.skipField(tag);
+                    }
+                }
+                return new AgentDirectoryLeaseTransferRequest(
+                        lease(lease), location(location), nextOwnerSession, leaseTtlMillis
+                );
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode agent directory lease transfer request", e);
+            }
+        }
+    }
+
+    private static final class LeaseResponseCodec implements PayloadCodec<AgentDirectoryLeaseResponse> {
+        @Override
+        public String typeName() {
+            return AgentDirectoryLeaseResponse.class.getName();
+        }
+
+        @Override
+        public Class<AgentDirectoryLeaseResponse> javaType() {
+            return AgentDirectoryLeaseResponse.class;
+        }
+
+        @Override
+        public byte[] encode(AgentDirectoryLeaseResponse payload) {
+            if (payload.lease() == null) {
+                return new byte[0];
+            }
+            byte[] lease = lease(payload.lease());
+            byte[] bytes = new byte[CodedOutputStream.computeByteArraySize(1, lease)];
+            try {
+                CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+                output.writeByteArray(1, lease);
+                output.flush();
+                return bytes;
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to encode agent directory lease response", e);
+            }
+        }
+
+        @Override
+        public AgentDirectoryLeaseResponse decode(byte[] bytes) {
+            CodedInputStream input = CodedInputStream.newInstance(bytes);
+            AgentDirectoryLease lease = null;
+            try {
+                int tag;
+                while ((tag = input.readTag()) != 0) {
+                    if (WireFormat.getTagFieldNumber(tag) == 1) {
+                        lease = lease(input.readByteArray());
+                    } else {
+                        input.skipField(tag);
+                    }
+                }
+                return new AgentDirectoryLeaseResponse(lease);
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to decode agent directory lease response", e);
             }
         }
     }

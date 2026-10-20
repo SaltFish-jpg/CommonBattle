@@ -7,6 +7,7 @@ import com.commonbattle.actor.agent.migration.ActorHotspotMigrationResult;
 import com.commonbattle.actor.agent.migration.ActorHotspotMigrationStatus;
 import com.commonbattle.actor.agent.migration.AgentMigrationTask;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStatus;
+import com.commonbattle.actor.agent.lifecycle.AgentLifecycleState;
 import com.commonbattle.actor.backpressure.ActorHotspotOverride;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideAdmin;
 import com.commonbattle.actor.backpressure.ActorHotspotOverrideMode;
@@ -18,6 +19,11 @@ import com.commonbattle.game.event.EventGatedCommandAuditPage;
 import com.commonbattle.game.event.EventGatedCommandAuditQuery;
 import com.commonbattle.game.event.EventGatedCommandAuditRecord;
 import com.commonbattle.game.event.EventGatedCommandAuditView;
+import com.commonbattle.game.event.DeadLetteredEventInboxEntry;
+import com.commonbattle.game.event.DeadLetteredVersionedEvent;
+import com.commonbattle.game.event.EventInboxDeadLetterAdmin;
+import com.commonbattle.game.event.EventInboxKey;
+import com.commonbattle.game.event.EventOutboxDeadLetterAdmin;
 import com.commonbattle.game.event.OwnerEventRepairIsolatedOwner;
 import com.commonbattle.game.event.OwnerEventRepairIsolationAdmin;
 import com.commonbattle.game.event.OwnerEventRepairRequestAdmin;
@@ -71,6 +77,7 @@ public final class OpsHttpServer implements AutoCloseable {
     private static final int DEFAULT_EVENT_GATED_COMMAND_AUDIT_LIMIT = 128;
     private static final int MAX_BAG_CHANGE_AUDIT_ENTRIES = 256;
     private static final int DEFAULT_BAG_CHANGE_AUDIT_LIMIT = 128;
+    private static final int MAX_EVENT_DEAD_LETTER_ENTRIES = 256;
     private static final long DEFAULT_ACTOR_HOTSPOT_OVERRIDE_TTL_MILLIS = 300_000;
     private static final int DEFAULT_ACTOR_HOTSPOT_MIGRATION_SUBMISSIONS = 16;
     private static final int MAX_ACTOR_HOTSPOT_MIGRATION_SUBMISSIONS = 128;
@@ -82,6 +89,8 @@ public final class OpsHttpServer implements AutoCloseable {
     private final Collection<OwnerEventRepairRequestAdmin> repairRequestAdmins;
     private final OwnerRepairOpsAuditSink ownerRepairOpsAuditSink;
     private final OwnerRepairOpsAuditView ownerRepairOpsAuditView;
+    private final InMemoryEventDeadLetterOpsAuditLog eventDeadLetterOpsAudit =
+            new InMemoryEventDeadLetterOpsAuditLog(MAX_OWNER_REPAIR_AUDIT_ENTRIES);
     private final Collection<ActorIncidentView> actorIncidentViews;
     private final Collection<ActorSlowTaskView> actorSlowTaskViews;
     private final Collection<ActorHotspotOverrideAdmin> actorHotspotOverrideAdmins;
@@ -91,6 +100,8 @@ public final class OpsHttpServer implements AutoCloseable {
     private List<PlayerCommandAuditView> playerCommandAuditViews = List.of();
     private List<EventGatedCommandAuditView> eventGatedCommandAuditViews = List.of();
     private List<BagChangeAuditView> bagChangeAuditViews = List.of();
+    private List<EventOutboxDeadLetterAdmin> eventOutboxDeadLetterAdmins = List.of();
+    private List<EventInboxDeadLetterAdmin> eventInboxDeadLetterAdmins = List.of();
     private final AtomicBoolean draining = new AtomicBoolean();
     private final HttpServer server;
 
@@ -403,6 +414,13 @@ public final class OpsHttpServer implements AutoCloseable {
         server.createContext("/player-command-audit", this::playerCommandAudit);
         server.createContext("/event-gated-command-audit", this::eventGatedCommandAudit);
         server.createContext("/bag-change-audit", this::bagChangeAudit);
+        server.createContext("/event-dead-letters/outbox", this::outboxDeadLetters);
+        server.createContext("/event-dead-letters/outbox/redrive", this::redriveOutboxDeadLetter);
+        server.createContext("/event-dead-letters/inbox", this::inboxDeadLetters);
+        server.createContext("/event-dead-letters/inbox/redrive", this::redriveInboxDeadLetter);
+        server.createContext("/event-dead-letters/audit", this::eventDeadLetterAudit);
+        server.createContext("/player-mutations/pending", this::pendingPlayerMutations);
+        server.createContext("/agent-lifecycles", this::agentLifecycles);
     }
 
     public void start() {
@@ -433,6 +451,24 @@ public final class OpsHttpServer implements AutoCloseable {
             List<BagChangeAuditView> views = new java.util.ArrayList<>(bagChangeAuditViews);
             views.add(view);
             bagChangeAuditViews = List.copyOf(views);
+        }
+    }
+
+    public void attachEventOutboxDeadLetterAdmin(EventOutboxDeadLetterAdmin admin) {
+        Objects.requireNonNull(admin, "admin");
+        if (!eventOutboxDeadLetterAdmins.contains(admin)) {
+            List<EventOutboxDeadLetterAdmin> admins = new java.util.ArrayList<>(eventOutboxDeadLetterAdmins);
+            admins.add(admin);
+            eventOutboxDeadLetterAdmins = List.copyOf(admins);
+        }
+    }
+
+    public void attachEventInboxDeadLetterAdmin(EventInboxDeadLetterAdmin admin) {
+        Objects.requireNonNull(admin, "admin");
+        if (!eventInboxDeadLetterAdmins.contains(admin)) {
+            List<EventInboxDeadLetterAdmin> admins = new java.util.ArrayList<>(eventInboxDeadLetterAdmins);
+            admins.add(admin);
+            eventInboxDeadLetterAdmins = List.copyOf(admins);
         }
     }
 
@@ -823,6 +859,338 @@ public final class OpsHttpServer implements AutoCloseable {
         int from = Math.min(query.offset(), matched.size());
         int to = Math.min(from + query.limit(), matched.size());
         return new BagChangeAuditPage(matched.subList(from, to), matched.size(), query.offset(), query.limit());
+    }
+
+    private void outboxDeadLetters(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String target = blankToNull(queryParam(rawQuery, "target"));
+        int limit;
+        try {
+            limit = deadLetterLimit(rawQuery);
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        int count = 0;
+        boolean first = true;
+        for (EventOutboxDeadLetterAdmin admin : eventOutboxDeadLetterAdmins) {
+            if (target != null && !target.equals(admin.target())) {
+                continue;
+            }
+            for (DeadLetteredVersionedEvent entry : admin.outboxDeadLetters()) {
+                if (count++ >= limit) {
+                    break;
+                }
+                if (!first) {
+                    json.append(',');
+                }
+                first = false;
+                json.append("{\"target\":\"").append(escape(admin.target())).append("\",")
+                        .append("\"outboxId\":").append(entry.id()).append(',')
+                        .append("\"topic\":\"").append(escape(entry.event().topic())).append("\",")
+                        .append("\"ownerKey\":\"").append(escape(entry.event().ownerKey())).append("\",")
+                        .append("\"revision\":").append(entry.event().revision()).append(',')
+                        .append("\"attempts\":").append(entry.attempts()).append(',')
+                        .append("\"deadLetteredAt\":\"").append(entry.deadLetteredAt()).append("\",")
+                        .append("\"lastFailure\":\"").append(escape(entry.lastFailure())).append("\"}");
+            }
+            if (count >= limit) {
+                break;
+            }
+        }
+        json.append("],\"count\":").append(Math.min(count, limit)).append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private void pendingPlayerMutations(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        int limit;
+        try {
+            limit = deadLetterLimit(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        List<com.commonbattle.game.player.PlayerMutationPendingRecord> records =
+                probe.pendingPlayerMutations(limit);
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        boolean first = true;
+        for (var record : records) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append("{\"playerId\":").append(record.playerId()).append(',')
+                    .append("\"stateRevision\":").append(record.stateRevision()).append(',')
+                    .append("\"eventRevision\":").append(record.eventRevision()).append(',')
+                    .append("\"pendingEvents\":").append(record.pendingEvents()).append(',')
+                    .append("\"firstPendingRevision\":").append(record.firstPendingRevision()).append(',')
+                    .append("\"lastPendingRevision\":").append(record.lastPendingRevision()).append(',')
+                    .append("\"eventTypes\":[");
+            for (int index = 0; index < record.eventTypes().size(); index++) {
+                if (index > 0) {
+                    json.append(',');
+                }
+                json.append('\"').append(escape(record.eventTypes().get(index))).append('\"');
+            }
+            json.append("]}");
+        }
+        json.append("],\"count\":").append(records.size()).append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private void agentLifecycles(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String query = exchange.getRequestURI().getRawQuery();
+        int limit;
+        AgentLifecycleState state = null;
+        try {
+            limit = deadLetterLimit(query);
+            String stateValue = blankToNull(queryParam(query, "state"));
+            if (stateValue != null) {
+                state = AgentLifecycleState.valueOf(stateValue.trim().toUpperCase(java.util.Locale.ROOT));
+            }
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"invalid_lifecycle_query\"}");
+            return;
+        }
+        var records = probe.agentLifecycleRecords(state, limit);
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        boolean first = true;
+        for (var record : records) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append("{\"type\":\"").append(escape(record.identity().type())).append("\",")
+                    .append("\"key\":\"").append(escape(record.identity().key())).append("\",")
+                    .append("\"serviceId\":\"").append(escape(record.location().serviceId().toString())).append("\",")
+                    .append("\"actorId\":\"").append(escape(record.location().actorRef().id())).append("\",")
+                    .append("\"state\":\"").append(record.state()).append("\",")
+                    .append("\"updatedAt\":\"").append(record.updatedAt()).append("\"}");
+        }
+        json.append("],\"count\":").append(records.size()).append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private void inboxDeadLetters(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String target = blankToNull(queryParam(rawQuery, "target"));
+        String topic = blankToNull(queryParam(rawQuery, "topic"));
+        int limit;
+        try {
+            limit = deadLetterLimit(rawQuery);
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        int count = 0;
+        boolean first = true;
+        for (EventInboxDeadLetterAdmin admin : eventInboxDeadLetterAdmins) {
+            if ((target != null && !target.equals(admin.target()))
+                    || (topic != null && !topic.equals(admin.topic()))) {
+                continue;
+            }
+            for (DeadLetteredEventInboxEntry entry : admin.inboxDeadLetters()) {
+                if (count++ >= limit) {
+                    break;
+                }
+                if (!first) {
+                    json.append(',');
+                }
+                first = false;
+                json.append("{\"target\":\"").append(escape(admin.target())).append("\",")
+                        .append("\"topic\":\"").append(escape(entry.key().topic())).append("\",")
+                        .append("\"ownerKey\":\"").append(escape(entry.key().ownerKey())).append("\",")
+                        .append("\"revision\":").append(entry.key().revision()).append(',')
+                        .append("\"attempts\":").append(entry.attempts()).append(',')
+                        .append("\"deadLetteredAt\":\"").append(entry.deadLetteredAt()).append("\",")
+                        .append("\"lastFailure\":\"").append(escape(entry.lastFailure())).append("\"}");
+            }
+            if (count >= limit) {
+                break;
+            }
+        }
+        json.append("],\"count\":").append(Math.min(count, limit)).append('}');
+        respondJson(exchange, 200, json.toString());
+    }
+
+    private void redriveOutboxDeadLetter(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        Long outboxId;
+        try {
+            outboxId = longQueryParam(rawQuery, "outboxId");
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"invalid_outbox_id\"}");
+            return;
+        }
+        if (outboxId == null || outboxId <= 0) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"invalid_outbox_id\"}");
+            return;
+        }
+        EventOutboxDeadLetterAdmin admin;
+        try {
+            admin = selectOutboxAdmin(blankToNull(queryParam(rawQuery, "target")));
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        if (admin == null) {
+            respondJson(exchange, eventOutboxDeadLetterAdmins.isEmpty() ? 503 : 404,
+                    "{\"redriven\":false,\"error\":\"outbox_target_not_found\"}");
+            return;
+        }
+        boolean redriven = admin.redriveOutboxDeadLetter(outboxId);
+        recordEventDeadLetterAudit("outbox-redrive", admin.target(), "", "outbox:" + outboxId,
+                redriven, exchange);
+        respondJson(exchange, redriven ? 200 : 404, "{\"redriven\":" + redriven
+                + ",\"target\":\"" + escape(admin.target()) + "\",\"outboxId\":" + outboxId + "}");
+    }
+
+    private void redriveInboxDeadLetter(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String topic = blankToNull(queryParam(rawQuery, "topic"));
+        String ownerKey = blankToNull(queryParam(rawQuery, "ownerKey"));
+        Long revision;
+        try {
+            revision = longQueryParam(rawQuery, "revision");
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"invalid_revision\"}");
+            return;
+        }
+        if (topic == null || ownerKey == null || revision == null || revision <= 0) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"invalid_event_key\"}");
+            return;
+        }
+        EventInboxDeadLetterAdmin admin;
+        try {
+            admin = selectInboxAdmin(blankToNull(queryParam(rawQuery, "target")), topic);
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"redriven\":false,\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        if (admin == null) {
+            respondJson(exchange, eventInboxDeadLetterAdmins.isEmpty() ? 503 : 404,
+                    "{\"redriven\":false,\"error\":\"inbox_target_not_found\"}");
+            return;
+        }
+        EventInboxKey key = new EventInboxKey(topic, ownerKey, revision);
+        boolean redriven = admin.redriveInboxDeadLetter(key);
+        recordEventDeadLetterAudit("inbox-redrive", admin.target(), topic, ownerKey + ":" + revision,
+                redriven, exchange);
+        respondJson(exchange, redriven ? 200 : 404, "{\"redriven\":" + redriven
+                + ",\"target\":\"" + escape(admin.target()) + "\",\"topic\":\"" + escape(topic)
+                + "\",\"ownerKey\":\"" + escape(ownerKey) + "\",\"revision\":" + revision + "}");
+    }
+
+    private int deadLetterLimit(String rawQuery) {
+        Integer limit = optionalIntQueryParam(rawQuery, "limit");
+        if (limit == null) {
+            return DEFAULT_OWNER_REPAIR_AUDIT_LIMIT;
+        }
+        if (limit <= 0 || limit > MAX_EVENT_DEAD_LETTER_ENTRIES) {
+            throw new IllegalArgumentException("invalid_limit");
+        }
+        return limit;
+    }
+
+    private EventOutboxDeadLetterAdmin selectOutboxAdmin(String target) {
+        List<EventOutboxDeadLetterAdmin> matched = eventOutboxDeadLetterAdmins.stream()
+                .filter(admin -> target == null || target.equals(admin.target()))
+                .toList();
+        if (target == null && matched.size() > 1) {
+            throw new IllegalArgumentException("missing_target");
+        }
+        return matched.size() == 1 ? matched.getFirst() : null;
+    }
+
+    private EventInboxDeadLetterAdmin selectInboxAdmin(String target, String topic) {
+        List<EventInboxDeadLetterAdmin> matched = eventInboxDeadLetterAdmins.stream()
+                .filter(admin -> topic.equals(admin.topic()))
+                .filter(admin -> target == null || target.equals(admin.target()))
+                .toList();
+        if (target == null && matched.size() > 1) {
+            throw new IllegalArgumentException("missing_target");
+        }
+        return matched.size() == 1 ? matched.getFirst() : null;
+    }
+
+    private void eventDeadLetterAudit(HttpExchange exchange) throws IOException {
+        if (!authorizeAdmin(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        int limit;
+        try {
+            limit = deadLetterLimit(exchange.getRequestURI().getRawQuery());
+        } catch (IllegalArgumentException e) {
+            respondJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+            return;
+        }
+        List<EventDeadLetterOpsAuditRecord> records = eventDeadLetterOpsAudit.recent(limit);
+        StringBuilder json = new StringBuilder("{\"entries\":[");
+        boolean first = true;
+        for (EventDeadLetterOpsAuditRecord record : records) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append("{\"action\":\"").append(escape(record.action())).append("\",")
+                    .append("\"target\":\"").append(escape(record.target())).append("\",")
+                    .append("\"topic\":\"").append(escape(record.topic())).append("\",")
+                    .append("\"identity\":\"").append(escape(record.identity())).append("\",")
+                    .append("\"redriven\":").append(record.redriven()).append(',')
+                    .append("\"at\":\"").append(record.at()).append("\",")
+                    .append("\"remote\":\"").append(escape(record.remote())).append("\",")
+                    .append("\"operator\":\"").append(escape(record.operator())).append("\"}");
+        }
+        json.append("],\"count\":").append(records.size()).append('}');
+        respondJson(exchange, 200, json.toString());
     }
 
     private void actorIncidents(HttpExchange exchange) throws IOException {
@@ -1300,6 +1668,10 @@ public final class OpsHttpServer implements AutoCloseable {
         json.append("{\"actorId\":\"").append(escape(entry.actor().id())).append("\",")
                 .append("\"group\":\"").append(escape(ActorMailboxDiagnostics.groupOfActorId(entry.actor().id()))).append("\",")
                 .append("\"queuedTasks\":").append(entry.queuedTasks()).append(',')
+                .append("\"drainCycles\":").append(entry.drainCycles()).append(',')
+                .append("\"drainProcessedTasks\":").append(entry.drainProcessedTasks()).append(',')
+                .append("\"maxTasksPerDrain\":").append(entry.maxTasksPerDrain()).append(',')
+                .append("\"batchYields\":").append(entry.batchYields()).append(',')
                 .append("\"queuedTasksByCategory\":");
         appendCategoryMap(json, entry.queuedTasksByCategory());
         json.append('}');
@@ -1319,6 +1691,7 @@ public final class OpsHttpServer implements AutoCloseable {
                 .append("\"queuedTasks\":").append(entry.queuedTasks()).append(',')
                 .append("\"recentSlowTasks\":").append(entry.recentSlowTasks()).append(',')
                 .append("\"maxSlowTaskMillis\":").append(entry.maxSlowTaskMillis()).append(',')
+                .append("\"mailboxBatchYields\":").append(entry.mailboxBatchYields()).append(',')
                 .append("\"action\":\"").append(entry.action().name()).append("\",")
                 .append("\"score\":").append(entry.score()).append(',')
                 .append("\"reasons\":[");
@@ -1400,6 +1773,26 @@ public final class OpsHttpServer implements AutoCloseable {
                 action,
                 ownerKey,
                 released,
+                Instant.now(),
+                remoteAddress(exchange),
+                operator(exchange)
+        ));
+    }
+
+    private void recordEventDeadLetterAudit(
+            String action,
+            String target,
+            String topic,
+            String identity,
+            boolean redriven,
+            HttpExchange exchange
+    ) {
+        eventDeadLetterOpsAudit.record(new EventDeadLetterOpsAuditRecord(
+                action,
+                target,
+                topic,
+                identity,
+                redriven,
                 Instant.now(),
                 remoteAddress(exchange),
                 operator(exchange)

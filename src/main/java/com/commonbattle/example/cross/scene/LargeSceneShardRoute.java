@@ -1,5 +1,7 @@
 package com.commonbattle.example.cross.scene;
 
+import com.commonbattle.actor.agent.AgentIdentity;
+
 /**
  * 大场景 chunk 到 shard 的稳定路由结果。
  * 业务层可以把它用于热点观测、迁移决策和跨服转发，而不需要重复理解分片哈希规则。
@@ -27,5 +29,9 @@ public record LargeSceneShardRoute(
 
     public LargeSceneShardAgentKey agentKey() {
         return new LargeSceneShardAgentKey(sceneId, shardIndex);
+    }
+
+    public AgentIdentity agentIdentity() {
+        return agentKey().identity();
     }
 }

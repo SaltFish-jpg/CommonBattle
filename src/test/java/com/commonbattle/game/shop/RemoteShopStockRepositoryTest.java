@@ -1,5 +1,6 @@
 package com.commonbattle.game.shop;
 
+import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.cluster.ClusterDirectory;
 import com.commonbattle.cluster.ClusterTopology;
 import com.commonbattle.cluster.InMemoryServiceRegistry;
@@ -25,6 +26,7 @@ class RemoteShopStockRepositoryTest {
         LocalClusterTransport transport = new LocalClusterTransport();
         ClusterRpcGateway centerGateway = null;
         ClusterRpcGateway gameGateway = null;
+        ActorSystem centerActors = null;
         try {
             InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
             ServiceDescriptor center = descriptor(ServiceKind.CENTER, "center-1", 9000, Set.of(
@@ -39,7 +41,8 @@ class RemoteShopStockRepositoryTest {
             centerGateway = new ClusterRpcGateway(center, watchedDirectory(registry), topology, transport);
             InMemoryShopStockRepository centerStocks = new InMemoryShopStockRepository();
             centerStocks.set("limited_pack", 1);
-            new ShopStockEndpoint(centerStocks).bind(centerGateway);
+            centerActors = new ActorSystem(2);
+            new ShopStockEndpoint(centerStocks, centerActors, "center-shop-stock").bind(centerGateway);
             gameGateway = new ClusterRpcGateway(game, watchedDirectory(registry), topology, transport);
             RemoteShopStockRepository remoteStocks = new RemoteShopStockRepository(gameGateway, Duration.ofSeconds(1));
 
@@ -59,6 +62,9 @@ class RemoteShopStockRepositoryTest {
             }
             if (gameGateway != null) {
                 gameGateway.close();
+            }
+            if (centerActors != null) {
+                centerActors.close();
             }
             transport.close();
         }

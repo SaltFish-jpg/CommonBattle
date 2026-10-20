@@ -28,6 +28,7 @@ public record PlayerGatewayHealthStats(
         long invalidFrames,
         long disconnectedSessions,
         long idleTimeouts,
+        long inFlightWrites,
         Map<PlayerClientErrorCode, Long> rejectedCommandsByCode
 ) {
     public PlayerGatewayHealthStats {
@@ -57,11 +58,11 @@ public record PlayerGatewayHealthStats(
         this(gatewayCount, acceptedLogins, failedLogins, authRejectedLogins, duplicateRejectedLogins,
                 kickedConnections, acceptedCommands, rejectedCommands, rateLimitedCommands, acceptedHeartbeats,
                 rejectedHeartbeats, rateLimitedHeartbeats, acceptedAcks, rejectedAcks, slowClientClosures,
-                invalidFrames, disconnectedSessions, idleTimeouts, Map.of());
+                invalidFrames, disconnectedSessions, idleTimeouts, 0, Map.of());
     }
 
     public static PlayerGatewayHealthStats empty() {
-        return new PlayerGatewayHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new PlayerGatewayHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of());
     }
 
     public static PlayerGatewayHealthStats from(int gatewayCount, NettyPlayerGatewayStats stats) {
@@ -84,6 +85,7 @@ public record PlayerGatewayHealthStats(
                 stats.invalidFrames(),
                 stats.disconnectedSessions(),
                 stats.idleTimeouts(),
+                stats.inFlightWrites(),
                 stats.rejectedCommandsByCode()
         );
     }

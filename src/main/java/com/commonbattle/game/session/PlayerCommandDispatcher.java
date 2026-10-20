@@ -117,26 +117,21 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         }
         PlayerCommandStatus sequenceStatus = sequencer.inspect(command);
         if (sequenceStatus == PlayerCommandStatus.DUPLICATE) {
-            return sequencer.committedStatus(command)
-                    .map(originalStatus -> {
-                        String reason = "duplicate:" + originalStatus.name();
-                        return result(command, PlayerCommandResult.duplicateOf(originalStatus),
-                                PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, reason);
-                    })
-                    .orElseGet(() -> result(
-                            command,
-                            PlayerCommandResult.duplicateWithoutCachedResponse(),
-                            PlayerCommandAuditOutcome.REJECTED,
-                            0,
-                            Duration.ZERO,
-                            "duplicate:WATERMARK_ONLY"
-                    ));
+            return duplicate(command);
         }
         if (sequenceStatus == PlayerCommandStatus.GAP) {
             return result(command, PlayerCommandResult.reject(PlayerCommandStatus.GAP, "command_gap"),
                     PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, "command_gap");
         }
         if (routed.route().type() == AgentRouteType.REMOTE) {
+            PlayerCommandStatus remoteSequenceStatus = sequencer.beginRemote(command);
+            if (remoteSequenceStatus == PlayerCommandStatus.DUPLICATE) {
+                return duplicate(command);
+            }
+            if (remoteSequenceStatus == PlayerCommandStatus.GAP) {
+                return result(command, PlayerCommandResult.reject(PlayerCommandStatus.GAP, "command_gap"),
+                        PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, "command_gap");
+            }
             return result(command, PlayerCommandResult.routedRemote(routed.route()),
                     PlayerCommandAuditOutcome.ROUTED_REMOTE, 0, Duration.ZERO, "");
         }
@@ -164,6 +159,38 @@ public final class PlayerCommandDispatcher implements DrainableComponent {
         }
         sequencer.commit(command, PlayerCommandStatus.ACCEPTED);
         return result(PlayerCommandResult.accepted());
+    }
+
+    /**
+     * 远程 owner 已接收命令后的入口确认。
+     * 用于非 owner Game 服推进本地 session 水位，但不执行业务逻辑。
+     */
+    public PlayerCommandStatus completeRemote(PlayerCommand command, PlayerCommandStatus finalStatus) {
+        return sequencer.completeRemote(command, finalStatus);
+    }
+
+    /**
+     * 远程 owner 未确认接收时撤销入口 in-flight 状态，允许客户端按原序号重试。
+     */
+    public void cancelRemote(PlayerCommand command) {
+        sequencer.cancelRemote(command);
+    }
+
+    private PlayerCommandResult duplicate(PlayerCommand command) {
+        return sequencer.committedStatus(command)
+                .map(originalStatus -> {
+                    String reason = "duplicate:" + originalStatus.name();
+                    return result(command, PlayerCommandResult.duplicateOf(originalStatus),
+                            PlayerCommandAuditOutcome.REJECTED, 0, Duration.ZERO, reason);
+                })
+                .orElseGet(() -> result(
+                        command,
+                        PlayerCommandResult.duplicateWithoutCachedResponse(),
+                        PlayerCommandAuditOutcome.REJECTED,
+                        0,
+                        Duration.ZERO,
+                        "duplicate:WATERMARK_ONLY"
+                ));
     }
 
     private PlayerCommandResult result(

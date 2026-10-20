@@ -148,6 +148,26 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void migratedCompletedResponseReplaysBeforeTargetDispatcherRuns() {
+        Fixture source = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
+        Fixture target = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-2"), new NoopRpcGateway());
+        PlayerCommand command = command(1);
+        RecordingCallback first = new RecordingCallback();
+        source.commands.submit(command, first);
+        source.executor.runAll();
+        target.responses.restore(source.responses.snapshotForPlayer(command.playerId()));
+        target.sequencer.restore(source.sequencer.snapshotForPlayer(command.playerId()));
+        RecordingCallback retry = new RecordingCallback();
+
+        target.commands.submit(command, retry);
+
+        assertEquals(PlayerBusinessAck.OK, retry.response.get().payload());
+        assertEquals(0, target.executor.queued());
+        assertEquals(0, target.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, target.responses.stats().replayedResponses());
+    }
+
+    @Test
     void duplicateKnownOnlyFromRestoredWatermarkFailsFastWithoutWaitingForCachedResponse() {
         Fixture fixture = Fixture.create(ServiceId.of(ServiceKind.GAME, "r1", "game-1"), new NoopRpcGateway());
         RecordingCallback callback = new RecordingCallback();
@@ -235,6 +255,91 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(PlayerBusinessAck.OK, callback.response.get().payload());
         assertEquals(1, callback.response.get().sequence());
         assertEquals(0, owner.responses.pendingResponses());
+    }
+
+    @Test
+    void remoteEndpointReturnsCachedCommandResultWithoutReenteringMailbox() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        PlayerCommand command = command(1);
+        RecordingCallback dispatch = new RecordingCallback();
+        RecordingCallback query = new RecordingCallback();
+
+        gameOneGateway.call(
+                RpcRequest.toService(
+                        gameTwo.id(),
+                        PlayerBusinessRpcOperations.DISPATCH,
+                        command,
+                        PlayerBusinessResponse.class
+                ),
+                dispatch
+        );
+        owner.executor.runAll();
+        gameOneGateway.call(
+                RpcRequest.toService(
+                        gameTwo.id(),
+                        PlayerBusinessRpcOperations.GET_RESULT,
+                        PlayerBusinessResponseQuery.from(command),
+                        PlayerBusinessResponse.class
+                ),
+                query
+        );
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, dispatch.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, query.response.get().status());
+        assertEquals(PlayerBusinessAck.OK, query.response.get().payload());
+        assertEquals(1, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(0, owner.executor.queued());
+    }
+
+    @Test
+    void remoteEndpointResultQueryMissReturnsExplicitFailureWithoutMailboxWork() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback query = new RecordingCallback();
+
+        gameOneGateway.call(
+                RpcRequest.toService(
+                        gameTwo.id(),
+                        PlayerBusinessRpcOperations.GET_RESULT,
+                        PlayerBusinessResponseQuery.from(command(1)),
+                        PlayerBusinessResponse.class
+                ),
+                query
+        );
+
+        assertEquals(PlayerBusinessResponseStatus.FAILED, query.response.get().status());
+        assertEquals(PlayerBusinessResponse.RESULT_NOT_FOUND, query.response.get().code());
+        assertEquals(0, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(0, owner.executor.queued());
     }
 
     @Test
@@ -337,6 +442,199 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void remoteForwardCommitsCallerSequenceAfterOwnerAcceptedCommand() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback second = new RecordingCallback();
+
+        caller.commands.submit(command(1), first);
+        owner.executor.runAll();
+        caller.commands.submit(command(2), second);
+
+        assertNull(second.response.get());
+        assertEquals(1, owner.responses.pendingResponses());
+        owner.executor.runAll();
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, second.response.get().status());
+        assertEquals(2, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(2, caller.dispatcher.stats().count(PlayerCommandStatus.ROUTED_REMOTE));
+        assertEquals(0, caller.dispatcher.stats().count(PlayerCommandStatus.GAP));
+        assertEquals(PlayerCommandStatus.ACCEPTED, caller.sequencer.inspect(command(3)));
+        assertEquals(2, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(2, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+    }
+
+    @Test
+    void duplicateRemoteForwardWhilePendingSharesOriginalRpcAndMailboxResponse() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback retry = new RecordingCallback();
+
+        caller.commands.submit(command(1), first);
+        caller.commands.submit(command(1), retry);
+
+        assertNull(first.response.get());
+        assertNull(retry.response.get());
+        assertEquals(1, owner.responses.pendingResponses());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.responses.stats().sharedWaiters());
+        owner.executor.runAll();
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, retry.response.get().status());
+        assertEquals(1, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, caller.dispatcher.stats().count(PlayerCommandStatus.DUPLICATE));
+    }
+
+    @Test
+    void duplicateRemoteForwardAfterSuccessReplaysCachedResponseWithoutRpc() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        RecordingCallback first = new RecordingCallback();
+        RecordingCallback retry = new RecordingCallback();
+
+        caller.commands.submit(command(1), first);
+        owner.executor.runAll();
+        caller.commands.submit(command(1), retry);
+
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, retry.response.get().status());
+        assertEquals(1, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.responses.stats().replayedResponses());
+    }
+
+    @Test
+    void remoteForwardTimeoutRecoversLostOwnerResponseFromOwnerCache() throws Exception {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        DroppingFirstRpcSuccessTransport transport = new DroppingFirstRpcSuccessTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway, Duration.ofMillis(10));
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        try {
+            RecordingCallback first = new RecordingCallback();
+            PlayerCommand command = command(1);
+
+            caller.commands.submit(command, first);
+            owner.executor.runAll();
+
+            assertTrue(await(() -> first.response.get() != null));
+            assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+            assertEquals(PlayerBusinessAck.OK, first.response.get().payload());
+            assertEquals(1, owner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+            assertEquals(PlayerCommandStatus.ACCEPTED, caller.sequencer.inspect(command(2)));
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+            assertEquals(0, caller.commands.commandGatewayStats().remoteForwardTimedOutResponses());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryQueries());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryHits());
+            assertEquals(0, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryMisses());
+        } finally {
+            caller.commands.close();
+        }
+    }
+
+    @Test
+    void remoteForwardTimeoutReturnsTimeoutWhenOwnerResultCacheMisses() throws Exception {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway, Duration.ofMillis(10));
+        Fixture owner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(owner.commands).bind(gameTwoGateway);
+        try {
+            RecordingCallback callback = new RecordingCallback();
+
+            caller.commands.submit(command(1), callback);
+
+            assertTrue(await(() -> callback.response.get() != null));
+            assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+            assertEquals(1, owner.responses.pendingResponses());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryQueries());
+            assertEquals(0, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryHits());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardTimeoutRecoveryMisses());
+            assertEquals(1, caller.commands.commandGatewayStats().remoteForwardTimedOutResponses());
+
+            owner.executor.runAll();
+            assertEquals(PlayerBusinessResponse.TIMEOUT, callback.response.get().code());
+        } finally {
+            caller.commands.close();
+        }
+    }
+
+    @Test
     void remoteForwardTimeoutReturnsClassifiedFailureEnvelope() {
         Duration timeout = Duration.ofMillis(25);
         Fixture fixture = Fixture.createRemoteOwner(
@@ -352,6 +650,7 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(PlayerBusinessResponse.REMOTE_TIMEOUT, callback.response.get().code());
         assertEquals(timeout.toMillis(), callback.response.get().retryAfterMillis());
         assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.sequencer.inspect(command(1)));
     }
 
     @Test
@@ -368,6 +667,7 @@ class PlayerBusinessCommandGatewayTest {
         assertEquals(PlayerBusinessResponseStatus.FAILED, callback.response.get().status());
         assertEquals(PlayerBusinessResponse.REMOTE_UNAVAILABLE, callback.response.get().code());
         assertEquals(0, fixture.responses.pendingResponses());
+        assertEquals(PlayerCommandStatus.ACCEPTED, fixture.sequencer.inspect(command(1)));
     }
 
     @Test
@@ -437,6 +737,66 @@ class PlayerBusinessCommandGatewayTest {
     }
 
     @Test
+    void remoteForwardToMigratedOldOwnerRetriesRedirectedOwnerOnce() {
+        InMemoryServiceRegistry registry = new InMemoryServiceRegistry();
+        SerializingClusterTransport transport = new SerializingClusterTransport(BootPayloadCodecs.gameServer());
+        ClusterTopology topology = new ClusterTopology()
+                .allow(ServiceKind.GAME, ServiceKind.GAME);
+        ServiceDescriptor gameOne = descriptor("game-1", 9101);
+        ServiceDescriptor gameTwo = descriptor("game-2", 9102);
+        ServiceDescriptor gameThree = descriptor("game-3", 9103);
+        registry.register(gameOne);
+        registry.register(gameTwo);
+        registry.register(gameThree);
+        ClusterDirectory gameOneDirectory = new ClusterDirectory(registry);
+        gameOneDirectory.seed(gameTwo);
+        gameOneDirectory.seed(gameThree);
+        ClusterDirectory gameTwoDirectory = new ClusterDirectory(registry);
+        gameTwoDirectory.seed(gameOne);
+        ClusterDirectory gameThreeDirectory = new ClusterDirectory(registry);
+        gameThreeDirectory.seed(gameOne);
+        ClusterRpcGateway gameOneGateway = new ClusterRpcGateway(gameOne, gameOneDirectory, topology, transport);
+        ClusterRpcGateway gameTwoGateway = new ClusterRpcGateway(gameTwo, gameTwoDirectory, topology, transport);
+        ClusterRpcGateway gameThreeGateway = new ClusterRpcGateway(gameThree, gameThreeDirectory, topology, transport);
+        Fixture caller = Fixture.createRemoteOwner(gameOne.id(), gameTwo.id(), gameOneGateway);
+        Fixture oldOwner = Fixture.create(gameTwo.id(), gameTwoGateway);
+        Fixture newOwner = Fixture.create(gameThree.id(), gameThreeGateway);
+        new PlayerBusinessCommandEndpoint(oldOwner.commands).bind(gameTwoGateway);
+        new PlayerBusinessCommandEndpoint(newOwner.commands).bind(gameThreeGateway);
+        oldOwner.lifecycles.migrate(
+                AgentIdentity.player(10001L),
+                new AgentLocation(gameThree.id(), new ActorRef("player-10001")),
+                ignored -> {
+                }
+        );
+        oldOwner.executor.runAll();
+        RecordingCallback callback = new RecordingCallback();
+
+        caller.commands.submit(command(1), callback);
+
+        assertNull(callback.response.get());
+        assertEquals(1, newOwner.responses.pendingResponses());
+        newOwner.executor.runAll();
+
+        PlayerBusinessResponse response = callback.response.get();
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, response.status(), response.code() + ":" + response.message());
+        assertEquals(PlayerBusinessAck.OK, response.payload());
+        assertEquals(0, oldOwner.responses.pendingResponses());
+        assertEquals(0, oldOwner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, newOwner.dispatcher.stats().count(PlayerCommandStatus.ACCEPTED));
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwards());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardSuccessResponses());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardMigrationProtectedResponses());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardRedirectResponses());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardRedirectRetries());
+        assertEquals(1, caller.commands.commandGatewayStats().remoteForwardRedirectRouteRefreshes());
+        assertEquals(gameThree.id(), caller.directory.locate(AgentIdentity.player(10001L))
+                .orElseThrow()
+                .serviceId());
+        assertTrue(transport.encodedMessages() >= 4);
+    }
+
+    @Test
     void remoteForwardWithoutRpcCallbackTimesOutAndIgnoresLateResponse() throws Exception {
         HangingRpcGateway rpc = new HangingRpcGateway();
         Duration timeout = Duration.ofMillis(10);
@@ -458,6 +818,8 @@ class PlayerBusinessCommandGatewayTest {
             assertEquals(0, fixture.responses.pendingResponses());
             assertEquals(1, fixture.commands.commandGatewayStats().remoteForwards());
             assertEquals(1, fixture.commands.commandGatewayStats().remoteForwardTimedOutResponses());
+            assertEquals(1, fixture.commands.commandGatewayStats().remoteForwardTimeoutRecoveryQueries());
+            assertEquals(1, fixture.commands.commandGatewayStats().remoteForwardTimeoutRecoveryFailures());
 
             rpc.succeed(PlayerBusinessResponse.success(command, PlayerBusinessAck.OK));
 
@@ -570,7 +932,7 @@ class PlayerBusinessCommandGatewayTest {
         return new ServiceDescriptor(
                 ServiceId.of(ServiceKind.GAME, "r1", node),
                 new ServiceEndpoint("127.0.0.1", port),
-                Set.of(PlayerBusinessRpcOperations.DISPATCH),
+                Set.of(PlayerBusinessRpcOperations.DISPATCH, PlayerBusinessRpcOperations.GET_RESULT),
                 Map.of()
         );
     }
@@ -583,6 +945,7 @@ class PlayerBusinessCommandGatewayTest {
             PlayerCommandSequencer sequencer,
             PlayerCommandDispatcher dispatcher,
             PlayerGameAgent agent,
+            InMemoryAgentDirectory directory,
             PlayerBusinessCommandGateway commands
     ) {
         private static Fixture create(ServiceId local, RpcGateway rpc) {
@@ -630,7 +993,7 @@ class PlayerBusinessCommandGatewayTest {
                     dispatcher,
                     new PlayerBusinessCommandHandler(playerId -> agent, responses)
             );
-            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, agent,
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, agent, directory,
                     new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
         }
 
@@ -668,8 +1031,14 @@ class PlayerBusinessCommandGatewayTest {
             PlayerBusinessCommandBinder.registerExamples(dispatcher, (context, command) -> {
             });
             PlayerBusinessResponseHub responses = new PlayerBusinessResponseHub();
-            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, null,
-                    new PlayerBusinessCommandGateway(dispatcher, rpc, responses, timeout));
+            return new Fixture(executor, actors, lifecycles, responses, sequencer, dispatcher, null, directory,
+                    new PlayerBusinessCommandGateway(
+                            dispatcher,
+                            rpc,
+                            responses,
+                            timeout,
+                            new AgentDirectoryPlayerBusinessRedirectHandler(directory)
+                    ));
         }
     }
 
@@ -796,6 +1165,30 @@ class PlayerBusinessCommandGatewayTest {
 
         int encodedMessages() {
             return encodedMessages;
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+    }
+
+    private static final class DroppingFirstRpcSuccessTransport implements ClusterTransport {
+        private final LocalClusterTransport delegate = new LocalClusterTransport();
+        private boolean dropped;
+
+        @Override
+        public void bind(ServiceDescriptor local, ClusterMessageHandler handler) {
+            delegate.bind(local, handler);
+        }
+
+        @Override
+        public void send(ServiceId nextHop, ClusterEnvelope envelope) {
+            if (!dropped && "$rpc.success".equals(envelope.operation())) {
+                dropped = true;
+                return;
+            }
+            delegate.send(nextHop, envelope);
         }
 
         @Override

@@ -1,6 +1,8 @@
 package com.commonbattle.cluster.boot;
 
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.agent.remote.RemoteAgentDirectory;
+import com.commonbattle.actor.agent.remote.AgentOwnerRpcRouter;
 import com.commonbattle.actor.backpressure.ActorHotspotAdmissionController;
 import com.commonbattle.actor.backpressure.ActorMailboxPressureAdmissionController;
 import com.commonbattle.actor.backpressure.AdmissionDecision;
@@ -25,6 +27,7 @@ import com.commonbattle.game.chat.ChatActorIds;
 import com.commonbattle.game.chat.ChatChannelManager;
 import com.commonbattle.game.chat.ChatAccessControl;
 import com.commonbattle.game.chat.DirectChatSessionManager;
+import com.commonbattle.game.chat.ExecutorChatStateStore;
 import com.commonbattle.game.chat.AccessControlledChatMessagePolicy;
 import com.commonbattle.game.chat.ChatAllianceMembershipProjector;
 import com.commonbattle.game.chat.AllianceAwareChatChannelAccessPolicy;
@@ -97,10 +100,13 @@ public final class ChatServerMain {
             PayloadCodecRegistry codecs = BootPayloadCodecs.clusterServer();
             NettyClusterTransport transport = runtime.add("nettyTransport", new NettyClusterTransport(
                     new DirectoryEndpointView(directory, local, center),
-                    codecs
+                    codecs,
+                    config.nettyTransportConfig()
             ));
             ClusterRpcGateway gateway = runtime.add("rpcGateway",
-                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport));
+                    new ClusterRpcGateway(local, directory, ClusterTopology.defaultCrossServer(), transport,
+                            true, config.rpcGovernanceConfig(),
+                            BootRpcIdempotencyStore.configure(config, codecs, Clock.systemUTC())));
             RemoteServiceRegistry registry = new RemoteServiceRegistry(
                     local.id(),
                     gateway,
@@ -110,6 +116,16 @@ public final class ChatServerMain {
             BootRegistryRecovery.configure(runtime, config, registry);
             ClusterNode node = runtime.add("clusterNode", new ClusterNode(registry, local, directory));
             ActorSystem actors = BootActors.configure(runtime, config, Clock.systemUTC());
+            RemoteAgentDirectory agentDirectory = new RemoteAgentDirectory(gateway);
+            var chatLifecycles = BootAgentLifecycles.configure(
+                    runtime,
+                    config,
+                    local,
+                    actors,
+                    agentDirectory,
+                    Clock.systemUTC()
+            );
+            AgentOwnerRpcRouter agentOwnerRouter = new AgentOwnerRpcRouter(local.id(), agentDirectory, gateway);
             DefaultAgentMessagePort messages = runtime.add("messages", new DefaultAgentMessagePort(
                     actors,
                     gateway,
@@ -126,7 +142,9 @@ public final class ChatServerMain {
                     new ClusterEventSubscriptionLeaseRenewer(eventBus, config.eventSubscriptionLeaseRenewInterval())
             );
             eventSubscriptionLeaseRenewer.start();
-            LocalProfileCache profileCache = new LocalProfileCache();
+            LocalProfileCache profileCache = new LocalProfileCache(
+                    BootProfileProjectionStore.configure(runtime, config)
+            );
             ProfileOwnerEventInterests profileInterests = new ProfileOwnerEventInterests();
             runtime.observe("profileInterests", profileInterests);
             RemoteProfileSnapshotReader profileSnapshotReader = new RemoteProfileSnapshotReader(gateway, Duration.ofSeconds(1));
@@ -174,6 +192,9 @@ public final class ChatServerMain {
                     }
             ));
             OwnerEventRepairDispatcher repairDispatcher = BootOwnerEventRepairs.repairDispatcher(config);
+            Clock eventInboxClock = Clock.systemUTC();
+            var eventInbox = BootEventInbox.configure(runtime, config);
+            var eventInboxRetryPolicy = BootEventInbox.retryPolicy(config);
             ActorMailboxEventSubscriber profileEventSubscriber = new ActorMailboxEventSubscriber(
                     messages,
                     actors.actor("chat-profile-awareness"),
@@ -182,7 +203,11 @@ public final class ChatServerMain {
                             throw new IllegalArgumentException("event must be ProfileChangedEvent");
                         }
                         profileAwareness.handleProfileChanged(profileEvent);
-                    }
+                    },
+                    ProfileChangedEvent.TOPIC,
+                    eventInbox,
+                    eventInboxRetryPolicy,
+                    eventInboxClock
             );
             runtime.observe("profileActorEventSubscriber", profileEventSubscriber);
             OwnerActorEventSubscription profileEventInterests = runtime.add("profileEventInterests",
@@ -218,7 +243,11 @@ public final class ChatServerMain {
                             throw new IllegalArgumentException("event must be PlayerDomainVersionedEvent");
                         }
                         domainAwareness.handlePlayerDomainEvent(playerEvent);
-                    }
+                    },
+                    PlayerDomainVersionedEvent.TOPIC,
+                    eventInbox,
+                    eventInboxRetryPolicy,
+                    eventInboxClock
             );
             runtime.observe("domainActorEventSubscriber", domainEventSubscriber);
             OwnerActorEventSubscription domainEventInterests = runtime.add("domainEventInterests",
@@ -255,7 +284,11 @@ public final class ChatServerMain {
                             throw new IllegalArgumentException("event must be AllianceMemberChangedEvent");
                         }
                         allianceAwareness.handleAllianceChanged(allianceEvent);
-                    }
+                    },
+                    AllianceMemberChangedEvent.TOPIC,
+                    eventInbox,
+                    eventInboxRetryPolicy,
+                    eventInboxClock
             );
             runtime.observe("allianceActorEventSubscriber", allianceEventSubscriber);
             OwnerActorEventSubscription allianceEventInterests = runtime.add("allianceEventInterests",
@@ -296,7 +329,11 @@ public final class ChatServerMain {
                             throw new IllegalArgumentException("event must be FriendChangedEvent");
                         }
                         friendAwareness.handleFriendChanged(friendEvent);
-                    }
+                    },
+                    FriendChangedEvent.TOPIC,
+                    eventInbox,
+                    eventInboxRetryPolicy,
+                    eventInboxClock
             );
             runtime.observe("friendActorEventSubscriber", friendEventSubscriber);
             OwnerActorEventSubscription friendEventInterests = runtime.add("friendEventInterests",
@@ -329,6 +366,12 @@ public final class ChatServerMain {
             friendEventSubscriber.onRejectedEvent(event ->
                     friendRepairControl.requestRepairOwner(event.ownerKey()));
             friendAwareness.attachInterests(friendRepairControl);
+            BootEventInbox.startReplayScheduler(runtime, config, List.of(
+                    profileEventSubscriber,
+                    domainEventSubscriber,
+                    allianceEventSubscriber,
+                    friendEventSubscriber
+            ));
             BootOwnerEventRepairs.startRepairDispatcher(runtime, repairDispatcher);
             OwnerActorEventSubscriptionRecoveryScheduler ownerEventRecovery = runtime.add(
                     "ownerEventRecovery",
@@ -357,32 +400,42 @@ public final class ChatServerMain {
             AccessControlledChatMessagePolicy messagePolicy = new AccessControlledChatMessagePolicy(accessControl, profilePolicy);
             InboundAdmissionController chatAdmissions = chatAdmissions(runtime, actors, config);
             runtime.observe("chatMailboxPressure", chatAdmissions);
+            ExecutorChatStateStore chatStateStore = BootChatStateStore.configure(runtime, config);
             ChatChannelManager channels = new ChatChannelManager(
                     actors,
                     messages,
                     interests,
                     new AllianceAwareChatChannelAccessPolicy(allianceAwareness),
+                    null,
                     messagePolicy,
+                    null,
                     deliverySink,
                     clock,
                     config.chatRouteConfig().maxHistoryMessages(),
-                    chatAdmissions
+                    chatAdmissions,
+                    chatLifecycles,
+                    chatStateStore,
+                    config.chatStatePendingPerAgent()
             );
             allianceAwareness.attachMembershipChanges(new ChatAllianceMembershipProjector(channels));
             DirectChatSessionManager directSessions = new DirectChatSessionManager(
                     actors,
                     messages,
                     new FriendAwareDirectChatAccessPolicy(friendAwareness),
+                    null,
                     messagePolicy,
                     deliverySink,
                     clock,
                     config.chatRouteConfig().maxHistoryMessages(),
-                    chatAdmissions
+                    chatAdmissions,
+                    chatLifecycles,
+                    chatStateStore,
+                    config.chatStatePendingPerAgent()
             );
             RoutedChatService routedChat = new RoutedChatService(channels, directSessions, config.chatRouteConfig(), accessControl);
             InMemoryEventGatedCommandAuditLog eventGatedCommandAudits = new InMemoryEventGatedCommandAuditLog();
-            new ChatChannelEndpoint(channels).bind(gateway);
-            new RoutedChatEndpoint(routedChat, eventGatedCommandAudits, clock).bind(gateway);
+            new ChatChannelEndpoint(channels, agentOwnerRouter).bind(gateway);
+            new RoutedChatEndpoint(routedChat, eventGatedCommandAudits, clock, agentOwnerRouter).bind(gateway);
             runtime.observe("eventGatedCommandAudits", eventGatedCommandAudits);
             runtime.observe("chat", routedChat);
             node.start(
@@ -390,11 +443,14 @@ public final class ChatServerMain {
                     config.registryLeaseTtl(),
                     config.registryHeartbeatInterval()
             );
-            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime.healthRegistry()));
+            runtime.add("opsHttp", BootOpsHttp.start(config, local, actors, directory, runtime));
             System.out.println("Chat server started: " + local.id().wireName()
                     + ", ops=" + config.opsEndpoint().host() + ":" + config.opsEndpoint().port());
             new CountDownLatch(1).await();
         } catch (Exception e) {
+            runtime.closeSuppressing(e);
+            throw e;
+        } catch (Error e) {
             runtime.closeSuppressing(e);
             throw e;
         }

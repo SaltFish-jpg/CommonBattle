@@ -11,10 +11,15 @@ public record ActorEventSubscriberHealthStats(
         long enqueuedEvents,
         long rejectedEvents,
         long handledEvents,
-        long failedEvents
+        long failedEvents,
+        long duplicateEvents,
+        long retryScheduledEvents,
+        long deadLetteredEvents,
+        int pendingInboxEvents,
+        int inboxDeadLetters
 ) {
     public static ActorEventSubscriberHealthStats empty() {
-        return new ActorEventSubscriberHealthStats(0, 0, 0, 0, 0, 0);
+        return new ActorEventSubscriberHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static ActorEventSubscriberHealthStats from(int subscriberCount, ActorEventSubscriberStats stats) {
@@ -24,7 +29,12 @@ public record ActorEventSubscriberHealthStats(
                 stats.enqueuedEvents(),
                 stats.rejectedEvents(),
                 stats.handledEvents(),
-                stats.failedEvents()
+                stats.failedEvents(),
+                stats.duplicateEvents(),
+                stats.retryScheduledEvents(),
+                stats.deadLetteredEvents(),
+                stats.pendingInboxEvents(),
+                stats.inboxDeadLetters()
         );
     }
 }

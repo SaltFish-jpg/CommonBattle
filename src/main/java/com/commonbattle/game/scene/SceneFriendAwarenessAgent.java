@@ -169,6 +169,11 @@ public final class SceneFriendAwarenessAgent {
         return Optional.ofNullable(friends.get(playerId));
     }
 
+    public void readFriendsOf(long playerId, Consumer<Optional<ScenePlayerFriendView>> callback) {
+        Objects.requireNonNull(callback, "callback");
+        messages.tellLocal(self, ignored -> callback.accept(friendsOf(playerId)));
+    }
+
     public synchronized Optional<ScenePlayerFriendView> freshFriendsOf(long playerId, long minimumRevision) {
         ActorContext.requireCurrent(self);
         SceneFriendReadResult result = readFreshFriendsOf(playerId, minimumRevision);

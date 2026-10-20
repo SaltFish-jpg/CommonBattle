@@ -10,7 +10,9 @@ import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.example.cross.SceneOperations;
+import com.commonbattle.persistence.InMemoryAtomicBytesStore;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -126,6 +128,186 @@ class ClusterRpcGovernanceTest {
 
         assertEquals("seat-1", first.success.get());
         assertEquals("seat-1", second.success.get());
+        assertEquals(1, handlerRuns.get());
+        assertEquals(1, sceneGateway.stats().idempotencyCacheSize());
+    }
+
+    @Test
+    void concurrentIdempotentRequestsJoinTheFirstInFlightExecution() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        AtomicInteger handlerRuns = new AtomicInteger();
+        AtomicReference<RpcResponder> pendingResponse = new AtomicReference<>();
+        ClusterRpcGateway sceneGateway = gateway(scene, transport, game, scene);
+        sceneGateway.handle("scene.reserve", (request, responder) -> {
+            handlerRuns.incrementAndGet();
+            pendingResponse.set(responder);
+        });
+        ClusterRpcGateway gameGateway = gateway(game, transport, game, scene);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1))
+                .withIdempotencyKey("player-10001-enter-room-9");
+        RecordingCallback<String> first = new RecordingCallback<>();
+        RecordingCallback<String> second = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                first, options);
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                second, options);
+
+        assertEquals(1, handlerRuns.get());
+        assertEquals(1, sceneGateway.stats().idempotencyInFlightRequests());
+        assertEquals(1, sceneGateway.stats().idempotencyJoinedRequests());
+        pendingResponse.get().success("seat-1");
+        assertEquals("seat-1", first.success.get());
+        assertEquals("seat-1", second.success.get());
+        assertEquals(1, sceneGateway.stats().idempotencyCacheSize());
+        assertEquals(0, sceneGateway.stats().idempotencyInFlightRequests());
+    }
+
+    @Test
+    void coordinatedStoreJoinsExecutionAcrossDifferentSceneInstances() throws InterruptedException {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor sceneOne = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        ServiceDescriptor sceneTwo = descriptor(ServiceKind.SCENE, "scene-2", 9003, Set.of("scene.reserve"));
+        InMemoryAtomicBytesStore bytes = new InMemoryAtomicBytesStore();
+        RpcGovernanceConfig config = coordinatedConfig(Duration.ofSeconds(1), Duration.ofMillis(5));
+        SerializedRpcIdempotencyStore firstStore = coordinatedStore(bytes, Duration.ofMillis(100));
+        SerializedRpcIdempotencyStore secondStore = coordinatedStore(bytes, Duration.ofMillis(100));
+        ClusterRpcGateway firstSceneGateway = gateway(
+                sceneOne, transport, config, firstStore, game, sceneOne, sceneTwo
+        );
+        ClusterRpcGateway secondSceneGateway = gateway(
+                sceneTwo, transport, config, secondStore, game, sceneOne, sceneTwo
+        );
+        AtomicInteger handlerRuns = new AtomicInteger();
+        AtomicReference<RpcResponder> pendingResponse = new AtomicReference<>();
+        firstSceneGateway.handle("scene.reserve", (request, responder) -> {
+            handlerRuns.incrementAndGet();
+            pendingResponse.set(responder);
+        });
+        secondSceneGateway.handle("scene.reserve", (request, responder) ->
+                responder.success("unexpected-" + handlerRuns.incrementAndGet()));
+        ClusterRpcGateway gameGateway = gateway(game, transport, config, game, sceneOne, sceneTwo);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1))
+                .withIdempotencyKey("player-10001-enter-room-9");
+        RecordingCallback<String> first = new RecordingCallback<>();
+        RecordingCallback<String> second = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(sceneOne.id().wireName(), "scene.reserve", "room-9", String.class),
+                first, options);
+        gameGateway.call(new RpcRequest<>(sceneTwo.id().wireName(), "scene.reserve", "room-9", String.class),
+                second, options);
+        pendingResponse.get().success("seat-1");
+
+        assertTrue(second.awaitSuccess());
+        assertEquals("seat-1", first.success.get());
+        assertEquals("seat-1", second.success.get());
+        assertEquals(1, handlerRuns.get());
+        assertEquals(1, secondSceneGateway.stats().idempotencyCacheSize());
+        gameGateway.close();
+        firstSceneGateway.close();
+        secondSceneGateway.close();
+    }
+
+    @Test
+    void coordinatedStoreTakesOverAfterOwnerGatewayStopsRenewingLease() throws InterruptedException {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor sceneOne = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        ServiceDescriptor sceneTwo = descriptor(ServiceKind.SCENE, "scene-2", 9003, Set.of("scene.reserve"));
+        InMemoryAtomicBytesStore bytes = new InMemoryAtomicBytesStore();
+        RpcGovernanceConfig config = coordinatedConfig(Duration.ofSeconds(1), Duration.ofMillis(5));
+        SerializedRpcIdempotencyStore firstStore = coordinatedStore(bytes, Duration.ofMillis(40));
+        SerializedRpcIdempotencyStore secondStore = coordinatedStore(bytes, Duration.ofMillis(40));
+        ClusterRpcGateway firstSceneGateway = gateway(
+                sceneOne, transport, config, firstStore, game, sceneOne, sceneTwo
+        );
+        ClusterRpcGateway secondSceneGateway = gateway(
+                sceneTwo, transport, config, secondStore, game, sceneOne, sceneTwo
+        );
+        AtomicInteger firstRuns = new AtomicInteger();
+        AtomicInteger takeoverRuns = new AtomicInteger();
+        firstSceneGateway.handle("scene.reserve", (request, responder) -> firstRuns.incrementAndGet());
+        secondSceneGateway.handle("scene.reserve", (request, responder) ->
+                responder.success("seat-" + takeoverRuns.incrementAndGet()));
+        ClusterRpcGateway gameGateway = gateway(game, transport, config, game, sceneOne, sceneTwo);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1))
+                .withIdempotencyKey("player-10001-enter-room-9");
+
+        gameGateway.call(new RpcRequest<>(sceneOne.id().wireName(), "scene.reserve", "room-9", String.class),
+                new RecordingCallback<>(), options);
+        firstSceneGateway.close();
+        RecordingCallback<String> takeover = new RecordingCallback<>();
+        gameGateway.call(new RpcRequest<>(sceneTwo.id().wireName(), "scene.reserve", "room-9", String.class),
+                takeover, options);
+
+        assertTrue(takeover.awaitSuccess());
+        assertEquals("seat-1", takeover.success.get());
+        assertEquals(1, firstRuns.get());
+        assertEquals(1, takeoverRuns.get());
+        gameGateway.close();
+        secondSceneGateway.close();
+    }
+
+    @Test
+    void transientFailureIsSharedInFlightButNotCachedForLaterRetry() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        AtomicInteger handlerRuns = new AtomicInteger();
+        ClusterRpcGateway sceneGateway = gateway(scene, transport, game, scene);
+        sceneGateway.handle("scene.reserve", (request, responder) -> {
+            if (handlerRuns.incrementAndGet() == 1) {
+                responder.failure(new IllegalStateException("temporary backend failure"));
+                return;
+            }
+            responder.success("seat-1");
+        });
+        ClusterRpcGateway gameGateway = gateway(game, transport, game, scene);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1))
+                .withIdempotencyKey("player-10001-enter-room-9");
+        RecordingCallback<String> first = new RecordingCallback<>();
+        RecordingCallback<String> second = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                first, options);
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                second, options);
+
+        assertInstanceOf(RpcStructuredException.class, first.failure.get());
+        assertEquals("seat-1", second.success.get());
+        assertEquals(2, handlerRuns.get());
+        assertEquals(1, sceneGateway.stats().idempotencyCacheSize());
+    }
+
+    @Test
+    void deterministicBusinessFailureIsCachedForLaterDuplicate() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of());
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of("scene.reserve"));
+        AtomicInteger handlerRuns = new AtomicInteger();
+        ClusterRpcGateway sceneGateway = gateway(scene, transport, game, scene);
+        sceneGateway.handle("scene.reserve", (request, responder) -> {
+            handlerRuns.incrementAndGet();
+            responder.failure(new RpcStructuredException("room_full", "room is full", Duration.ZERO));
+        });
+        ClusterRpcGateway gameGateway = gateway(game, transport, game, scene);
+        RpcCallOptions options = RpcCallOptions.of(Duration.ofSeconds(1))
+                .withIdempotencyKey("player-10001-enter-room-9");
+        RecordingCallback<String> first = new RecordingCallback<>();
+        RecordingCallback<String> second = new RecordingCallback<>();
+
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                first, options);
+        gameGateway.call(new RpcRequest<>(ServiceKind.SCENE.name(), "scene.reserve", "room-9", String.class),
+                second, options);
+
+        RpcStructuredException firstFailure = assertInstanceOf(RpcStructuredException.class, first.failure.get());
+        RpcStructuredException secondFailure = assertInstanceOf(RpcStructuredException.class, second.failure.get());
+        assertEquals("room_full", firstFailure.code());
+        assertEquals("room_full", secondFailure.code());
         assertEquals(1, handlerRuns.get());
         assertEquals(1, sceneGateway.stats().idempotencyCacheSize());
     }
@@ -265,6 +447,31 @@ class ClusterRpcGovernanceTest {
         return new ClusterRpcGateway(local, directory, direct, transport, true, config, idempotencyStore);
     }
 
+    private static RpcGovernanceConfig coordinatedConfig(Duration timeout, Duration pollInterval) {
+        return new RpcGovernanceConfig(
+                timeout,
+                100,
+                Duration.ofMillis(200),
+                100,
+                Duration.ofMinutes(1),
+                Duration.ofMillis(100),
+                pollInterval
+        );
+    }
+
+    private static SerializedRpcIdempotencyStore coordinatedStore(
+            InMemoryAtomicBytesStore bytes,
+            Duration leaseDuration
+    ) {
+        return new SerializedRpcIdempotencyStore(
+                bytes,
+                PayloadCodecRegistry.commonDefaults(),
+                Duration.ofMinutes(1),
+                leaseDuration,
+                java.time.Clock.systemUTC()
+        );
+    }
+
     private static ServiceDescriptor descriptor(ServiceKind kind, String node, int port, Set<String> topics) {
         return new ServiceDescriptor(
                 ServiceId.of(kind, "r1", node),
@@ -297,6 +504,17 @@ class ClusterRpcGovernanceTest {
                 TimeUnit.MILLISECONDS.sleep(5);
             }
             return failure.get() != null;
+        }
+
+        private boolean awaitSuccess() throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            while (System.nanoTime() < deadline) {
+                if (success.get() != null) {
+                    return true;
+                }
+                TimeUnit.MILLISECONDS.sleep(5);
+            }
+            return success.get() != null;
         }
     }
 }

@@ -68,88 +68,203 @@ class DefaultAgentMessagePortTest {
     }
 
     @Test
-    void remoteCallMapsFailureToDeliveryResult() {
+    void remoteCallFailureReturnsOnRequesterMailbox() {
         RuntimeException failure = new RuntimeException("route down");
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
         DefaultAgentMessagePort port = new DefaultAgentMessagePort(
-                new ActorSystem(new RecordingExecutor(), 64),
+                actors,
                 new FailingRpcGateway(failure),
                 new ManualAskTimeoutScheduler(),
                 error -> AgentDeliveryResult.remoteUnavailable("mapped")
         );
-        AtomicReference<AgentDeliveryResult> delivery = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
+        ActorRef requester = actors.actor("requester");
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
 
-        port.callRemote(new RpcRequest<>("SCENE", "scene.enter", "payload", String.class), new RemoteAgentCallback<>() {
-            @Override
-            public void success(String response) {
-                throw new AssertionError("call must fail");
-            }
+        port.callRemote(
+                requester,
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                callback
+        );
 
-            @Override
-            public void failure(AgentDeliveryResult result, Throwable cause) {
-                delivery.set(result);
-                error.set(cause);
-            }
-        });
+        assertEquals(null, callback.error.get());
+        assertEquals(1, actors.stats().queuedTasksByCategory().get(ActorTaskCategory.RPC_CALLBACK));
+        executor.runNext();
 
-        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, delivery.get().status());
-        assertEquals("mapped", delivery.get().reason());
-        assertEquals(failure, error.get());
+        assertEquals("requester", callback.callbackActor.get());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, callback.delivery.get().status());
+        assertEquals("mapped", callback.delivery.get().reason());
+        assertEquals(failure, callback.error.get());
     }
 
     @Test
-    void remoteCallMapsThrownGatewayFailureToDeliveryResult() {
+    void thrownRemoteGatewayFailureReturnsOnRequesterMailbox() {
         RuntimeException failure = new RuntimeException("route down");
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
         DefaultAgentMessagePort port = new DefaultAgentMessagePort(
-                new ActorSystem(new RecordingExecutor(), 64),
+                actors,
                 new ThrowingRpcGateway(failure),
                 new ManualAskTimeoutScheduler(),
                 error -> AgentDeliveryResult.remoteUnavailable("mapped")
         );
-        AtomicReference<AgentDeliveryResult> delivery = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
 
-        port.callRemote(new RpcRequest<>("SCENE", "scene.enter", "payload", String.class), new RemoteAgentCallback<>() {
-            @Override
-            public void success(String response) {
-                throw new AssertionError("call must fail");
-            }
+        port.callRemote(
+                actors.actor("requester"),
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                callback
+        );
 
-            @Override
-            public void failure(AgentDeliveryResult result, Throwable cause) {
-                delivery.set(result);
-                error.set(cause);
-            }
-        });
+        assertEquals(null, callback.error.get());
+        executor.runNext();
 
-        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, delivery.get().status());
-        assertEquals("mapped", delivery.get().reason());
-        assertEquals(failure, error.get());
+        assertEquals(AgentDeliveryStatus.REMOTE_UNAVAILABLE, callback.delivery.get().status());
+        assertEquals("mapped", callback.delivery.get().reason());
+        assertEquals(failure, callback.error.get());
     }
 
     @Test
-    void rawRemoteCallReportsThrownGatewayFailureToCallback() {
-        RuntimeException failure = new RuntimeException("route down");
+    void remoteCallSuccessReturnsOnRequesterMailbox() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
         DefaultAgentMessagePort port = new DefaultAgentMessagePort(
-                new ActorSystem(new RecordingExecutor(), 64),
-                new ThrowingRpcGateway(failure),
+                actors,
+                new ImmediateSuccessRpcGateway("entered"),
                 new ManualAskTimeoutScheduler()
         );
-        AtomicReference<Throwable> error = new AtomicReference<>();
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
 
-        port.callRemote(new RpcRequest<>("SCENE", "scene.enter", "payload", String.class), new RpcCallback<>() {
-            @Override
-            public void success(String response) {
-                throw new AssertionError("call must fail");
-            }
+        port.callRemote(
+                actors.actor("requester"),
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                callback
+        );
 
-            @Override
-            public void failure(Throwable cause) {
-                error.set(cause);
-            }
+        assertEquals(null, callback.response.get());
+        assertEquals(1, port.agentMessagePortStats().currentInFlightRemoteCalls());
+        executor.runNext();
+
+        assertEquals("entered", callback.response.get());
+        assertEquals("requester", callback.callbackActor.get());
+        assertEquals(0, port.agentMessagePortStats().currentInFlightRemoteCalls());
+    }
+
+    @Test
+    void remoteTimeoutSchedulingFailureReturnsOnRequesterMailboxAndSettlesInFlightCall() {
+        RuntimeException failure = new IllegalStateException("timeout scheduler closed");
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        CountingRpcGateway rpc = new CountingRpcGateway();
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(
+                actors,
+                rpc,
+                new ThrowingAskTimeoutScheduler(failure)
+        );
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
+
+        port.callRemote(
+                actors.actor("requester"),
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                callback
+        );
+
+        assertEquals(0, rpc.calls.get());
+        assertEquals(1, port.agentMessagePortStats().currentInFlightRemoteCalls());
+        executor.runNext();
+        assertEquals(failure, callback.error.get());
+        assertEquals(0, port.agentMessagePortStats().currentInFlightRemoteCalls());
+    }
+
+    @Test
+    void localAskTimeoutSchedulingFailureReturnsOnRequesterMailbox() {
+        RuntimeException failure = new IllegalStateException("timeout scheduler closed");
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(
+                actors,
+                new CountingRpcGateway(),
+                new ThrowingAskTimeoutScheduler(failure)
+        );
+        AtomicReference<Throwable> received = new AtomicReference<>();
+
+        port.askLocal(
+                actors.actor("requester"),
+                actors.actor("target"),
+                Duration.ofSeconds(1),
+                ignored -> "unused",
+                new RecordingAskCallback<>(ignored -> {
+                }, received::set)
+        );
+
+        executor.runNext();
+        assertEquals(failure, received.get());
+        assertEquals(1, port.agentMessagePortStats().localAskFailed());
+    }
+
+    @Test
+    void remoteCallTimeoutReturnsOnMailboxAndSuppressesLateResponse() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ManualAskTimeoutScheduler timeouts = new ManualAskTimeoutScheduler();
+        DeferredRpcGateway rpc = new DeferredRpcGateway();
+        ActorSystem actors = new ActorSystem(executor, 64);
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(actors, rpc, timeouts);
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
+
+        port.callRemote(
+                actors.actor("requester"),
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                RemoteActorCallOptions.of(Duration.ofMillis(1)),
+                callback
+        );
+        timeouts.fire();
+        rpc.success("late");
+
+        assertEquals(null, callback.error.get());
+        assertEquals(1, callback.lateResponses.get());
+        executor.runNext();
+
+        assertEquals(AgentDeliveryStatus.TIMEOUT, callback.delivery.get().status());
+        assertInstanceOf(RemoteActorCallTimeoutException.class, callback.error.get());
+        assertEquals(null, callback.response.get());
+        assertEquals(1, port.agentMessagePortStats().remoteCalls());
+        assertEquals(1, port.agentMessagePortStats().remoteTimedOut());
+        assertEquals(1, port.agentMessagePortStats().remoteLateResponses());
+        assertEquals(0, port.agentMessagePortStats().remoteSucceeded());
+    }
+
+    @Test
+    void remoteCallbackDoesNotRunWhenRequesterMailboxIsFull() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 1, ActorOverflowStrategy.REJECT, Duration.ZERO),
+                ignored -> {
+                },
+                ignored -> {
+                }
+        );
+        DefaultAgentMessagePort port = new DefaultAgentMessagePort(
+                actors,
+                new ImmediateSuccessRpcGateway("entered"),
+                new ManualAskTimeoutScheduler()
+        );
+        ActorRef requester = actors.actor("requester");
+        actors.send(requester, ignored -> {
         });
+        RecordingRemoteCallback<String> callback = new RecordingRemoteCallback<>();
 
-        assertEquals(failure, error.get());
+        port.callRemote(
+                requester,
+                new RpcRequest<>("SCENE", "scene.enter", "payload", String.class),
+                callback
+        );
+
+        assertEquals(null, callback.response.get());
+        assertEquals(AgentDeliveryStatus.MAILBOX_FULL, callback.callbackDeliveryFailure.get().status());
+        assertEquals(1, port.agentMessagePortStats().remoteSucceeded());
+        assertEquals(1, port.agentMessagePortStats().remoteCallbackDeliveryFailures());
+        assertEquals(0, port.agentMessagePortStats().currentInFlightRemoteCalls());
     }
 
     @Test
@@ -336,6 +451,63 @@ class DefaultAgentMessagePortTest {
         }
     }
 
+    private record ImmediateSuccessRpcGateway(Object response) implements RpcGateway {
+        @Override
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            callback.success(request.responseType().cast(response));
+        }
+    }
+
+    private static final class DeferredRpcGateway implements RpcGateway {
+        private RpcCallback<Object> callback;
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+            this.callback = (RpcCallback<Object>) callback;
+        }
+
+        private void success(Object response) {
+            callback.success(response);
+        }
+    }
+
+    private static final class RecordingRemoteCallback<T> implements RemoteActorCallback<T> {
+        private final AtomicReference<T> response = new AtomicReference<>();
+        private final AtomicReference<AgentDeliveryResult> delivery = new AtomicReference<>();
+        private final AtomicReference<Throwable> error = new AtomicReference<>();
+        private final AtomicReference<String> callbackActor = new AtomicReference<>();
+        private final AtomicReference<AgentDeliveryResult> callbackDeliveryFailure = new AtomicReference<>();
+        private final AtomicInteger lateResponses = new AtomicInteger();
+
+        @Override
+        public void success(com.commonbattle.actor.ActorContext context, T response) {
+            callbackActor.set(context.self().id());
+            this.response.set(response);
+        }
+
+        @Override
+        public void failure(
+                com.commonbattle.actor.ActorContext context,
+                AgentDeliveryResult delivery,
+                Throwable error
+        ) {
+            callbackActor.set(context.self().id());
+            this.delivery.set(delivery);
+            this.error.set(error);
+        }
+
+        @Override
+        public void callbackDeliveryFailed(AgentDeliveryResult delivery) {
+            callbackDeliveryFailure.set(delivery);
+        }
+
+        @Override
+        public void lateResponse() {
+            lateResponses.incrementAndGet();
+        }
+    }
+
     private static final class RecordingAskCallback<T> implements LocalAskCallback<T> {
         private final java.util.function.Consumer<T> success;
         private final java.util.function.Consumer<Throwable> failure;
@@ -372,6 +544,13 @@ class DefaultAgentMessagePortTest {
 
         boolean cancelled() {
             return timeouts.stream().allMatch(ManualTimeout::cancelled);
+        }
+    }
+
+    private record ThrowingAskTimeoutScheduler(RuntimeException failure) implements AskTimeoutScheduler {
+        @Override
+        public ScheduledAskTimeout schedule(Duration timeout, Runnable action) {
+            throw failure;
         }
     }
 

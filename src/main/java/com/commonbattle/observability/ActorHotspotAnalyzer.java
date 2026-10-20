@@ -30,7 +30,9 @@ public final class ActorHotspotAnalyzer {
         Map<String, Accumulator> actors = new HashMap<>();
         for (ActorMailboxStats mailbox : mailboxes) {
             String actorId = mailbox.actor().id();
-            actors.computeIfAbsent(actorId, Accumulator::new).queuedTasks = mailbox.queuedTasks();
+            Accumulator accumulator = actors.computeIfAbsent(actorId, Accumulator::new);
+            accumulator.queuedTasks = mailbox.queuedTasks();
+            accumulator.mailboxBatchYields = mailbox.batchYields();
         }
         for (ActorSlowTaskRecord slowTask : slowTasks) {
             Accumulator accumulator = actors.computeIfAbsent(slowTask.actorId(), Accumulator::new);
@@ -50,6 +52,7 @@ public final class ActorHotspotAnalyzer {
                     accumulator.queuedTasks,
                     accumulator.recentSlowTasks,
                     accumulator.maxSlowTaskMillis,
+                    accumulator.mailboxBatchYields,
                     action,
                     reasons,
                     scoreOf(accumulator, action)
@@ -66,15 +69,19 @@ public final class ActorHotspotAnalyzer {
     private static ActorHotspotAction actionOf(Accumulator accumulator, ActorHotspotPolicy policy) {
         if (accumulator.queuedTasks >= policy.migrationQueuedTasks()
                 || accumulator.recentSlowTasks >= policy.migrationSlowTasks()
-                || accumulator.maxSlowTaskMillis >= policy.migrationSlowTaskMillis()) {
+                || accumulator.maxSlowTaskMillis >= policy.migrationSlowTaskMillis()
+                || accumulator.mailboxBatchYields >= policy.migrationBatchYields()) {
             return ActorHotspotAction.MIGRATION_CANDIDATE;
         }
         if (accumulator.queuedTasks >= policy.throttleQueuedTasks()
                 || accumulator.recentSlowTasks >= policy.throttleSlowTasks()
-                || accumulator.maxSlowTaskMillis >= policy.throttleSlowTaskMillis()) {
+                || accumulator.maxSlowTaskMillis >= policy.throttleSlowTaskMillis()
+                || accumulator.mailboxBatchYields >= policy.throttleBatchYields()) {
             return ActorHotspotAction.THROTTLE;
         }
-        if (accumulator.queuedTasks >= policy.observeQueuedTasks() || accumulator.recentSlowTasks > 0) {
+        if (accumulator.queuedTasks >= policy.observeQueuedTasks()
+                || accumulator.recentSlowTasks > 0
+                || accumulator.mailboxBatchYields > 0) {
             return ActorHotspotAction.OBSERVE;
         }
         return null;
@@ -94,6 +101,8 @@ public final class ActorHotspotAnalyzer {
                         accumulator.recentSlowTasks >= policy.migrationSlowTasks());
                 addIf(reasons, ActorHotspotReason.SLOW_TASK_MILLIS,
                         accumulator.maxSlowTaskMillis >= policy.migrationSlowTaskMillis());
+                addIf(reasons, ActorHotspotReason.MAILBOX_BATCH_YIELD,
+                        accumulator.mailboxBatchYields >= policy.migrationBatchYields());
             }
             case THROTTLE -> {
                 addIf(reasons, ActorHotspotReason.QUEUE_BACKLOG,
@@ -102,12 +111,16 @@ public final class ActorHotspotAnalyzer {
                         accumulator.recentSlowTasks >= policy.throttleSlowTasks());
                 addIf(reasons, ActorHotspotReason.SLOW_TASK_MILLIS,
                         accumulator.maxSlowTaskMillis >= policy.throttleSlowTaskMillis());
+                addIf(reasons, ActorHotspotReason.MAILBOX_BATCH_YIELD,
+                        accumulator.mailboxBatchYields >= policy.throttleBatchYields());
             }
             case OBSERVE -> {
                 addIf(reasons, ActorHotspotReason.QUEUE_BACKLOG,
                         accumulator.queuedTasks >= policy.observeQueuedTasks());
                 addIf(reasons, ActorHotspotReason.SLOW_TASK_COUNT,
                         accumulator.recentSlowTasks > 0);
+                addIf(reasons, ActorHotspotReason.MAILBOX_BATCH_YIELD,
+                        accumulator.mailboxBatchYields > 0);
             }
         }
         return reasons;
@@ -122,6 +135,7 @@ public final class ActorHotspotAnalyzer {
     private static long scoreOf(Accumulator accumulator, ActorHotspotAction action) {
         return severity(action) * 1_000_000_000L
                 + accumulator.queuedTasks * 10_000L
+                + accumulator.mailboxBatchYields * 5_000L
                 + accumulator.recentSlowTasks * 1_000L
                 + accumulator.maxSlowTaskMillis;
     }
@@ -139,6 +153,7 @@ public final class ActorHotspotAnalyzer {
         private int queuedTasks;
         private int recentSlowTasks;
         private long maxSlowTaskMillis;
+        private long mailboxBatchYields;
 
         private Accumulator(String actorId) {
             this.actorId = actorId;

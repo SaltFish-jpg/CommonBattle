@@ -12,6 +12,7 @@ import com.commonbattle.actor.agent.migration.AgentMigrationRecoveryService;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskStore;
 import com.commonbattle.actor.agent.migration.RemoteAgentMigrationClient;
 import com.commonbattle.actor.rpc.ActorRpcClient;
+import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
@@ -39,6 +40,8 @@ import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.player.AsyncShopPurchaseStats;
 import com.commonbattle.game.player.AsyncShopPurchaseView;
+import com.commonbattle.game.player.AsyncBusinessCommandStats;
+import com.commonbattle.game.player.AsyncBusinessCommandView;
 import com.commonbattle.game.player.PlayerBusinessCommandGatewayStats;
 import com.commonbattle.game.player.PlayerBusinessCommandGatewayView;
 import com.commonbattle.game.player.PlayerBusinessResponseHub;
@@ -77,6 +80,7 @@ class RuntimeHealthRegistryTest {
         });
         ActorSystem actors = new ActorSystem(Runnable::run, 64);
         ActorRpcClient actorRpc = new ActorRpcClient(actors, actors.actor("player-1"), new NoopRpcGateway());
+        DefaultAgentMessagePort agentMessages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
         ActorScheduleView actorSchedule = () -> new ActorScheduleStats(1, 2, 0, 2, 0);
         AgentLifecycleManager lifecycles = new AgentLifecycleManager(descriptor().id(), actors,
                 new InMemoryAgentDirectory(), CLOCK);
@@ -127,6 +131,7 @@ class RuntimeHealthRegistryTest {
         );
         PlayerGatewayView playerGateway = () -> new NettyPlayerGatewayStats(1, 0, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0);
         AsyncShopPurchaseView asyncShopPurchases = AsyncShopPurchaseStats::empty;
+        AsyncBusinessCommandView asyncBusinessCommands = AsyncBusinessCommandStats::empty;
         InMemoryServiceRegistry serviceRegistry = new InMemoryServiceRegistry(CLOCK, 16);
         RemoteRegistryRecoveryView remoteRegistryRecovery = () -> RemoteRegistryRecoveryStats.empty();
         RegistrySubscriptionView registrySubscriptions = () -> RegistrySubscriptionStats.empty();
@@ -136,9 +141,9 @@ class RuntimeHealthRegistryTest {
                 (request, baseOptions) -> baseOptions
         );
 
-        registry.register(List.of(cache, configRecovery, actorRpc, lifecycles, migrations, migrationExecutor,
+        registry.register(List.of(cache, configRecovery, actorRpc, agentMessages, lifecycles, migrations, migrationExecutor,
                 migrationRecovery, profileRuntime, sceneRuntime, shopService, businessResponses, businessCommandGateway,
-                asyncShopPurchases, outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery,
+                asyncShopPurchases, asyncBusinessCommands, outboundDeliveries, playerGateway, routedRpc, serviceRegistry, remoteRegistryRecovery,
                 registrySubscriptions, actorSchedule));
         registry.register(cache);
 
@@ -146,6 +151,7 @@ class RuntimeHealthRegistryTest {
             assertEquals(1, registry.configCaches().size());
             assertEquals(1, registry.configRecoveries().size());
             assertEquals(1, registry.actorRpcClients().size());
+            assertEquals(1, registry.agentMessagePorts().size());
             assertEquals(1, registry.actorSchedules().size());
             assertEquals(1, registry.lifecycleManagers().size());
             assertEquals(1, registry.migrationCoordinators().size());
@@ -159,11 +165,13 @@ class RuntimeHealthRegistryTest {
             assertEquals(1, registry.playerOutboundDeliveries().size());
             assertEquals(1, registry.playerGateways().size());
             assertEquals(1, registry.asyncShopPurchases().size());
+            assertEquals(1, registry.asyncBusinessCommands().size());
             assertEquals(1, registry.rpcRoutePolicies().size());
             assertEquals(1, registry.registryHistories().size());
             assertEquals(1, registry.registrySubscriptions().size());
             assertEquals(1, registry.remoteRegistryRecoveries().size());
         } finally {
+            agentMessages.close();
             migrationExecutor.close();
         }
     }

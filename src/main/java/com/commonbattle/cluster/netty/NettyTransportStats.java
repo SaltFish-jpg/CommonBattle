@@ -10,12 +10,14 @@ public record NettyTransportStats(
         long connectionFailures,
         long sentEnvelopes,
         long failedWrites,
+        long inFlightWrites,
         long receivedEnvelopes,
         long inboundFailures
 ) {
     public NettyTransportStats {
         if (activeConnections < 0 || connectionAttempts < 0 || connectionFailures < 0
-                || sentEnvelopes < 0 || failedWrites < 0 || receivedEnvelopes < 0 || inboundFailures < 0) {
+                || sentEnvelopes < 0 || failedWrites < 0 || inFlightWrites < 0
+                || receivedEnvelopes < 0 || inboundFailures < 0) {
             throw new IllegalArgumentException("netty transport stats must not be negative");
         }
     }

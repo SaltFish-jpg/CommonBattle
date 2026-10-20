@@ -7,6 +7,8 @@ import com.commonbattle.game.session.NettyPlayerClientInboundFrameDecoder;
 import com.commonbattle.game.session.PlayerClientConnectionService;
 import com.commonbattle.game.session.ProtoPlayerClientCodec;
 import com.commonbattle.game.session.ProtoPlayerClientInboundCodec;
+import com.commonbattle.game.session.NettyPlayerWriteTracker;
+import com.commonbattle.runtime.DrainableComponent;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
@@ -27,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 玩家客户端 Netty 网关服务。
  * 它只承载连接、登录绑定、入站投递和出站写回，不直接执行业务逻辑。
  */
-public final class NettyPlayerGatewayServer implements AutoCloseable, PlayerGatewayView {
+public final class NettyPlayerGatewayServer implements AutoCloseable, PlayerGatewayView, DrainableComponent {
     private static final int MAX_FRAME_SIZE = 1024 * 1024;
     private static final long CLOSE_TIMEOUT_MILLIS = 1_000;
 
@@ -43,7 +45,9 @@ public final class NettyPlayerGatewayServer implements AutoCloseable, PlayerGate
     private final NioEventLoopGroup workerGroup;
     private final NettyPlayerGatewayMetrics metrics = new NettyPlayerGatewayMetrics();
     private final NettyPlayerGatewayConnectionIndex connectionIndex = new NettyPlayerGatewayConnectionIndex();
+    private final NettyPlayerWriteTracker writeTracker = new NettyPlayerWriteTracker();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean draining = new AtomicBoolean();
     private volatile Channel serverChannel;
 
     public NettyPlayerGatewayServer(
@@ -112,7 +116,8 @@ public final class NettyPlayerGatewayServer implements AutoCloseable, PlayerGate
                                             metrics,
                                             authenticator,
                                             config,
-                                            connectionIndex
+                                            connectionIndex,
+                                            writeTracker
                                     );
                             if (!config.readerIdleTimeout().isZero()) {
                                 channel.pipeline().addLast(new IdleStateHandler(
@@ -144,7 +149,38 @@ public final class NettyPlayerGatewayServer implements AutoCloseable, PlayerGate
     }
 
     public NettyPlayerGatewayStats stats() {
-        return metrics.snapshot();
+        return metrics.snapshot(writeTracker.inFlightWrites());
+    }
+
+    @Override
+    public void beginDrain() {
+        draining.set(true);
+        Channel channel = serverChannel;
+        if (channel != null) {
+            channel.config().setAutoRead(false);
+        }
+    }
+
+    @Override
+    public void resumeAccepting() {
+        if (closed.get()) {
+            return;
+        }
+        draining.set(false);
+        Channel channel = serverChannel;
+        if (channel != null && channel.isActive()) {
+            channel.config().setAutoRead(true);
+        }
+    }
+
+    @Override
+    public boolean isDraining() {
+        return draining.get();
+    }
+
+    boolean isAcceptingConnections() {
+        Channel channel = serverChannel;
+        return !draining.get() && channel != null && channel.isActive() && channel.config().isAutoRead();
     }
 
     @Override

@@ -29,7 +29,7 @@ public final class BootPayloadCodecs {
     }
 
     public static PayloadCodecRegistry centerServer() {
-        return registerCommon(PayloadCodecRegistry.commonDefaults());
+        return registerCommon(CrossPayloadCodecs.create());
     }
 
     private static PayloadCodecRegistry registerCommon(PayloadCodecRegistry registry) {

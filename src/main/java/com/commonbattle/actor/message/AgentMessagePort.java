@@ -3,7 +3,6 @@ package com.commonbattle.actor.message;
 import com.commonbattle.actor.ActorRef;
 import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.ActorTaskCategory;
-import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcRequest;
 
 import java.time.Duration;
@@ -54,19 +53,18 @@ public interface AgentMessagePort {
         askLocal(requester, target, timeout, ask, callback);
     }
 
-    <T> void callRemote(RpcRequest<T> request, RpcCallback<T> callback);
+    <T> void callRemote(
+            ActorRef requester,
+            RpcRequest<T> request,
+            RemoteActorCallOptions options,
+            RemoteActorCallback<T> callback
+    );
 
-    default <T> void callRemote(RpcRequest<T> request, RemoteAgentCallback<T> callback) {
-        callRemote(request, new RpcCallback<>() {
-            @Override
-            public void success(T response) {
-                callback.success(response);
-            }
-
-            @Override
-            public void failure(Throwable error) {
-                callback.failure(RemoteCallFailureMapper.defaults().map(error), error);
-            }
-        });
+    default <T> void callRemote(
+            ActorRef requester,
+            RpcRequest<T> request,
+            RemoteActorCallback<T> callback
+    ) {
+        callRemote(requester, request, RemoteActorCallOptions.defaults(), callback);
     }
 }

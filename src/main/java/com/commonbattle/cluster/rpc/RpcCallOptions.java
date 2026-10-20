@@ -36,6 +36,10 @@ public record RpcCallOptions(
         return new RpcCallOptions(timeout, key, requiredTargetMetadata);
     }
 
+    public RpcCallOptions withTimeout(Duration nextTimeout) {
+        return new RpcCallOptions(nextTimeout, idempotencyKey, requiredTargetMetadata);
+    }
+
     public RpcCallOptions withRequiredTargetMetadata(String key, String value) {
         requireMetadataEntry(key, value);
         Map<String, String> metadata = new HashMap<>(requiredTargetMetadata);

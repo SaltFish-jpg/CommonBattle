@@ -5,16 +5,21 @@ import com.commonbattle.actor.ActorSystemConfig;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.backpressure.ActorMailboxPressurePolicy;
 import com.commonbattle.actor.backpressure.AgentRateLimitPolicy;
+import com.commonbattle.actor.agent.AgentLeaseConfig;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.ServiceMetadata;
 import com.commonbattle.cluster.event.ClusterEventHistoryPolicy;
+import com.commonbattle.cluster.netty.NettyClusterTransportConfig;
+import com.commonbattle.cluster.network.ForwardingProxyConfig;
 import com.commonbattle.cluster.rpc.PlayerGrayRouteConfig;
+import com.commonbattle.cluster.rpc.RpcGovernanceConfig;
 import com.commonbattle.game.agent.BusinessAgentIdempotencyConfig;
 import com.commonbattle.game.chat.ChatRouteConfig;
 import com.commonbattle.game.event.OwnerEventRepairBackoffPolicy;
 import com.commonbattle.game.event.OwnerEventRepairIsolationPolicy;
+import com.commonbattle.game.player.AsyncBusinessCommandPolicy;
 import com.commonbattle.game.player.PlayerGatewayConfig;
 import com.commonbattle.game.player.PlayerGatewayDuplicateLoginPolicy;
 import com.commonbattle.observability.DrainConfig;
@@ -87,6 +92,7 @@ public final class ClusterNodeConfig {
 
     public ClusterConfigValidation validate(ServiceKind expectedKind) {
         List<ClusterConfigIssue> issues = new ArrayList<>();
+        validateEnvironment(issues);
         require(issues, "cluster.kind");
         require(issues, "cluster.region");
         require(issues, "cluster.node");
@@ -135,6 +141,23 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.business.agent.mailbox.pressure.retry.after.millis");
         validateNonNegativeInteger(issues, "cluster.business.agent.rpc.idempotency.cache.capacity");
         validateNonNegativeInteger(issues, "cluster.business.agent.rpc.idempotency.cache.ttl.millis");
+        validatePositiveInteger(issues, "cluster.rpc.default.timeout.millis");
+        validatePositiveInteger(issues, "cluster.rpc.max.pending.requests");
+        validatePositiveInteger(issues, "cluster.rpc.slow.call.threshold.millis");
+        validateNonNegativeInteger(issues, "cluster.rpc.idempotency.cache.capacity");
+        validatePositiveInteger(issues, "cluster.rpc.idempotency.cache.ttl.millis");
+        validatePositiveInteger(issues, "cluster.rpc.idempotency.lease.millis");
+        validatePositiveInteger(issues, "cluster.rpc.idempotency.poll.interval.millis");
+        validateRpcIdempotencyStoreKind(issues);
+        validateBoolean(issues, "cluster.rpc.idempotency.jdbc.initialize.schema");
+        validateJdbcRpcIdempotencyStore(issues);
+        validateAgentDirectoryStoreKind(issues);
+        validateBoolean(issues, "cluster.agent.directory.jdbc.initialize.schema");
+        validateJdbcAgentDirectoryStore(issues);
+        validateBoolean(issues, "cluster.agent.lease.enabled");
+        validatePositiveInteger(issues, "cluster.agent.lease.ttl.millis");
+        validatePositiveInteger(issues, "cluster.agent.lease.renew.interval.millis");
+        validateAgentLeaseBounds(issues);
         validateBoolean(issues, "cluster.chat.mailbox.pressure.enabled");
         validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.target.max.queued");
         validateNonNegativeInteger(issues, "cluster.chat.mailbox.pressure.group.max.queued");
@@ -144,6 +167,7 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.scene.mailbox.pressure.group.max.queued");
         validateNonNegativeInteger(issues, "cluster.scene.mailbox.pressure.retry.after.millis");
         validatePositiveInteger(issues, "cluster.player.business.response.timeout.millis");
+        validateAsyncBusinessCommandPolicy(issues);
         validateBoolean(issues, "cluster.player.auto.save.enabled");
         validateNonNegativeInteger(issues, "cluster.player.auto.save.initial.delay.millis");
         validatePositiveInteger(issues, "cluster.player.auto.save.interval.millis");
@@ -161,6 +185,8 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.health.max.scene.shard.hotspot.players");
         validateNonNegativeInteger(issues, "cluster.health.max.player.business.pending.responses");
         validateNonNegativeInteger(issues, "cluster.health.max.player.business.pending.age.millis");
+        validateNonNegativeInteger(issues, "cluster.health.max.async.business.pending.commands");
+        validateAsyncBusinessCommandHealthPolicy(issues);
         validatePositiveInteger(issues, "cluster.drain.timeout.millis");
         validatePositiveInteger(issues, "cluster.drain.poll.interval.millis");
         validateNonNegativeInteger(issues, "cluster.drain.propagation.delay.millis");
@@ -170,10 +196,30 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.owner.repair.ops.audit.capacity");
         validateBoolean(issues, "cluster.owner.repair.ops.audit.record.not.found.release");
         validateEventOutboxStoreKind(issues);
+        validateEventInboxStoreKind(issues);
+        validateCenterEventJournalStoreKind(issues);
+        validateProfileProjectionStoreKind(issues);
+        validateChatStateStoreKind(issues);
         validatePlayerStateStoreKind(issues);
+        validateBoolean(issues, "cluster.player.state.jdbc.initialize.schema");
         validateBoolean(issues, "cluster.event.outbox.jdbc.initialize.schema");
         validateBoolean(issues, "cluster.event.outbox.replay.enabled");
         validatePositiveInteger(issues, "cluster.event.outbox.replay.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.outbox.retry.max.attempts");
+        validateNonNegativeInteger(issues, "cluster.event.outbox.retry.initial.backoff.millis");
+        validateNonNegativeInteger(issues, "cluster.event.outbox.retry.max.backoff.millis");
+        validatePositiveInteger(issues, "cluster.event.outbox.replay.batch.size");
+        validateEventOutboxBackoffBounds(issues);
+        validateBoolean(issues, "cluster.event.inbox.jdbc.initialize.schema");
+        validateBoolean(issues, "cluster.event.journal.jdbc.initialize.schema");
+        validateBoolean(issues, "cluster.profile.projection.jdbc.initialize.schema");
+        validateBoolean(issues, "cluster.event.inbox.replay.enabled");
+        validatePositiveInteger(issues, "cluster.event.inbox.replay.interval.millis");
+        validatePositiveInteger(issues, "cluster.event.inbox.retry.max.attempts");
+        validateNonNegativeInteger(issues, "cluster.event.inbox.retry.initial.backoff.millis");
+        validateNonNegativeInteger(issues, "cluster.event.inbox.retry.max.backoff.millis");
+        validatePositiveInteger(issues, "cluster.event.inbox.replay.batch.size");
+        validateEventInboxBackoffBounds(issues);
         validatePositiveInteger(issues, "cluster.event.subscription.lease.ttl.millis");
         validatePositiveInteger(issues, "cluster.event.subscription.lease.renew.interval.millis");
         validatePositiveInteger(issues, "cluster.event.subscription.lease.scan.interval.millis");
@@ -194,10 +240,27 @@ public final class ClusterNodeConfig {
         validateNonNegativeInteger(issues, "cluster.event.repair.owner.isolation.duration.millis");
         validateEventRepairTopicOverrides(issues);
         validateJdbcEventOutboxStore(issues);
+        validateJdbcEventInboxStore(issues);
+        validateJdbcCenterEventJournalStore(issues);
+        validateJdbcProfileProjectionStore(issues);
+        validateBoolean(issues, "cluster.chat.state.jdbc.initialize.schema");
+        validatePositiveInteger(issues, "cluster.chat.state.io.workers");
+        validatePositiveInteger(issues, "cluster.chat.state.io.queue.capacity");
+        validatePositiveInteger(issues, "cluster.chat.state.pending.per.agent");
+        validateJdbcChatStateStore(issues);
+        validateJdbcPlayerStateStore(issues);
         validateMigrationTaskStoreKind(issues);
         validateBoolean(issues, "cluster.migration.task.jdbc.initialize.schema");
         validateJdbcMigrationTaskStore(issues);
         validatePositiveInteger(issues, "cluster.config.warmup.timeout.millis");
+        validateGameConfigCenterStoreKind(issues);
+        validateBoolean(issues, "cluster.game.config.jdbc.initialize.schema");
+        validateJdbcGameConfigCenterStore(issues);
+        validatePositiveInteger(issues, "cluster.network.connect.timeout.millis");
+        validateNonNegativeInteger(issues, "cluster.network.reconnect.backoff.millis");
+        validatePositiveInteger(issues, "cluster.network.pending.writes.per.target");
+        validatePositiveInteger(issues, "cluster.proxy.delivery.ack.timeout.millis");
+        validatePositiveInteger(issues, "cluster.proxy.pending.forwards.max");
         validatePositiveInteger(issues, "cluster.registry.lease.ttl.millis");
         validatePositiveInteger(issues, "cluster.registry.heartbeat.interval.millis");
         validatePositiveInteger(issues, "cluster.registry.lease.scan.interval.millis");
@@ -227,6 +290,8 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "cluster.migration.target.receipt.retention.millis");
         validatePositiveInteger(issues, "cluster.migration.target.receipt.retention.scan.interval.millis");
         validateShopStockStoreKind(issues);
+        validateBoolean(issues, "cluster.shop.stock.jdbc.initialize.schema");
+        validateJdbcShopStockStore(issues);
         validateBoolean(issues, "cluster.shop.stock.reservation.retention.enabled");
         validatePositiveInteger(issues, "cluster.shop.stock.reservation.ttl.millis");
         validatePositiveInteger(issues, "cluster.shop.stock.reservation.scan.interval.millis");
@@ -242,6 +307,10 @@ public final class ClusterNodeConfig {
             validateBoolean(issues, "scene.tick.enabled");
             validateNonNegativeInteger(issues, "scene.tick.initial.delay.millis");
             validatePositiveInteger(issues, "scene.tick.interval.millis");
+            validateBoolean(issues, "scene.shard.transfer.repair.enabled");
+            validateNonNegativeInteger(issues, "scene.shard.transfer.repair.initial.delay.millis");
+            validatePositiveInteger(issues, "scene.shard.transfer.repair.interval.millis");
+            validatePositiveInteger(issues, "scene.shard.transfer.repair.timeout.millis");
         }
         if (actualKind == ServiceKind.CHAT || expectedKind == ServiceKind.CHAT) {
             validatePositiveInteger(issues, "chat.world.shards");
@@ -249,7 +318,72 @@ public final class ClusterNodeConfig {
             validatePositiveInteger(issues, "chat.delivery.max.pending.per.recipient");
             validateChatDeliveryOverflowStrategy(issues);
         }
+        validateProductionSafety(issues, actualKind == null ? expectedKind : actualKind);
         return new ClusterConfigValidation(issues);
+    }
+
+    public ClusterEnvironment environment() {
+        return ClusterEnvironment.valueOf(property(
+                "cluster.environment", ClusterEnvironment.DEVELOPMENT.name()
+        ));
+    }
+
+    public RpcGovernanceConfig rpcGovernanceConfig() {
+        RpcGovernanceConfig defaults = RpcGovernanceConfig.defaults();
+        return new RpcGovernanceConfig(
+                Duration.ofMillis(integer(
+                        "cluster.rpc.default.timeout.millis",
+                        Math.toIntExact(defaults.defaultTimeout().toMillis())
+                )),
+                integer("cluster.rpc.max.pending.requests", defaults.maxPendingRequests()),
+                Duration.ofMillis(integer(
+                        "cluster.rpc.slow.call.threshold.millis",
+                        Math.toIntExact(defaults.slowCallThreshold().toMillis())
+                )),
+                integer("cluster.rpc.idempotency.cache.capacity", defaults.idempotencyCacheCapacity()),
+                Duration.ofMillis(integer(
+                        "cluster.rpc.idempotency.cache.ttl.millis",
+                        Math.toIntExact(defaults.idempotencyCacheTtl().toMillis())
+                )),
+                Duration.ofMillis(integer(
+                        "cluster.rpc.idempotency.lease.millis",
+                        Math.toIntExact(defaults.idempotencyLeaseDuration().toMillis())
+                )),
+                Duration.ofMillis(integer(
+                        "cluster.rpc.idempotency.poll.interval.millis",
+                        Math.toIntExact(defaults.idempotencyPollInterval().toMillis())
+                ))
+        );
+    }
+
+    public RpcIdempotencyStoreKind rpcIdempotencyStoreKind() {
+        return RpcIdempotencyStoreKind.valueOf(property(
+                "cluster.rpc.idempotency.store", RpcIdempotencyStoreKind.MEMORY.name()
+        ));
+    }
+
+    public String rpcIdempotencyJdbcDriver() {
+        return property("cluster.rpc.idempotency.jdbc.driver", "");
+    }
+
+    public String rpcIdempotencyJdbcUrl() {
+        return required("cluster.rpc.idempotency.jdbc.url");
+    }
+
+    public String rpcIdempotencyJdbcUser() {
+        return property("cluster.rpc.idempotency.jdbc.user", "");
+    }
+
+    public String rpcIdempotencyJdbcPassword() {
+        return property("cluster.rpc.idempotency.jdbc.password", "");
+    }
+
+    public String rpcIdempotencyJdbcTable() {
+        return property("cluster.rpc.idempotency.jdbc.table", "rpc_idempotency_state");
+    }
+
+    public boolean rpcIdempotencyJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.rpc.idempotency.jdbc.initialize.schema", "true"));
     }
 
     public ServiceKind kind() {
@@ -407,7 +541,9 @@ public final class ClusterNodeConfig {
                 integer("cluster.health.max.scene.active.players", 0),
                 integer("cluster.health.max.scene.shard.hotspot.players", 0),
                 integer("cluster.health.max.player.business.pending.responses", 0),
-                integer("cluster.health.max.player.business.pending.age.millis", 0)
+                integer("cluster.health.max.player.business.pending.age.millis", 0),
+                integer("cluster.health.max.async.business.pending.commands", 0),
+                asyncBusinessCommandHealthOperationLimits()
         );
     }
 
@@ -480,6 +616,31 @@ public final class ClusterNodeConfig {
         return Duration.ofMillis(integer("cluster.player.business.response.timeout.millis", 5_000));
     }
 
+    public AsyncBusinessCommandPolicy asyncBusinessCommandPolicy() {
+        String operationPrefix = "cluster.player.async.command.max.pending.operation.";
+        Map<String, Integer> operationLimits = new HashMap<>();
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(operationPrefix)) {
+                operationLimits.put(key.substring(operationPrefix.length()), integer(key, 0));
+            }
+        }
+        return new AsyncBusinessCommandPolicy(
+                integer("cluster.player.async.command.max.pending.total", AsyncBusinessCommandPolicy.UNLIMITED),
+                operationLimits
+        );
+    }
+
+    private Map<String, Integer> asyncBusinessCommandHealthOperationLimits() {
+        String operationPrefix = "cluster.health.max.async.business.pending.operation.";
+        Map<String, Integer> operationLimits = new HashMap<>();
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(operationPrefix)) {
+                operationLimits.put(key.substring(operationPrefix.length()), integer(key, 0));
+            }
+        }
+        return Map.copyOf(operationLimits);
+    }
+
     public Instant gameServerOpenTime() {
         return Instant.parse(property("game.server.open.time", "1970-01-01T00:00:00Z"));
     }
@@ -490,6 +651,30 @@ public final class ClusterNodeConfig {
 
     public Path playerStateStoreDirectory() {
         return Path.of(property("cluster.player.state.store.dir", "data/player-state/" + region() + "-" + node()));
+    }
+
+    public String playerStateJdbcDriver() {
+        return property("cluster.player.state.jdbc.driver", "");
+    }
+
+    public String playerStateJdbcUrl() {
+        return required("cluster.player.state.jdbc.url");
+    }
+
+    public String playerStateJdbcUser() {
+        return property("cluster.player.state.jdbc.user", "");
+    }
+
+    public String playerStateJdbcPassword() {
+        return property("cluster.player.state.jdbc.password", "");
+    }
+
+    public String playerStateJdbcTable() {
+        return property("cluster.player.state.jdbc.table", "player_atomic_state");
+    }
+
+    public boolean playerStateJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.player.state.jdbc.initialize.schema", "true"));
     }
 
     public boolean playerAutoSaveEnabled() {
@@ -554,6 +739,184 @@ public final class ClusterNodeConfig {
 
     public Duration eventOutboxReplayInterval() {
         return Duration.ofMillis(integer("cluster.event.outbox.replay.interval.millis", 5_000));
+    }
+
+    public CenterEventJournalStoreKind centerEventJournalStoreKind() {
+        return CenterEventJournalStoreKind.valueOf(property(
+                "cluster.event.journal.store",
+                CenterEventJournalStoreKind.MEMORY.name()
+        ));
+    }
+
+    public String centerEventJournalJdbcDriver() {
+        return property("cluster.event.journal.jdbc.driver", "");
+    }
+
+    public String centerEventJournalJdbcUrl() {
+        return required("cluster.event.journal.jdbc.url");
+    }
+
+    public String centerEventJournalJdbcUser() {
+        return property("cluster.event.journal.jdbc.user", "");
+    }
+
+    public String centerEventJournalJdbcPassword() {
+        return property("cluster.event.journal.jdbc.password", "");
+    }
+
+    public String centerEventJournalJdbcTable() {
+        return property("cluster.event.journal.jdbc.table", "cluster_event_journal");
+    }
+
+    public String centerEventJournalJdbcSequenceTable() {
+        return property("cluster.event.journal.jdbc.sequence.table", "cluster_event_journal_sequence");
+    }
+
+    public String centerEventJournalJdbcCursorTable() {
+        return property("cluster.event.journal.jdbc.cursor.table", "cluster_event_journal_cursor");
+    }
+
+    public boolean centerEventJournalJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.event.journal.jdbc.initialize.schema", "true"));
+    }
+
+    public ProfileProjectionStoreKind profileProjectionStoreKind() {
+        return ProfileProjectionStoreKind.valueOf(property(
+                "cluster.profile.projection.store",
+                ProfileProjectionStoreKind.MEMORY.name()
+        ));
+    }
+
+    public String profileProjectionJdbcDriver() {
+        return property("cluster.profile.projection.jdbc.driver", "");
+    }
+
+    public String profileProjectionJdbcUrl() {
+        return required("cluster.profile.projection.jdbc.url");
+    }
+
+    public String profileProjectionJdbcUser() {
+        return property("cluster.profile.projection.jdbc.user", "");
+    }
+
+    public String profileProjectionJdbcPassword() {
+        return property("cluster.profile.projection.jdbc.password", "");
+    }
+
+    public String profileProjectionJdbcTable() {
+        return property("cluster.profile.projection.jdbc.table", "profile_projection");
+    }
+
+    public boolean profileProjectionJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.profile.projection.jdbc.initialize.schema", "true"));
+    }
+
+    public ChatStateStoreKind chatStateStoreKind() {
+        return ChatStateStoreKind.valueOf(property("cluster.chat.state.store", ChatStateStoreKind.MEMORY.name()));
+    }
+
+    public String chatStateJdbcDriver() {
+        return property("cluster.chat.state.jdbc.driver", "");
+    }
+
+    public String chatStateJdbcUrl() {
+        return required("cluster.chat.state.jdbc.url");
+    }
+
+    public String chatStateJdbcUser() {
+        return property("cluster.chat.state.jdbc.user", "");
+    }
+
+    public String chatStateJdbcPassword() {
+        return property("cluster.chat.state.jdbc.password", "");
+    }
+
+    public String chatStateJdbcTable() {
+        return property("cluster.chat.state.jdbc.table", "chat_agent_state");
+    }
+
+    public boolean chatStateJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.chat.state.jdbc.initialize.schema", "true"));
+    }
+
+    public int chatStateIoWorkers() {
+        return integer("cluster.chat.state.io.workers", Math.max(1, Math.min(4, actorWorkers())));
+    }
+
+    public int chatStateIoQueueCapacity() {
+        return integer("cluster.chat.state.io.queue.capacity", 4096);
+    }
+
+    public int chatStatePendingPerAgent() {
+        return integer("cluster.chat.state.pending.per.agent", 256);
+    }
+
+    public int eventOutboxRetryMaxAttempts() {
+        return integer("cluster.event.outbox.retry.max.attempts", 20);
+    }
+
+    public Duration eventOutboxRetryInitialBackoff() {
+        return Duration.ofMillis(integer("cluster.event.outbox.retry.initial.backoff.millis", 1_000));
+    }
+
+    public Duration eventOutboxRetryMaxBackoff() {
+        return Duration.ofMillis(integer("cluster.event.outbox.retry.max.backoff.millis", 300_000));
+    }
+
+    public int eventOutboxReplayBatchSize() {
+        return integer("cluster.event.outbox.replay.batch.size", 256);
+    }
+
+    public EventInboxStoreKind eventInboxStoreKind() {
+        return EventInboxStoreKind.valueOf(property("cluster.event.inbox.store", EventInboxStoreKind.MEMORY.name()));
+    }
+
+    public String eventInboxJdbcDriver() {
+        return property("cluster.event.inbox.jdbc.driver", "");
+    }
+
+    public String eventInboxJdbcUrl() {
+        return required("cluster.event.inbox.jdbc.url");
+    }
+
+    public String eventInboxJdbcUser() {
+        return property("cluster.event.inbox.jdbc.user", "");
+    }
+
+    public String eventInboxJdbcPassword() {
+        return property("cluster.event.inbox.jdbc.password", "");
+    }
+
+    public String eventInboxJdbcTable() {
+        return property("cluster.event.inbox.jdbc.table", "versioned_event_inbox");
+    }
+
+    public boolean eventInboxJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.event.inbox.jdbc.initialize.schema", "true"));
+    }
+
+    public boolean eventInboxReplayEnabled() {
+        return Boolean.parseBoolean(property("cluster.event.inbox.replay.enabled", "true"));
+    }
+
+    public Duration eventInboxReplayInterval() {
+        return Duration.ofMillis(integer("cluster.event.inbox.replay.interval.millis", 1_000));
+    }
+
+    public int eventInboxRetryMaxAttempts() {
+        return integer("cluster.event.inbox.retry.max.attempts", 10);
+    }
+
+    public Duration eventInboxRetryInitialBackoff() {
+        return Duration.ofMillis(integer("cluster.event.inbox.retry.initial.backoff.millis", 100));
+    }
+
+    public Duration eventInboxRetryMaxBackoff() {
+        return Duration.ofMillis(integer("cluster.event.inbox.retry.max.backoff.millis", 60_000));
+    }
+
+    public int eventInboxReplayBatchSize() {
+        return integer("cluster.event.inbox.replay.batch.size", 256);
     }
 
     public Duration eventSubscriptionLeaseTtl() {
@@ -661,6 +1024,89 @@ public final class ClusterNodeConfig {
 
     public Duration configWarmupTimeout() {
         return Duration.ofMillis(integer("cluster.config.warmup.timeout.millis", 5_000));
+    }
+
+    public GameConfigCenterStoreKind gameConfigCenterStoreKind() {
+        return GameConfigCenterStoreKind.valueOf(property(
+                "cluster.game.config.store", GameConfigCenterStoreKind.MEMORY.name()
+        ));
+    }
+
+    public String gameConfigCenterJdbcDriver() {
+        return property("cluster.game.config.jdbc.driver", "");
+    }
+
+    public String gameConfigCenterJdbcUrl() {
+        return required("cluster.game.config.jdbc.url");
+    }
+
+    public String gameConfigCenterJdbcUser() {
+        return property("cluster.game.config.jdbc.user", "");
+    }
+
+    public String gameConfigCenterJdbcPassword() {
+        return property("cluster.game.config.jdbc.password", "");
+    }
+
+    public String gameConfigCenterJdbcTable() {
+        return property("cluster.game.config.jdbc.table", "game_config_center_state");
+    }
+
+    public boolean gameConfigCenterJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.game.config.jdbc.initialize.schema", "true"));
+    }
+
+    public AgentDirectoryStoreKind agentDirectoryStoreKind() {
+        return AgentDirectoryStoreKind.valueOf(property(
+                "cluster.agent.directory.store", AgentDirectoryStoreKind.MEMORY.name()
+        ));
+    }
+
+    public String agentDirectoryJdbcDriver() {
+        return property("cluster.agent.directory.jdbc.driver", "");
+    }
+
+    public String agentDirectoryJdbcUrl() {
+        return required("cluster.agent.directory.jdbc.url");
+    }
+
+    public String agentDirectoryJdbcUser() {
+        return property("cluster.agent.directory.jdbc.user", "");
+    }
+
+    public String agentDirectoryJdbcPassword() {
+        return property("cluster.agent.directory.jdbc.password", "");
+    }
+
+    public String agentDirectoryJdbcTable() {
+        return property("cluster.agent.directory.jdbc.table", "agent_directory");
+    }
+
+    public boolean agentDirectoryJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.agent.directory.jdbc.initialize.schema", "true"));
+    }
+
+    public AgentLeaseConfig agentLeaseConfig() {
+        return new AgentLeaseConfig(
+                Boolean.parseBoolean(property("cluster.agent.lease.enabled", "true")),
+                Duration.ofMillis(integer("cluster.agent.lease.ttl.millis", 15_000)),
+                Duration.ofMillis(integer("cluster.agent.lease.renew.interval.millis", 5_000))
+        );
+    }
+
+    public NettyClusterTransportConfig nettyTransportConfig() {
+        return new NettyClusterTransportConfig(
+                Duration.ofMillis(integer("cluster.network.connect.timeout.millis", 2_000)),
+                Duration.ofMillis(integer("cluster.network.reconnect.backoff.millis", 200)),
+                integer("cluster.network.pending.writes.per.target", 1_024)
+        );
+    }
+
+    public ForwardingProxyConfig forwardingProxyConfig() {
+        return new ForwardingProxyConfig(
+                Duration.ofMillis(integer("cluster.proxy.delivery.ack.timeout.millis", 1_000)),
+                integer("cluster.proxy.pending.forwards.max", 10_000)
+        );
     }
 
     public Duration registryLeaseTtl() {
@@ -791,6 +1237,34 @@ public final class ClusterNodeConfig {
         return ShopStockStoreKind.valueOf(property("cluster.shop.stock.store", ShopStockStoreKind.MEMORY.name()));
     }
 
+    public String shopStockJdbcDriver() {
+        return property("cluster.shop.stock.jdbc.driver", "");
+    }
+
+    public String shopStockJdbcUrl() {
+        return required("cluster.shop.stock.jdbc.url");
+    }
+
+    public String shopStockJdbcUser() {
+        return property("cluster.shop.stock.jdbc.user", "");
+    }
+
+    public String shopStockJdbcPassword() {
+        return property("cluster.shop.stock.jdbc.password", "");
+    }
+
+    public String shopStockJdbcTable() {
+        return property("cluster.shop.stock.jdbc.table", "shop_stock");
+    }
+
+    public String shopStockReservationJdbcTable() {
+        return property("cluster.shop.stock.jdbc.reservation.table", "shop_stock_reservation");
+    }
+
+    public boolean shopStockJdbcInitializeSchema() {
+        return Boolean.parseBoolean(property("cluster.shop.stock.jdbc.initialize.schema", "true"));
+    }
+
     public Duration shopStockReservationTtl() {
         return Duration.ofMillis(integer("cluster.shop.stock.reservation.ttl.millis", 60_000));
     }
@@ -842,6 +1316,22 @@ public final class ClusterNodeConfig {
 
     public Duration sceneTickInterval() {
         return Duration.ofMillis(integer("scene.tick.interval.millis", 100));
+    }
+
+    public boolean sceneShardTransferRepairEnabled() {
+        return Boolean.parseBoolean(property("scene.shard.transfer.repair.enabled", "true"));
+    }
+
+    public Duration sceneShardTransferRepairInitialDelay() {
+        return Duration.ofMillis(integer("scene.shard.transfer.repair.initial.delay.millis", 1_000));
+    }
+
+    public Duration sceneShardTransferRepairInterval() {
+        return Duration.ofMillis(integer("scene.shard.transfer.repair.interval.millis", 1_000));
+    }
+
+    public Duration sceneShardTransferRepairTimeout() {
+        return Duration.ofMillis(integer("scene.shard.transfer.repair.timeout.millis", 5_000));
     }
 
     public ChatRouteConfig chatRouteConfig() {
@@ -914,6 +1404,80 @@ public final class ClusterNodeConfig {
         validatePositiveInteger(issues, "scene.capacity");
         validatePositiveInteger(issues, "scene.shards");
         validatePositiveInteger(issues, "scene.shard.chunk.size");
+    }
+
+    private void validateEnvironment(List<ClusterConfigIssue> issues) {
+        String value = property("cluster.environment", ClusterEnvironment.DEVELOPMENT.name());
+        try {
+            ClusterEnvironment.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.environment", "unknown environment " + value));
+        }
+    }
+
+    private void validateProductionSafety(List<ClusterConfigIssue> issues, ServiceKind kind) {
+        if (!ClusterEnvironment.PRODUCTION.name().equals(
+                property("cluster.environment", ClusterEnvironment.DEVELOPMENT.name()))) {
+            return;
+        }
+        if (properties.getProperty("cluster.ops.port") != null) {
+            requireNonBlankProductionValue(issues, "cluster.ops.admin.token");
+        }
+        if (kind != null && kind != ServiceKind.PROXY) {
+            requireProductionStore(issues, "cluster.rpc.idempotency.store", RpcIdempotencyStoreKind.JDBC.name());
+        }
+        if (kind == ServiceKind.GAME) {
+            requireProductionValue(issues, "cluster.agent.lease.enabled", "true");
+            requireProductionStore(issues, "cluster.player.state.store", PlayerStateStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.event.outbox.store", EventOutboxStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.event.inbox.store", EventInboxStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.migration.task.store", AgentMigrationTaskStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.migration.target.receipt.store",
+                    AgentMigrationTargetReceiptStoreKind.FILE.name());
+        } else if (kind == ServiceKind.SCENE || kind == ServiceKind.CHAT) {
+            requireProductionValue(issues, "cluster.agent.lease.enabled", "true");
+            requireProductionStore(issues, "cluster.event.outbox.store", EventOutboxStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.event.inbox.store", EventInboxStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.profile.projection.store",
+                    ProfileProjectionStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.migration.task.store", AgentMigrationTaskStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.migration.target.receipt.store",
+                    AgentMigrationTargetReceiptStoreKind.FILE.name());
+            if (kind == ServiceKind.CHAT) {
+                requireProductionStore(issues, "cluster.chat.state.store", ChatStateStoreKind.JDBC.name());
+            }
+        } else if (kind == ServiceKind.CENTER) {
+            requireProductionStore(issues, "cluster.event.outbox.store", EventOutboxStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.event.journal.store", CenterEventJournalStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.shop.stock.store", ShopStockStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.game.config.store", GameConfigCenterStoreKind.JDBC.name());
+            requireProductionStore(issues, "cluster.agent.directory.store", AgentDirectoryStoreKind.JDBC.name());
+        }
+    }
+
+    private void requireProductionStore(List<ClusterConfigIssue> issues, String key, String expected) {
+        String actual = property(key, "MEMORY");
+        if (!expected.equals(actual)) {
+            issues.add(new ClusterConfigIssue(
+                    key, "production requires " + expected + " but was " + actual
+            ));
+        }
+    }
+
+    private void requireProductionValue(List<ClusterConfigIssue> issues, String key, String expected) {
+        String actual = property(key, expected);
+        if (!expected.equals(actual)) {
+            issues.add(new ClusterConfigIssue(
+                    key, "production requires " + expected + " but was " + actual
+            ));
+        }
+    }
+
+    private void requireNonBlankProductionValue(List<ClusterConfigIssue> issues, String key) {
+        String value = properties.getProperty(key);
+        if (value == null || value.isBlank()) {
+            issues.add(new ClusterConfigIssue(key, "required in production"));
+        }
     }
 
     private void validatePort(List<ClusterConfigIssue> issues, String key) {
@@ -1134,6 +1698,59 @@ public final class ClusterNodeConfig {
         }
     }
 
+    private void validateEventOutboxBackoffBounds(List<ClusterConfigIssue> issues) {
+        String initialKey = "cluster.event.outbox.retry.initial.backoff.millis";
+        String maxKey = "cluster.event.outbox.retry.max.backoff.millis";
+        try {
+            int initialMillis = Integer.parseInt(property(initialKey, "1000"));
+            int maxMillis = Integer.parseInt(property(maxKey, "300000"));
+            if (initialMillis >= 0 && maxMillis >= 0 && maxMillis < initialMillis) {
+                issues.add(new ClusterConfigIssue(maxKey, "must be greater than or equal to initial backoff"));
+            }
+        } catch (NumberFormatException ignored) {
+        }
+    }
+
+    private void validateEventInboxBackoffBounds(List<ClusterConfigIssue> issues) {
+        String initialKey = "cluster.event.inbox.retry.initial.backoff.millis";
+        String maxKey = "cluster.event.inbox.retry.max.backoff.millis";
+        try {
+            int initialMillis = Integer.parseInt(property(initialKey, "100"));
+            int maxMillis = Integer.parseInt(property(maxKey, "60000"));
+            if (initialMillis >= 0 && maxMillis >= 0 && maxMillis < initialMillis) {
+                issues.add(new ClusterConfigIssue(maxKey, "must be greater than or equal to initial backoff"));
+            }
+        } catch (NumberFormatException ignored) {
+        }
+    }
+
+    private void validateAsyncBusinessCommandPolicy(List<ClusterConfigIssue> issues) {
+        validatePositiveInteger(issues, "cluster.player.async.command.max.pending.total");
+        String prefix = "cluster.player.async.command.max.pending.operation.";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                String operation = key.substring(prefix.length());
+                if (operation.isBlank()) {
+                    issues.add(new ClusterConfigIssue(key, "operation must not be blank"));
+                }
+                validatePositiveInteger(issues, key);
+            }
+        }
+    }
+
+    private void validateAsyncBusinessCommandHealthPolicy(List<ClusterConfigIssue> issues) {
+        String prefix = "cluster.health.max.async.business.pending.operation.";
+        for (String key : properties.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                String operation = key.substring(prefix.length());
+                if (operation.isBlank()) {
+                    issues.add(new ClusterConfigIssue(key, "operation must not be blank"));
+                }
+                validateNonNegativeInteger(issues, key);
+            }
+        }
+    }
+
     private void validateMigrationTaskStoreKind(List<ClusterConfigIssue> issues) {
         String value = properties.getProperty("cluster.migration.task.store");
         if (value == null || value.isBlank()) {
@@ -1171,6 +1788,56 @@ public final class ClusterNodeConfig {
         }
     }
 
+    private void validateEventInboxStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.event.inbox.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            EventInboxStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.event.inbox.store", "unknown event inbox store " + value));
+        }
+    }
+
+    private void validateCenterEventJournalStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.event.journal.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            CenterEventJournalStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.event.journal.store",
+                    "unknown center event journal store " + value));
+        }
+    }
+
+    private void validateProfileProjectionStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.profile.projection.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            ProfileProjectionStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.profile.projection.store",
+                    "unknown profile projection store " + value));
+        }
+    }
+
+    private void validateChatStateStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.chat.state.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            ChatStateStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue("cluster.chat.state.store", "unknown chat state store " + value));
+        }
+    }
+
     private void validatePlayerStateStoreKind(List<ClusterConfigIssue> issues) {
         String value = properties.getProperty("cluster.player.state.store");
         if (value == null || value.isBlank()) {
@@ -1191,6 +1858,141 @@ public final class ClusterNodeConfig {
         require(issues, "cluster.event.outbox.jdbc.url");
         validateTableName(issues, "cluster.event.outbox.jdbc.table");
         validateTableName(issues, "cluster.event.outbox.jdbc.sequence.table");
+    }
+
+    private void validateGameConfigCenterStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.game.config.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            GameConfigCenterStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue(
+                    "cluster.game.config.store", "unknown game config center store " + value
+            ));
+        }
+    }
+
+    private void validateJdbcGameConfigCenterStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.game.config.store");
+        if (!GameConfigCenterStoreKind.JDBC.name().equals(value)) {
+            return;
+        }
+        require(issues, "cluster.game.config.jdbc.url");
+        validateTableName(issues, "cluster.game.config.jdbc.table");
+    }
+
+    private void validateAgentDirectoryStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.agent.directory.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            AgentDirectoryStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue(
+                    "cluster.agent.directory.store", "unknown agent directory store " + value
+            ));
+        }
+    }
+
+    private void validateJdbcAgentDirectoryStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.agent.directory.store");
+        if (!AgentDirectoryStoreKind.JDBC.name().equals(value)) {
+            return;
+        }
+        require(issues, "cluster.agent.directory.jdbc.url");
+        validateTableName(issues, "cluster.agent.directory.jdbc.table");
+    }
+
+    private void validateAgentLeaseBounds(List<ClusterConfigIssue> issues) {
+        String ttlValue = properties.getProperty("cluster.agent.lease.ttl.millis");
+        String renewValue = properties.getProperty("cluster.agent.lease.renew.interval.millis");
+        if (ttlValue == null || renewValue == null) {
+            return;
+        }
+        try {
+            int ttl = Integer.parseInt(ttlValue);
+            int renew = Integer.parseInt(renewValue);
+            if (ttl > 0 && renew > 0 && renew >= ttl) {
+                issues.add(new ClusterConfigIssue(
+                        "cluster.agent.lease.renew.interval.millis",
+                        "must be shorter than cluster.agent.lease.ttl.millis"
+                ));
+            }
+        } catch (NumberFormatException ignored) {
+        }
+    }
+
+    private void validateRpcIdempotencyStoreKind(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.rpc.idempotency.store");
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            RpcIdempotencyStoreKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            issues.add(new ClusterConfigIssue(
+                    "cluster.rpc.idempotency.store", "unknown RPC idempotency store " + value
+            ));
+        }
+    }
+
+    private void validateJdbcRpcIdempotencyStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.rpc.idempotency.store");
+        if (!RpcIdempotencyStoreKind.JDBC.name().equals(value)) {
+            return;
+        }
+        require(issues, "cluster.rpc.idempotency.jdbc.url");
+        validateTableName(issues, "cluster.rpc.idempotency.jdbc.table");
+    }
+
+    private void validateJdbcEventInboxStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.event.inbox.store");
+        if (value == null || value.isBlank() || !value.equals(EventInboxStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.event.inbox.jdbc.url");
+        validateTableName(issues, "cluster.event.inbox.jdbc.table");
+    }
+
+    private void validateJdbcCenterEventJournalStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.event.journal.store");
+        if (value == null || value.isBlank() || !value.equals(CenterEventJournalStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.event.journal.jdbc.url");
+        validateTableName(issues, "cluster.event.journal.jdbc.table");
+        validateTableName(issues, "cluster.event.journal.jdbc.sequence.table");
+        validateTableName(issues, "cluster.event.journal.jdbc.cursor.table");
+    }
+
+    private void validateJdbcProfileProjectionStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.profile.projection.store");
+        if (value == null || value.isBlank() || !value.equals(ProfileProjectionStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.profile.projection.jdbc.url");
+        validateTableName(issues, "cluster.profile.projection.jdbc.table");
+    }
+
+    private void validateJdbcChatStateStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.chat.state.store");
+        if (value == null || value.isBlank() || !value.equals(ChatStateStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.chat.state.jdbc.url");
+        validateTableName(issues, "cluster.chat.state.jdbc.table");
+    }
+
+    private void validateJdbcPlayerStateStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.player.state.store");
+        if (value == null || value.isBlank() || !value.equals(PlayerStateStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.player.state.jdbc.url");
+        validateTableName(issues, "cluster.player.state.jdbc.table");
     }
 
     private void validateJdbcMigrationTaskStore(List<ClusterConfigIssue> issues) {
@@ -1222,6 +2024,16 @@ public final class ClusterNodeConfig {
         } catch (IllegalArgumentException e) {
             issues.add(new ClusterConfigIssue("cluster.shop.stock.store", "unknown shop stock store " + value));
         }
+    }
+
+    private void validateJdbcShopStockStore(List<ClusterConfigIssue> issues) {
+        String value = properties.getProperty("cluster.shop.stock.store");
+        if (value == null || value.isBlank() || !value.equals(ShopStockStoreKind.JDBC.name())) {
+            return;
+        }
+        require(issues, "cluster.shop.stock.jdbc.url");
+        validateTableName(issues, "cluster.shop.stock.jdbc.table");
+        validateTableName(issues, "cluster.shop.stock.jdbc.reservation.table");
     }
 
     private void validateChatDeliveryOverflowStrategy(List<ClusterConfigIssue> issues) {

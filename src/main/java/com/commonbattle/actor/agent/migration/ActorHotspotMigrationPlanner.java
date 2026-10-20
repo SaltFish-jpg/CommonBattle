@@ -25,6 +25,8 @@ public final class ActorHotspotMigrationPlanner {
     private final ClusterDirectory services;
     private final AgentMigrationTaskStore taskStore;
     private final ActorHotspotMigrationSubmitter submitter;
+    private final ActorIdentityResolver identityResolver;
+    private final MigrationTargetActorResolver targetActorResolver;
 
     public ActorHotspotMigrationPlanner(
             AgentDirectory agents,
@@ -32,7 +34,8 @@ public final class ActorHotspotMigrationPlanner {
             AgentMigrationTaskStore taskStore,
             AgentMigrationCoordinator coordinator
     ) {
-        this(agents, services, taskStore, coordinator::migrate);
+        this(agents, services, taskStore, coordinator::migrate, ActorHotspotMigrationPlanner::identityOf,
+                (actorId, identity, target) -> actorId);
     }
 
     public ActorHotspotMigrationPlanner(
@@ -41,10 +44,35 @@ public final class ActorHotspotMigrationPlanner {
             AgentMigrationTaskStore taskStore,
             ActorHotspotMigrationSubmitter submitter
     ) {
+        this(agents, services, taskStore, submitter, ActorHotspotMigrationPlanner::identityOf,
+                (actorId, identity, target) -> actorId);
+    }
+
+    public ActorHotspotMigrationPlanner(
+            AgentDirectory agents,
+            ClusterDirectory services,
+            AgentMigrationTaskStore taskStore,
+            ActorHotspotMigrationSubmitter submitter,
+            ActorIdentityResolver identityResolver
+    ) {
+        this(agents, services, taskStore, submitter, identityResolver,
+                (actorId, identity, target) -> actorId);
+    }
+
+    public ActorHotspotMigrationPlanner(
+            AgentDirectory agents,
+            ClusterDirectory services,
+            AgentMigrationTaskStore taskStore,
+            ActorHotspotMigrationSubmitter submitter,
+            ActorIdentityResolver identityResolver,
+            MigrationTargetActorResolver targetActorResolver
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.services = Objects.requireNonNull(services, "services");
         this.taskStore = Objects.requireNonNull(taskStore, "taskStore");
         this.submitter = Objects.requireNonNull(submitter, "submitter");
+        this.identityResolver = Objects.requireNonNull(identityResolver, "identityResolver");
+        this.targetActorResolver = Objects.requireNonNull(targetActorResolver, "targetActorResolver");
     }
 
     public List<ActorHotspotMigrationResult> submitCandidates(
@@ -82,7 +110,7 @@ public final class ActorHotspotMigrationPlanner {
             return ActorHotspotMigrationResult.of(candidate.actorId(), Optional.empty(), Optional.empty(),
                     ActorHotspotMigrationStatus.NOT_MIGRATION_CANDIDATE, "candidate_action_not_migration");
         }
-        Optional<AgentIdentity> identity = identityOf(candidate.actorId());
+        Optional<AgentIdentity> identity = identityResolver.resolve(candidate.actorId());
         if (identity.isEmpty()) {
             return ActorHotspotMigrationResult.of(candidate.actorId(), Optional.empty(), Optional.empty(),
                     ActorHotspotMigrationStatus.UNSUPPORTED_ACTOR_ID, "unsupported_actor_id");
@@ -132,14 +160,17 @@ public final class ActorHotspotMigrationPlanner {
                 .sorted(Comparator.comparingLong(ServiceDescriptor::loadScore)
                         .thenComparing(service -> service.id().wireName()))
                 .findFirst()
-                .map(service -> new AgentLocation(service.id(), new ActorRef(actorId)));
+                .map(service -> new AgentLocation(
+                        service.id(),
+                        new ActorRef(targetActorResolver.resolve(actorId, identity, service))
+                ));
     }
 
     private static Optional<ServiceKind> targetKind(AgentIdentity identity) {
         return switch (identity.type()) {
             case AgentIdentity.PLAYER, AgentIdentity.PROFILE, AgentIdentity.FRIEND, AgentIdentity.ALLIANCE ->
                     Optional.of(ServiceKind.GAME);
-            case AgentIdentity.SCENE -> Optional.of(ServiceKind.SCENE);
+            case AgentIdentity.SCENE, AgentIdentity.SCENE_SHARD -> Optional.of(ServiceKind.SCENE);
             default -> Optional.empty();
         };
     }
@@ -165,7 +196,7 @@ public final class ActorHotspotMigrationPlanner {
             return identity(AgentIdentity.SCENE, actorId.substring("scene:".length()));
         }
         if (normalized.startsWith("scene-shard:")) {
-            return identity(AgentIdentity.SCENE, actorId.substring("scene-shard:".length()));
+            return identity(AgentIdentity.SCENE_SHARD, actorId.substring("scene-shard:".length()));
         }
         return Optional.empty();
     }

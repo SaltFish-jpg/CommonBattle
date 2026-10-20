@@ -24,6 +24,7 @@ import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
 import com.commonbattle.observability.RuntimeHealthRegistry;
 import com.commonbattle.observability.ServerDrainController;
+import com.commonbattle.observability.DrainResult;
 
 import java.net.InetSocketAddress;
 import java.time.Clock;
@@ -43,8 +44,9 @@ final class BootOpsHttp {
             ServiceDescriptor local,
             ActorSystem actors,
             ClusterDirectory directory,
-            RuntimeHealthRegistry registry
+            BootRuntime runtime
     ) {
+        RuntimeHealthRegistry registry = runtime.healthRegistry();
         Clock clock = Clock.systemUTC();
         InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit =
                 new InMemoryOwnerRepairOpsAuditLog(config.ownerRepairOpsAuditConfig());
@@ -58,7 +60,7 @@ final class BootOpsHttp {
                 registry,
                 config.runtimeHealthPolicy()
         );
-        return startServer(config, probe, clock, registry, ownerRepairOpsAudit);
+        return startServer(config, probe, clock, registry, ownerRepairOpsAudit, runtime);
     }
 
     static OpsHttpServer start(
@@ -172,7 +174,7 @@ final class BootOpsHttp {
                 registry,
                 config.runtimeHealthPolicy()
         );
-        return startServer(config, probe, clock, registry, ownerRepairOpsAudit);
+        return startServer(config, probe, clock, registry, ownerRepairOpsAudit, null);
     }
 
     private static OpsHttpServer startServer(
@@ -180,14 +182,29 @@ final class BootOpsHttp {
             RuntimeHealthProbe probe,
             Clock clock,
             RuntimeHealthRegistry registry,
-            InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit
+            InMemoryOwnerRepairOpsAuditLog ownerRepairOpsAudit,
+            BootRuntime runtime
     ) {
         ServiceEndpoint endpoint = config.opsEndpoint();
+        ServerDrainController drainController = new ServerDrainController(
+                probe,
+                clock,
+                duration -> Thread.sleep(duration.toMillis()),
+                registry.drainableComponents()
+        );
+        if (runtime != null) {
+            runtime.configureShutdownDrain(() -> {
+                DrainResult result = drainController.awaitDrained(config.drainConfig());
+                if (!result.drained()) {
+                    String reason = result.reason().isBlank() ? "timeout" : result.reason();
+                    throw new IllegalStateException("Server drain failed: " + reason);
+                }
+            });
+        }
         OpsHttpServer server = new OpsHttpServer(
                 new InetSocketAddress(endpoint.host(), endpoint.port()),
                 probe,
-                new ServerDrainController(probe, clock, duration -> Thread.sleep(duration.toMillis()),
-                        registry.drainableComponents()),
+                drainController,
                 config.drainConfig(),
                 registry.ownerEventRepairIsolationAdmins(),
                 ownerRepairOpsAudit,
@@ -208,6 +225,12 @@ final class BootOpsHttp {
         }
         for (var audit : registry.bagChangeAudits()) {
             server.attachBagChangeAuditView(audit);
+        }
+        for (var admin : registry.eventOutboxDeadLetterAdmins()) {
+            server.attachEventOutboxDeadLetterAdmin(admin);
+        }
+        for (var admin : registry.eventInboxDeadLetterAdmins()) {
+            server.attachEventInboxDeadLetterAdmin(admin);
         }
         server.start();
         return server;

@@ -17,19 +17,37 @@ public record ActorHotspotAdmissionStats(
         long migrationCandidateRejected,
         Map<String, Long> rejectedByTargetType,
         Map<String, Long> rejectedByActorGroup,
-        Map<String, Long> rejectedByReason
+        Map<String, Long> rejectedByReason,
+        Map<String, Long> rejectedByHotspotReason
 ) {
+    public ActorHotspotAdmissionStats(
+            long admissions,
+            long accepted,
+            long delegateRejected,
+            long hotspotRejected,
+            long throttleRejected,
+            long migrationCandidateRejected,
+            Map<String, Long> rejectedByTargetType,
+            Map<String, Long> rejectedByActorGroup,
+            Map<String, Long> rejectedByReason
+    ) {
+        this(admissions, accepted, delegateRejected, hotspotRejected, throttleRejected, migrationCandidateRejected,
+                rejectedByTargetType, rejectedByActorGroup, rejectedByReason, Map.of());
+    }
+
     public ActorHotspotAdmissionStats {
         Objects.requireNonNull(rejectedByTargetType, "rejectedByTargetType");
         Objects.requireNonNull(rejectedByActorGroup, "rejectedByActorGroup");
         Objects.requireNonNull(rejectedByReason, "rejectedByReason");
+        Objects.requireNonNull(rejectedByHotspotReason, "rejectedByHotspotReason");
         rejectedByTargetType = Map.copyOf(rejectedByTargetType);
         rejectedByActorGroup = Map.copyOf(rejectedByActorGroup);
         rejectedByReason = Map.copyOf(rejectedByReason);
+        rejectedByHotspotReason = Map.copyOf(rejectedByHotspotReason);
     }
 
     public static ActorHotspotAdmissionStats empty() {
-        return new ActorHotspotAdmissionStats(0, 0, 0, 0, 0, 0, Map.of(), Map.of(), Map.of());
+        return new ActorHotspotAdmissionStats(0, 0, 0, 0, 0, 0, Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     public ActorHotspotAdmissionStats plus(ActorHotspotAdmissionStats other) {
@@ -42,7 +60,8 @@ public record ActorHotspotAdmissionStats(
                 migrationCandidateRejected + other.migrationCandidateRejected,
                 sum(rejectedByTargetType, other.rejectedByTargetType),
                 sum(rejectedByActorGroup, other.rejectedByActorGroup),
-                sum(rejectedByReason, other.rejectedByReason)
+                sum(rejectedByReason, other.rejectedByReason),
+                sum(rejectedByHotspotReason, other.rejectedByHotspotReason)
         );
     }
 

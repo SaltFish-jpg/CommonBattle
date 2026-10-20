@@ -4,7 +4,9 @@ import com.commonbattle.game.event.EventPublisher;
 import com.commonbattle.game.event.ReliableSnapshotEventPublisher;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.event.VersionedEventOutbox;
+import com.commonbattle.game.event.VersionedEventRetryPolicy;
 
+import java.time.Clock;
 import java.util.Objects;
 
 /**
@@ -25,6 +27,26 @@ public final class ReliableProfileEventPublisher implements EventPublisher {
                 snapshots::save,
                 outbox,
                 delegate
+        );
+    }
+
+    public ReliableProfileEventPublisher(
+            ProfileSnapshotRepository snapshots,
+            VersionedEventOutbox outbox,
+            EventPublisher delegate,
+            VersionedEventRetryPolicy retryPolicy,
+            Clock clock
+    ) {
+        Objects.requireNonNull(snapshots, "snapshots");
+        this.publisher = new ReliableSnapshotEventPublisher<>(
+                ProfileChangedEvent.class,
+                snapshots::save,
+                ignored -> {
+                },
+                outbox,
+                delegate,
+                retryPolicy,
+                clock
         );
     }
 

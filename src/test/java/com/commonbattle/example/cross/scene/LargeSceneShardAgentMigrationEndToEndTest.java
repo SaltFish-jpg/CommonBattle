@@ -99,7 +99,7 @@ class LargeSceneShardAgentMigrationEndToEndTest {
     }
 
     private static AgentIdentity shardIdentity(int shardIndex) {
-        return AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", shardIndex).wireName());
+        return AgentIdentity.sceneShard("world-1", shardIndex);
     }
 
     private static final class Harness implements AutoCloseable {

@@ -78,6 +78,65 @@ class PlayerBusinessResponseHubTest {
     }
 
     @Test
+    void snapshotsRestoresAndForgetsCompletedResponsesByPlayer() {
+        PlayerBusinessResponseHub source = new PlayerBusinessResponseHub();
+        PlayerBusinessResponseHub target = new PlayerBusinessResponseHub();
+        PlayerCommand command = command(12);
+        source.completed(command, PlayerBusinessResponse.success(command, PlayerBusinessAck.OK));
+
+        PlayerBusinessResponseSnapshot snapshot = source.snapshotForPlayer(command.playerId());
+        target.restore(snapshot);
+
+        assertEquals(PlayerBusinessAck.OK,
+                target.cachedResponse(PlayerBusinessResponseQuery.from(command)).orElseThrow().payload());
+        source.forgetPlayer(command.playerId());
+        assertTrue(source.cachedResponse(PlayerBusinessResponseQuery.from(command)).isEmpty());
+    }
+
+    @Test
+    void checkpointCanBeLazyLoadedAfterProcessRebuild() {
+        InMemoryPlayerBusinessResponseStore store = new InMemoryPlayerBusinessResponseStore();
+        PlayerBusinessResponseHub first = new PlayerBusinessResponseHub(
+                PlayerBusinessResultSink.NOOP,
+                Clock.systemUTC(),
+                10,
+                store
+        );
+        PlayerCommand command = command(13);
+        first.completed(command, PlayerBusinessResponse.success(command, PlayerBusinessAck.OK));
+        first.checkpoint(command.playerId());
+        first.releasePlayer(command.playerId());
+
+        assertEquals(0, first.stats().loadedResponsePlayers());
+        assertEquals(PlayerBusinessAck.OK,
+                first.cachedResponse(PlayerBusinessResponseQuery.from(command)).orElseThrow().payload());
+        assertEquals(1, first.stats().loadedResponsePlayers());
+
+        PlayerBusinessResponseHub rebuilt = new PlayerBusinessResponseHub(
+                PlayerBusinessResultSink.NOOP,
+                Clock.systemUTC(),
+                10,
+                store
+        );
+        AtomicReference<PlayerBusinessResponseDelivery> replay = new AtomicReference<>();
+        rebuilt.expect(command, new PlayerBusinessResponseCallback() {
+            @Override
+            public void completed(PlayerBusinessResponse response) {
+                replay.set(new PlayerBusinessResponseDelivery(response, false));
+            }
+
+            @Override
+            public void completed(PlayerBusinessResponse response, boolean replayed) {
+                replay.set(new PlayerBusinessResponseDelivery(response, replayed));
+            }
+        });
+
+        assertTrue(replay.get().replayed());
+        assertEquals(PlayerBusinessAck.OK, replay.get().response().payload());
+        assertEquals(1, rebuilt.stats().replayedResponses());
+    }
+
+    @Test
     void cancelledRegistrationRemovesWaiterOnce() {
         MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
         PlayerBusinessResponseHub hub = new PlayerBusinessResponseHub(PlayerBusinessResultSink.NOOP, clock);

@@ -193,6 +193,63 @@ class FriendAwareDirectChatAccessPolicyTest {
                 fixture.directSessions.session(10001L, 10002L).snapshotNow().history().stream()
                         .map(ChatDelivery::text)
                         .toList());
+        assertEquals(1, fixture.directSessions.stats().asyncAccessChecks());
+        assertEquals(1, fixture.directSessions.stats().asyncAccessAllowedDecisions());
+        assertEquals(0, fixture.directSessions.stats().asyncAccessRejectedDecisions());
+    }
+
+    @Test
+    void asyncFriendAccessReadsOutsideDirectSessionMailboxAndReentersForSend() {
+        Fixture fixture = Fixture.createAsyncAccess();
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        fixture.friendAwareness.refresh(new FriendSnapshot(10001L, 1, Set.of(10002L)));
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "private", 0), sent::set);
+
+        assertEquals(null, sent.get());
+        assertEquals(1, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(null, sent.get());
+        assertEquals(1, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(ChatSendStatus.SENT, sent.get().status());
+        assertEquals(List.of("private"),
+                fixture.directSessions.session(10001L, 10002L).snapshotNow().history().stream()
+                        .map(ChatDelivery::text)
+                        .toList());
+    }
+
+    @Test
+    void asyncFriendAccessReportsBackpressureWhenDirectSessionMailboxCannotAcceptCallback() {
+        Fixture fixture = Fixture.createAsyncAccessWithMailboxCapacity(1);
+        fixture.friendAwareness.enter(10001L);
+        fixture.executor.runAll();
+        fixture.friendAwareness.refresh(new FriendSnapshot(10001L, 1, Set.of(10002L)));
+        fixture.executor.runAll();
+        AtomicReference<ChatSendResult> sent = new AtomicReference<>();
+
+        fixture.directSessions.send(new DirectChatSendRequest(10001L, 10002L, "private", 0), sent::set);
+        fixture.actors.send(fixture.actors.actor(ChatActorIds.directActorId(10001L, 10002L)), ignored -> {
+        });
+
+        assertEquals(2, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(ChatSendStatus.BACKPRESSURED, sent.get().status());
+        assertEquals(List.of(), fixture.directSessions.session(10001L, 10002L).snapshotNow().history());
+        assertEquals(1, fixture.directSessions.stats().asyncAccessChecks());
+        assertEquals(1, fixture.directSessions.stats().asyncAccessAllowedDecisions());
+        assertEquals(1, fixture.directSessions.stats().asyncAccessCallbackDeliveryFailures());
+
+        fixture.executor.runAll();
     }
 
     @Test
@@ -225,9 +282,32 @@ class FriendAwareDirectChatAccessPolicyTest {
             return create(playerId -> java.util.Optional.empty());
         }
 
+        private static Fixture createAsyncAccess() {
+            return create(playerId -> java.util.Optional.empty(), true);
+        }
+
+        private static Fixture createAsyncAccessWithMailboxCapacity(int mailboxCapacity) {
+            return create(playerId -> java.util.Optional.empty(), true, mailboxCapacity);
+        }
+
         private static Fixture create(com.commonbattle.game.social.FriendSnapshotReader snapshotReader) {
+            return create(snapshotReader, false);
+        }
+
+        private static Fixture create(
+                com.commonbattle.game.social.FriendSnapshotReader snapshotReader,
+                boolean asyncAccess
+        ) {
+            return create(snapshotReader, asyncAccess, com.commonbattle.actor.ActorSystemConfig.DEFAULT_MAILBOX_CAPACITY);
+        }
+
+        private static Fixture create(
+                com.commonbattle.game.social.FriendSnapshotReader snapshotReader,
+                boolean asyncAccess,
+                int mailboxCapacity
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
-            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorSystem actors = new ActorSystem(executor, 64, mailboxCapacity);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
             SceneFriendAwarenessAgent friendAwareness = new SceneFriendAwarenessAgent(
                     messages,
@@ -247,6 +327,20 @@ class FriendAwareDirectChatAccessPolicyTest {
                     ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
                     (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept()
             );
+            if (asyncAccess) {
+                FriendAwareDirectChatAccessPolicy accessPolicy = new FriendAwareDirectChatAccessPolicy(friendAwareness);
+                directSessions = new DirectChatSessionManager(
+                        actors,
+                        messages,
+                        accessPolicy,
+                        accessPolicy,
+                        messagePolicy,
+                        ChatDeliverySink.noop(),
+                        CLOCK,
+                        ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                        (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept()
+                );
+            }
             return new Fixture(executor, actors, friendAwareness, directSessions);
         }
     }
@@ -263,6 +357,14 @@ class FriendAwareDirectChatAccessPolicyTest {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
+        }
+
+        private void runNext() {
+            commands.removeFirst().run();
+        }
+
+        private int queued() {
+            return commands.size();
         }
     }
 

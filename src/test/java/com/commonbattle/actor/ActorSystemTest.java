@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -108,14 +109,31 @@ class ActorSystemTest {
         executor.runNext();
         assertEquals(2, runs.get());
         assertEquals(1, executor.queued());
+        assertEquals(1, system.stats().mailboxDrainCycles());
+        assertEquals(2, system.stats().mailboxDrainProcessedTasks());
+        assertEquals(2, system.stats().maxTasksPerMailboxDrain());
+        assertEquals(1, system.stats().mailboxBatchYields());
+        ActorMailboxStats hotMailbox = system.queuedMailboxStats().getFirst();
+        assertEquals("player-1", hotMailbox.actor().id());
+        assertEquals(3, hotMailbox.queuedTasks());
+        assertEquals(1, hotMailbox.drainCycles());
+        assertEquals(2, hotMailbox.drainProcessedTasks());
+        assertEquals(2, hotMailbox.maxTasksPerDrain());
+        assertEquals(1, hotMailbox.batchYields());
 
         executor.runNext();
         assertEquals(4, runs.get());
         assertEquals(1, executor.queued());
+        assertEquals(2, system.stats().mailboxDrainCycles());
+        assertEquals(4, system.stats().mailboxDrainProcessedTasks());
+        assertEquals(2, system.stats().mailboxBatchYields());
 
         executor.runNext();
         assertEquals(5, runs.get());
         assertEquals(0, executor.queued());
+        assertEquals(3, system.stats().mailboxDrainCycles());
+        assertEquals(5, system.stats().mailboxDrainProcessedTasks());
+        assertEquals(2, system.stats().mailboxBatchYields());
     }
 
     @Test
@@ -170,6 +188,101 @@ class ActorSystemTest {
         assertEquals(1, runs.get());
         assertEquals(1, system.stats().failedTasks());
         assertEquals(1, system.stats().completedTasks());
+    }
+
+    @Test
+    void schedulerRejectionDeadLettersQueuedTaskAndLaterMessageCanRun() {
+        List<Runnable> accepted = new ArrayList<>();
+        AtomicInteger submissions = new AtomicInteger();
+        Executor flakyExecutor = command -> {
+            if (submissions.getAndIncrement() == 0) {
+                throw new RejectedExecutionException("saturated");
+            }
+            accepted.add(command);
+        };
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                flakyExecutor,
+                new ActorSystemConfig(1, 64, 16, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef player = system.actor("player-1");
+        AtomicInteger runs = new AtomicInteger();
+
+        system.send(player, ignored -> runs.incrementAndGet());
+
+        assertEquals(0, system.stats().queuedTasks());
+        assertEquals(0, system.stats().runningMailboxes());
+        assertEquals(1, system.stats().schedulerRejectedMailboxes());
+        assertEquals(1, system.stats().schedulerRejectedTasks());
+        assertEquals(DeadLetterReason.SCHEDULER_REJECTED, deadLetters.getFirst().reason());
+
+        system.send(player, ignored -> runs.incrementAndGet());
+        accepted.removeFirst().run();
+
+        assertEquals(1, runs.get());
+        assertEquals(1, system.stats().completedTasks());
+        assertEquals(0, system.stats().queuedTasks());
+    }
+
+    @Test
+    void retiringActorRejectsRemainingMessagesAndAllowsFreshMailboxAfterDrain() {
+        RecordingExecutor executor = new RecordingExecutor();
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 16, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef first = system.actor("player-1");
+        AtomicInteger oldRuns = new AtomicInteger();
+        system.send(first, ignored -> {
+            oldRuns.incrementAndGet();
+            assertTrue(system.retireCurrent(first));
+        });
+        system.send(first, ignored -> oldRuns.incrementAndGet());
+
+        executor.runNext();
+
+        assertEquals(1, oldRuns.get());
+        assertEquals(1, deadLetters.size());
+        assertEquals(DeadLetterReason.ACTOR_RETIRED, deadLetters.getFirst().reason());
+        assertEquals(0, system.stats().registeredMailboxes());
+        assertEquals(1, system.stats().retiredMailboxes());
+        assertEquals(1, system.stats().retiredQueuedTasks());
+
+        ActorRef fresh = system.actor("player-1");
+        AtomicInteger freshRuns = new AtomicInteger();
+        system.send(fresh, ignored -> freshRuns.incrementAndGet());
+        executor.runNext();
+
+        assertEquals(1, freshRuns.get());
+        assertEquals(1, system.stats().registeredMailboxes());
+    }
+
+    @Test
+    void externalRetirementRunsAfterAlreadyAcceptedMessagesAndRejectsNewOnes() {
+        RecordingExecutor executor = new RecordingExecutor();
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 16, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef actor = system.actor("scene-room-1");
+        AtomicInteger runs = new AtomicInteger();
+        system.send(actor, ignored -> runs.incrementAndGet());
+
+        assertTrue(system.retire(actor));
+        assertFalse(system.trySend(actor, ignored -> runs.incrementAndGet()));
+        executor.runNext();
+
+        assertEquals(1, runs.get());
+        assertEquals(DeadLetterReason.ACTOR_RETIRED, deadLetters.getFirst().reason());
+        assertEquals(0, system.stats().registeredMailboxes());
     }
 
     @Test
@@ -306,6 +419,31 @@ class ActorSystemTest {
     }
 
     @Test
+    void closeMovesUnexecutedMailboxTasksToDeadLetters() {
+        RecordingExecutor executor = new RecordingExecutor();
+        List<DeadLetter> deadLetters = new ArrayList<>();
+        ActorSystem system = new ActorSystem(
+                executor,
+                new ActorSystemConfig(1, 64, 16, ActorOverflowStrategy.REJECT, java.time.Duration.ZERO),
+                ActorFailureHandler.ignore(),
+                deadLetters::add
+        );
+        ActorRef player = system.actor("player-1");
+        List<Integer> runs = new ArrayList<>();
+        system.send(player, ignored -> runs.add(1));
+        system.send(player, ignored -> runs.add(2));
+
+        system.close();
+        system.close();
+
+        assertEquals(0, system.stats().queuedTasks());
+        assertEquals(2, deadLetters.size());
+        assertTrue(deadLetters.stream().allMatch(letter -> letter.reason() == DeadLetterReason.SYSTEM_CLOSED));
+        executor.runNext();
+        assertTrue(runs.isEmpty());
+    }
+
+    @Test
     void statsTrackQueuedAndRunningMailboxes() {
         RecordingExecutor executor = new RecordingExecutor();
         ActorSystem system = new ActorSystem(executor, 64);
@@ -323,6 +461,10 @@ class ActorSystemTest {
         assertEquals(0, system.stats().queuedTasks());
         assertEquals(0, system.stats().runningMailboxes());
         assertEquals(1, system.stats().completedTasks());
+        assertEquals(1, system.stats().mailboxDrainCycles());
+        assertEquals(1, system.stats().mailboxDrainProcessedTasks());
+        assertEquals(1, system.stats().maxTasksPerMailboxDrain());
+        assertEquals(0, system.stats().mailboxBatchYields());
     }
 
     @Test

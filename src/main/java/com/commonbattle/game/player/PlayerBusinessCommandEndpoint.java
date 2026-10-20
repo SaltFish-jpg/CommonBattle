@@ -33,5 +33,10 @@ public final class PlayerBusinessCommandEndpoint {
                 }
             });
         });
+        gateway.handle(PlayerBusinessRpcOperations.GET_RESULT, (request, responder) -> {
+            PlayerBusinessResponseQuery query = (PlayerBusinessResponseQuery) request.payload();
+            responder.success(commands.cachedResponse(query)
+                    .orElseGet(() -> PlayerBusinessResponse.resultNotFound(query)));
+        });
     }
 }

@@ -9,5 +9,6 @@ public enum AgentLifecycleState {
     PASSIVATED,
     MIGRATING,
     MIGRATED,
+    FENCED,
     CLOSED
 }

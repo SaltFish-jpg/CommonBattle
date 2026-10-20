@@ -103,13 +103,21 @@ public final class PlayerProfile implements ActivityParticipant {
     public static PlayerProfile restore(PlayerStateSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         PlayerProfile profile = new PlayerProfile(snapshot.playerId(), snapshot.createdAt());
-        profile.bag.restore(snapshot.bag());
-        profile.activities.restore(snapshot.activities());
-        profile.growth.restore(snapshot.growth());
-        profile.shop.restore(snapshot.shop());
-        profile.battle.restore(snapshot.battle());
-        profile.tasks.restore(snapshot.tasks());
-        profile.achievements.restore(snapshot.achievements());
+        profile.restoreFrom(snapshot);
         return profile;
+    }
+
+    void restoreFrom(PlayerStateSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (snapshot.playerId() != playerId || !snapshot.createdAt().equals(createdAt)) {
+            throw new IllegalArgumentException("snapshot identity mismatch");
+        }
+        bag.restore(snapshot.bag());
+        activities.restore(snapshot.activities());
+        growth.restore(snapshot.growth());
+        shop.restore(snapshot.shop());
+        battle.restore(snapshot.battle());
+        tasks.restore(snapshot.tasks());
+        achievements.restore(snapshot.achievements());
     }
 }

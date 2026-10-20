@@ -77,27 +77,56 @@ public final class RegistryLeaseRenewer implements AutoCloseable, DrainableCompo
         if (!started.compareAndSet(false, true)) {
             return;
         }
-        registry.register(registered, leaseTtl);
-        task = scheduler.scheduleAtFixedRate(
-                this::renewSafely,
-                heartbeatInterval.toMillis(),
-                heartbeatInterval.toMillis(),
-                TimeUnit.MILLISECONDS
-        );
+        boolean registrationCompleted = false;
+        try {
+            registry.register(registered, leaseTtl);
+            registrationCompleted = true;
+            task = scheduler.scheduleAtFixedRate(
+                    this::renewSafely,
+                    heartbeatInterval.toMillis(),
+                    heartbeatInterval.toMillis(),
+                    TimeUnit.MILLISECONDS
+            );
+        } catch (RuntimeException error) {
+            started.set(false);
+            if (registrationCompleted) {
+                try {
+                    registry.unregister(local.id());
+                } catch (RuntimeException unregisterError) {
+                    error.addSuppressed(unregisterError);
+                }
+            }
+            throw error;
+        }
     }
 
     public void renewOnce() {
+        boolean renewed;
         try {
-            if (!registry.heartbeat(local.id(), leaseTtl)) {
+            renewed = registry.heartbeat(local.id(), leaseTtl);
+        } catch (RuntimeException heartbeatFailure) {
+            failedRenewals.incrementAndGet();
+            try {
+                // Center 重启后可能无法把 heartbeat.missing 回包路由给尚未注册的节点。
                 registry.register(registered, leaseTtl);
                 reRegistrations.incrementAndGet();
-                return;
+            } catch (RuntimeException registrationFailure) {
+                registrationFailure.addSuppressed(heartbeatFailure);
+                throw registrationFailure;
             }
-            successfulHeartbeats.incrementAndGet();
-        } catch (RuntimeException e) {
-            failedRenewals.incrementAndGet();
-            throw e;
+            return;
         }
+        if (!renewed) {
+            try {
+                registry.register(registered, leaseTtl);
+                reRegistrations.incrementAndGet();
+            } catch (RuntimeException registrationFailure) {
+                failedRenewals.incrementAndGet();
+                throw registrationFailure;
+            }
+            return;
+        }
+        successfulHeartbeats.incrementAndGet();
     }
 
     public RegistryLeaseRenewalStats stats() {
@@ -155,12 +184,22 @@ public final class RegistryLeaseRenewer implements AutoCloseable, DrainableCompo
         ScheduledFuture<?> scheduled = task;
         if (scheduled != null) {
             scheduled.cancel(false);
+            task = null;
         }
-        if (started.compareAndSet(true, false)) {
-            registry.unregister(local.id());
+        RuntimeException failure = null;
+        try {
+            if (started.compareAndSet(true, false)) {
+                registry.unregister(local.id());
+            }
+        } catch (RuntimeException error) {
+            failure = error;
+        } finally {
+            if (ownsScheduler) {
+                scheduler.shutdownNow();
+            }
         }
-        if (ownsScheduler) {
-            scheduler.shutdownNow();
+        if (failure != null) {
+            throw failure;
         }
     }
 

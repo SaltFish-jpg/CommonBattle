@@ -15,6 +15,8 @@ final class BootRuntime implements AutoCloseable {
     private final Deque<Resource> resources = new ArrayDeque<>();
     private final RuntimeHealthRegistry healthRegistry = new RuntimeHealthRegistry();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean shutdownStarted = new AtomicBoolean();
+    private ShutdownDrain shutdownDrain;
     private Thread shutdownHook;
 
     <T extends AutoCloseable> T add(String name, T closeable) {
@@ -44,10 +46,57 @@ final class BootRuntime implements AutoCloseable {
     BootRuntime installShutdownHook() {
         synchronized (resources) {
             if (shutdownHook == null) {
-                shutdownHook = new Thread(this::close, "common-battle-shutdown");
+                shutdownHook = new Thread(this::shutdown, "common-battle-shutdown");
                 Runtime.getRuntime().addShutdownHook(shutdownHook);
             }
             return this;
+        }
+    }
+
+    BootRuntime configureShutdownDrain(ShutdownDrain drain) {
+        Objects.requireNonNull(drain, "drain");
+        synchronized (resources) {
+            if (closed.get()) {
+                throw new IllegalStateException("boot runtime is already closed");
+            }
+            if (shutdownDrain != null) {
+                throw new IllegalStateException("shutdown drain is already configured");
+            }
+            shutdownDrain = drain;
+            return this;
+        }
+    }
+
+    void shutdown() {
+        if (closed.get() || !shutdownStarted.compareAndSet(false, true)) {
+            return;
+        }
+        RuntimeException failure = null;
+        ShutdownDrain drain;
+        synchronized (resources) {
+            drain = shutdownDrain;
+        }
+        if (drain != null) {
+            try {
+                drain.awaitDrained();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                failure = new IllegalStateException("Interrupted while draining boot runtime", e);
+            } catch (Exception e) {
+                failure = new IllegalStateException("Failed to drain boot runtime", e);
+            }
+        }
+        try {
+            close();
+        } catch (RuntimeException closeError) {
+            if (failure == null) {
+                failure = closeError;
+            } else {
+                failure.addSuppressed(closeError);
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -67,7 +116,7 @@ final class BootRuntime implements AutoCloseable {
             }
             try {
                 resource.closeable().close();
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 RuntimeException wrapped = new IllegalStateException("Failed to close boot resource: " + resource.name(), e);
                 if (failure == null) {
                     failure = wrapped;
@@ -81,7 +130,7 @@ final class BootRuntime implements AutoCloseable {
         }
     }
 
-    void closeSuppressing(Exception cause) {
+    void closeSuppressing(Throwable cause) {
         Objects.requireNonNull(cause, "cause");
         try {
             close();
@@ -93,11 +142,16 @@ final class BootRuntime implements AutoCloseable {
     private static void closeNow(String name, AutoCloseable closeable) {
         try {
             closeable.close();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             throw new IllegalStateException("Failed to close boot resource after runtime closed: " + name, e);
         }
     }
 
     private record Resource(String name, AutoCloseable closeable) {
+    }
+
+    @FunctionalInterface
+    interface ShutdownDrain {
+        void awaitDrained() throws Exception;
     }
 }

@@ -17,13 +17,23 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.bag.BagChangeAuditQuery;
 import com.commonbattle.game.bag.BagSnapshot;
+import com.commonbattle.game.bag.ItemDefinition;
+import com.commonbattle.game.bag.ItemStack;
+import com.commonbattle.game.bag.Reward;
 import com.commonbattle.game.config.GameConfigChangedEvent;
+import com.commonbattle.game.config.GameConfigPackage;
 import com.commonbattle.game.config.GameConfigValidator;
+import com.commonbattle.game.config.GrowthTuning;
 import com.commonbattle.game.config.LocalGameConfigCache;
+import com.commonbattle.game.growth.GrowthResult;
 import com.commonbattle.game.event.InMemoryVersionedEventOutbox;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.player.BattleStageClearCommand;
+import com.commonbattle.game.player.AsyncBusinessCommandRejectedException;
+import com.commonbattle.game.player.BuyShopItemAsyncCommand;
 import com.commonbattle.game.player.InMemoryPlayerStateRepository;
+import com.commonbattle.game.player.InMemoryPlayerBusinessResponseStore;
+import com.commonbattle.game.player.PlayerCheckpointRepository;
 import com.commonbattle.game.player.PlayerBusinessOperations;
 import com.commonbattle.game.player.PlayerBusinessResponse;
 import com.commonbattle.game.player.PlayerBusinessResponseStatus;
@@ -47,6 +57,12 @@ import com.commonbattle.game.social.FriendSnapshot;
 import com.commonbattle.game.social.InMemoryAllianceSnapshotRepository;
 import com.commonbattle.game.social.InMemoryFriendSnapshotRepository;
 import com.commonbattle.game.social.SocialAgentOperations;
+import com.commonbattle.game.shop.ShopItemDefinition;
+import com.commonbattle.game.shop.ShopStockAsyncClient;
+import com.commonbattle.game.shop.ShopStockCallback;
+import com.commonbattle.game.shop.ShopStockReleaseResponse;
+import com.commonbattle.game.shop.ShopStockRemainingResponse;
+import com.commonbattle.game.shop.ShopStockReserveResponse;
 import com.commonbattle.observability.RuntimeHealthJsonFormatter;
 import com.commonbattle.observability.RuntimeHealthPolicy;
 import com.commonbattle.observability.RuntimeHealthProbe;
@@ -132,22 +148,34 @@ class BootGamePlayerRuntimeTest {
                 new UseExpItemsCommand(2)
         ));
         executor.runAll();
-        RecordingBusinessCallback callback = new RecordingBusinessCallback();
-        players.businessMessages().sendPlayerCommand(new PlayerCommand(
+        AtomicReference<GrowthResult> callbackResult = new AtomicReference<>();
+        com.commonbattle.actor.ActorRef requester = actors.actor("test-requester");
+        players.businessMessages().requestPlayerCommand(requester, new PlayerCommand(
                 10001L,
                 login.session().sessionId(),
                 login.session().epoch(),
                 3,
                 PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS,
                 new UseExpItemsCommand(1)
-        ), callback);
+        ), GrowthResult.class, new com.commonbattle.actor.message.LocalAskCallback<>() {
+            @Override
+            public void success(com.commonbattle.actor.ActorContext context, GrowthResult response) {
+                assertEquals(requester, com.commonbattle.actor.ActorContext.requireCurrent(requester).self());
+                callbackResult.set(response);
+            }
 
-        assertNull(callback.response.get());
+            @Override
+            public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                throw new AssertionError(error);
+            }
+        });
+
+        assertNull(callbackResult.get());
         executor.runAll();
 
         assertEquals(PlayerCommandStatus.ACCEPTED, dispatch.status());
         assertEquals(PlayerCommandStatus.ACCEPTED, growth.status());
-        assertEquals(PlayerBusinessResponseStatus.SUCCESS, callback.response.get().status());
+        assertEquals(2, callbackResult.get().afterLevel());
         assertEquals(4, login.stateRevision());
         assertEquals(2, login.eventRevision());
         assertEquals("player-10001", directory.locate(AgentIdentity.player(10001L)).orElseThrow().actorRef().id());
@@ -220,26 +248,28 @@ class BootGamePlayerRuntimeTest {
         assertEquals(1, snapshot.playerAgents().managerCount());
         assertEquals(1, snapshot.playerAgents().loadedAgents());
         assertEquals(1, snapshot.businessCommandCatalogs().viewCount());
-        assertEquals(10, snapshot.businessCommandCatalogs().descriptorCount());
+        assertEquals(11, snapshot.businessCommandCatalogs().descriptorCount());
         assertEquals(9, snapshot.businessCommandCatalogs().operationCount());
         assertEquals(1, snapshot.playerOutboundDeliveries().runtimeCount());
         assertEquals(0, snapshot.playerAgents().autoSaveSchedulers());
         assertEquals(1, snapshot.playerAgents().drainServices());
         assertEquals(1, snapshot.asyncShopPurchases().viewCount());
+        assertEquals(1, snapshot.asyncBusinessCommands().viewCount());
         assertEquals(1, snapshot.businessAgentMessages().portCount());
         assertEquals(2, snapshot.businessAgentMessages().submittedRequests());
         assertEquals(2, snapshot.businessAgentMessages().localRequests());
         assertEquals(1, snapshot.bagChangeAudits().auditCount());
         assertTrue(snapshot.bagChangeAudits().recorded() >= 2);
         assertTrue(json.contains("\"playerAgents\":{\"managerCount\":1,\"loadedAgents\":1"));
-        assertTrue(json.contains("\"businessCommandCatalogs\":{\"viewCount\":1,\"descriptorCount\":10"));
+        assertTrue(json.contains("\"businessCommandCatalogs\":{\"viewCount\":1,\"descriptorCount\":11"));
         assertTrue(json.contains("\"businessAgentMessages\":{\"portCount\":1,\"submittedRequests\":2"));
         assertTrue(json.contains("\"bagChangeAudits\":{\"auditCount\":1"));
         assertTrue(metrics.contains("commonbattle_player_agents_loaded 1"));
-        assertTrue(metrics.contains("commonbattle_player_business_command_catalog_descriptors 10"));
+        assertTrue(metrics.contains("commonbattle_player_business_command_catalog_descriptors 11"));
         assertTrue(metrics.contains("commonbattle_player_business_command_catalog_descriptors_by_domain{domain=\"battle\"} 2"));
         assertTrue(metrics.contains("commonbattle_player_agent_drain_services 1"));
         assertTrue(metrics.contains("commonbattle_async_shop_purchase_views 1"));
+        assertTrue(metrics.contains("commonbattle_async_business_command_views 1"));
         assertTrue(metrics.contains("commonbattle_business_agent_message_submitted_requests_total 2"));
         assertTrue(metrics.contains("commonbattle_bag_change_audits 1"));
         assertEquals(2, players.bagChangeAudit()
@@ -420,6 +450,185 @@ class BootGamePlayerRuntimeTest {
         }
     }
 
+    @Test
+    void savedBusinessResponseReplaysAfterRuntimeRebuild() {
+        InMemoryPlayerStateRepository states = new InMemoryPlayerStateRepository();
+        InMemoryPlayerBusinessResponseStore responses = new InMemoryPlayerBusinessResponseStore();
+        PlayerCheckpointRepository checkpoints = new PlayerCheckpointRepository(states, responses);
+        PlayerProfile seed = new PlayerProfile(10001L, SERVER_OPEN_TIME);
+        seed.bag().restore(new BagSnapshot(Map.of("exp_potion", 2)));
+        checkpoints.save(10001L, seed.snapshot(1, CLOCK.instant()));
+        PlayerCommand command = new PlayerCommand(
+                10001L,
+                "session-1",
+                1,
+                1,
+                PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS,
+                new UseExpItemsCommand(1)
+        );
+        RecordingBusinessCallback first = new RecordingBusinessCallback();
+
+        BootRuntime firstRuntime = new BootRuntime();
+        RecordingExecutor firstExecutor = new RecordingExecutor();
+        ActorSystem firstActors = firstRuntime.add("actors", new ActorSystem(firstExecutor, 64));
+        LocalGameConfigCache firstConfig = firstRuntime.add("configCache",
+                new LocalGameConfigCache(new GameConfigValidator(), CLOCK));
+        firstConfig.apply(GameConfigChangedEvent.activePublished(1, ExampleGameConfigs.basic(7, CLOCK.instant())));
+        BootGamePlayerRuntime firstPlayers = BootGamePlayerRuntime.configure(
+                firstRuntime,
+                ClusterDescriptors.fromConfig(ClusterNodeConfig.fromProperties(properties())),
+                firstActors,
+                new NoopRpcGateway(),
+                new InMemoryAgentDirectory(),
+                checkpoints,
+                firstConfig,
+                new InMemoryProfileSnapshotRepository(),
+                ignored -> {
+                },
+                ignored -> {
+                },
+                CLOCK,
+                SERVER_OPEN_TIME,
+                AgentRateLimitPolicy.perSecond(100, 100)
+        );
+        firstPlayers.logins().login(10001L, "session-1");
+        firstExecutor.runAll();
+        firstPlayers.businessCommands().submit(command, first);
+        firstExecutor.runAll();
+        assertEquals(PlayerBusinessResponseStatus.SUCCESS, first.response.get().status());
+        assertTrue(firstPlayers.agents().save(10001L, ignored -> {
+        }));
+        firstExecutor.runAll();
+        firstRuntime.close();
+
+        BootRuntime rebuiltRuntime = new BootRuntime();
+        try {
+            RecordingExecutor rebuiltExecutor = new RecordingExecutor();
+            ActorSystem rebuiltActors = rebuiltRuntime.add("actors", new ActorSystem(rebuiltExecutor, 64));
+            LocalGameConfigCache rebuiltConfig = rebuiltRuntime.add("configCache",
+                    new LocalGameConfigCache(new GameConfigValidator(), CLOCK));
+            rebuiltConfig.apply(GameConfigChangedEvent.activePublished(
+                    1, ExampleGameConfigs.basic(7, CLOCK.instant())));
+            BootGamePlayerRuntime rebuiltPlayers = BootGamePlayerRuntime.configure(
+                    rebuiltRuntime,
+                    ClusterDescriptors.fromConfig(ClusterNodeConfig.fromProperties(properties())),
+                    rebuiltActors,
+                    new NoopRpcGateway(),
+                    new InMemoryAgentDirectory(),
+                    checkpoints,
+                    rebuiltConfig,
+                    new InMemoryProfileSnapshotRepository(),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    CLOCK,
+                    SERVER_OPEN_TIME,
+                    AgentRateLimitPolicy.perSecond(100, 100)
+            );
+            rebuiltPlayers.logins().login(10001L, "session-1");
+            rebuiltExecutor.runAll();
+            RecordingBusinessCallback retry = new RecordingBusinessCallback();
+
+            rebuiltPlayers.businessCommands().submit(command, retry);
+
+            assertEquals(first.response.get(), retry.response.get());
+            assertEquals(0, rebuiltExecutor.commands.size());
+            assertEquals(0, rebuiltPlayers.dispatcher().stats().count(PlayerCommandStatus.ACCEPTED));
+            assertEquals(1, rebuiltPlayers.businessResponses().stats().replayedResponses());
+        } finally {
+            rebuiltRuntime.close();
+        }
+    }
+
+    @Test
+    void clusterConfiguredAsyncCommandPolicyRejectsBeforeExternalStockCall() {
+        BootRuntime runtime = new BootRuntime();
+        RecordingExecutor executor = new RecordingExecutor();
+        try {
+            ActorSystem actors = runtime.add("actors", new ActorSystem(executor, 64));
+            Properties properties = properties();
+            properties.setProperty("cluster.player.auto.save.enabled", "false");
+            properties.setProperty("cluster.player.async.command.max.pending.operation.shop.buy", "1");
+            ClusterNodeConfig config = ClusterNodeConfig.fromProperties(properties);
+            ServiceDescriptor local = ClusterDescriptors.fromConfig(config);
+            LocalGameConfigCache configCache = runtime.add("configCache",
+                    new LocalGameConfigCache(new GameConfigValidator(), CLOCK));
+            configCache.apply(GameConfigChangedEvent.activePublished(1, limitedStockConfig()));
+            RecordingShopStockAsyncClient stocks = new RecordingShopStockAsyncClient();
+
+            BootGamePlayerRuntime players = BootGamePlayerRuntime.configure(
+                    runtime,
+                    local,
+                    actors,
+                    new NoopRpcGateway(),
+                    new InMemoryAgentDirectory(),
+                    new InMemoryPlayerStateRepository(),
+                    configCache,
+                    new InMemoryProfileSnapshotRepository(),
+                    new InMemoryFriendSnapshotRepository(),
+                    new InMemoryAllianceSnapshotRepository(),
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    ignored -> {
+                    },
+                    stocks,
+                    CLOCK,
+                    config.gameServerOpenTime(),
+                    config.playerCommandRateLimitPolicy(),
+                    config.playerCommandMailboxPressurePolicy(),
+                    config.businessAgentMailboxPressurePolicy(),
+                    config.businessAgentIdempotencyConfig(),
+                    config.actorHotspotPolicy(),
+                    config.actorHotspotRetryAfter(),
+                    config.asyncBusinessCommandPolicy(),
+                    null,
+                    false,
+                    Duration.ZERO,
+                    Duration.ofSeconds(60),
+                    config.playerBusinessResponseTimeout(),
+                    config.playerGatewayConfig().maxPendingAckMessages(),
+                    config.playerGrowthStaminaRecoveryEnabled(),
+                    config.playerGrowthStaminaRecoveryInitialDelay(),
+                    config.playerGrowthStaminaRecoveryInterval()
+            );
+            PlayerLoginResult login = players.logins().login(10001L, "session-1");
+            executor.runAll();
+            players.agents().getOrCreate(10001L).profile().bag().restore(new BagSnapshot(Map.of("gold", 200)));
+            RecordingBusinessCallback first = new RecordingBusinessCallback();
+            RecordingBusinessCallback second = new RecordingBusinessCallback();
+
+            players.businessCommands().submit(new PlayerCommand(
+                    10001L,
+                    login.session().sessionId(),
+                    login.session().epoch(),
+                    1,
+                    PlayerBusinessOperations.SHOP_BUY,
+                    new BuyShopItemAsyncCommand("order-10001-1", "limited_pack", 1)
+            ), first);
+            executor.runAll();
+            players.businessCommands().submit(new PlayerCommand(
+                    10001L,
+                    login.session().sessionId(),
+                    login.session().epoch(),
+                    2,
+                    PlayerBusinessOperations.SHOP_BUY,
+                    new BuyShopItemAsyncCommand("order-10001-2", "limited_pack", 1)
+            ), second);
+            executor.runAll();
+
+            assertNull(first.response.get());
+            assertEquals(1, stocks.reserveCalls);
+            assertEquals(PlayerBusinessResponseStatus.FAILED, second.response.get().status());
+            assertEquals(AsyncBusinessCommandRejectedException.CODE, second.response.get().code());
+            assertEquals(200, players.agents().getOrCreate(10001L).profile().bag().count("gold"));
+        } finally {
+            runtime.close();
+        }
+    }
+
     private static Properties properties() {
         Properties properties = new Properties();
         properties.setProperty("cluster.kind", "GAME");
@@ -431,6 +640,27 @@ class BootGamePlayerRuntimeTest {
         properties.setProperty("cluster.center.port", "9000");
         properties.setProperty("cluster.actor.workers", "4");
         return properties;
+    }
+
+    private static GameConfigPackage limitedStockConfig() {
+        return new GameConfigPackage(
+                7,
+                List.of(
+                        new ItemDefinition("gold", "currency", 999_999),
+                        new ItemDefinition("ticket", "ticket", 999_999)
+                ),
+                List.of(),
+                List.of(new ShopItemDefinition(
+                        "limited_pack",
+                        new ItemStack("gold", 50),
+                        Reward.of(new ItemStack("ticket", 1)),
+                        0,
+                        0,
+                        1
+                )),
+                new GrowthTuning("ticket", 1, 100),
+                CLOCK.instant()
+        );
     }
 
     private static <T> com.commonbattle.actor.message.LocalAskCallback<T> successOnly(AtomicReference<T> response) {
@@ -465,6 +695,25 @@ class BootGamePlayerRuntimeTest {
     private static final class NoopRpcGateway implements RpcGateway {
         @Override
         public <T> void call(RpcRequest<T> request, RpcCallback<T> callback) {
+        }
+    }
+
+    private static final class RecordingShopStockAsyncClient implements ShopStockAsyncClient {
+        private int reserveCalls;
+
+        @Override
+        public void reserve(String reservationId, String sku, int count,
+                            ShopStockCallback<ShopStockReserveResponse> callback) {
+            reserveCalls++;
+        }
+
+        @Override
+        public void release(String reservationId, String sku, int count,
+                            ShopStockCallback<ShopStockReleaseResponse> callback) {
+        }
+
+        @Override
+        public void remaining(String sku, ShopStockCallback<ShopStockRemainingResponse> callback) {
         }
     }
 

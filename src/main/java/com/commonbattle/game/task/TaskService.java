@@ -19,17 +19,20 @@ public final class TaskService {
         this.bagService = Objects.requireNonNull(bagService, "bagService");
     }
 
-    public void onEvent(PlayerTasks tasks, PlayerDomainEvent event) {
+    public int onEvent(PlayerTasks tasks, PlayerDomainEvent event) {
         Objects.requireNonNull(tasks, "tasks");
         Objects.requireNonNull(event, "event");
         if (event.delta() <= 0 || event.replayed()) {
-            return;
+            return 0;
         }
+        int progressed = 0;
         for (TaskDefinition definition : catalog.definitions()) {
             if (definition.progressRule().matches(event)) {
                 tasks.progress(definition.taskId()).increase(event.delta());
+                progressed++;
             }
         }
+        return progressed;
     }
 
     public TaskClaimResult claim(PlayerTasks tasks, PlayerBag bag, String taskId) {

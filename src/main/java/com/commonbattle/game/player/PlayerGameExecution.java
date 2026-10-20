@@ -91,8 +91,6 @@ public record PlayerGameExecution(
     public void pushBattleSettlementSnapshots(BattleSettlementResult result) {
         pushBattleSnapshot();
         pushBagSnapshot();
-        pushTaskSnapshot();
-        pushAchievementSnapshot();
     }
 
     public void consumeBattleStaminaForNewSettlement(BattleStageDefinition definition, String settlementId) {

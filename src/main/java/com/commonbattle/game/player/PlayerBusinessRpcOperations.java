@@ -5,6 +5,7 @@ package com.commonbattle.game.player;
  */
 public final class PlayerBusinessRpcOperations {
     public static final String DISPATCH = "player.business.dispatch";
+    public static final String GET_RESULT = "player.business.get_result";
 
     private PlayerBusinessRpcOperations() {
     }

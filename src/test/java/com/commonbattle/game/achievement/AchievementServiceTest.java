@@ -19,7 +19,7 @@ class AchievementServiceTest {
         PlayerAchievements achievements = new PlayerAchievements();
         PlayerBag bag = new PlayerBag();
 
-        fixture.service().onEvent(achievements, new BattleStageClearedEvent(
+        int progressed = fixture.service().onEvent(achievements, new BattleStageClearedEvent(
                 10001L,
                 "forest-1",
                 3,
@@ -32,6 +32,7 @@ class AchievementServiceTest {
         ));
         AchievementClaimResult claim = fixture.service().claim(achievements, bag, "achievement-clear-forest");
 
+        assertEquals(1, progressed);
         assertEquals(1, claim.progress());
         assertEquals(10, bag.count("gem"));
     }
@@ -41,7 +42,7 @@ class AchievementServiceTest {
         Fixture fixture = Fixture.create();
         PlayerAchievements achievements = new PlayerAchievements();
 
-        fixture.service().onEvent(achievements, new BattleStageClearedEvent(
+        int progressed = fixture.service().onEvent(achievements, new BattleStageClearedEvent(
                 10001L,
                 "forest-1",
                 3,
@@ -53,6 +54,7 @@ class AchievementServiceTest {
                 1
         ));
 
+        assertEquals(0, progressed);
         assertEquals(0, achievements.progress("achievement-clear-forest").value());
     }
 

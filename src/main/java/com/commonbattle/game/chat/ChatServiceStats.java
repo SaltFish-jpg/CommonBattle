@@ -17,10 +17,65 @@ public record ChatServiceStats(
         long droppedDeliveryRecipients,
         long failedDeliveryRecipients,
         long allianceEventRemovedMembers,
-        long allianceSnapshotRemovedMembers
+        long allianceSnapshotRemovedMembers,
+        long asyncMessageChecks,
+        long asyncMessageSentDecisions,
+        long asyncMessageRejectedDecisions,
+        long asyncMessageBackpressuredDecisions,
+        long asyncMessageCallbackDeliveryFailures,
+        long asyncAccessChecks,
+        long asyncAccessAllowedDecisions,
+        long asyncAccessRejectedDecisions,
+        long asyncAccessBackpressuredDecisions,
+        long asyncAccessCallbackDeliveryFailures,
+        ChatPersistenceStats persistence
 ) {
+    public ChatServiceStats {
+        persistence = java.util.Objects.requireNonNull(persistence, "persistence");
+    }
+
+    public ChatServiceStats(
+            long activeChannels,
+            long activeDirectSessions,
+            long joinRequests,
+            long leaveRequests,
+            long sendRequests,
+            long mutedRejects,
+            long blockedRejects,
+            long retainedMessages,
+            long droppedHistoryMessages,
+            long acceptedDeliveryRecipients,
+            long droppedDeliveryRecipients,
+            long failedDeliveryRecipients,
+            long allianceEventRemovedMembers,
+            long allianceSnapshotRemovedMembers,
+            long asyncMessageChecks,
+            long asyncMessageSentDecisions,
+            long asyncMessageRejectedDecisions,
+            long asyncMessageBackpressuredDecisions,
+            long asyncMessageCallbackDeliveryFailures,
+            long asyncAccessChecks,
+            long asyncAccessAllowedDecisions,
+            long asyncAccessRejectedDecisions,
+            long asyncAccessBackpressuredDecisions,
+            long asyncAccessCallbackDeliveryFailures
+    ) {
+        this(
+                activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests,
+                mutedRejects, blockedRejects, retainedMessages, droppedHistoryMessages,
+                acceptedDeliveryRecipients, droppedDeliveryRecipients, failedDeliveryRecipients,
+                allianceEventRemovedMembers, allianceSnapshotRemovedMembers,
+                asyncMessageChecks, asyncMessageSentDecisions, asyncMessageRejectedDecisions,
+                asyncMessageBackpressuredDecisions, asyncMessageCallbackDeliveryFailures,
+                asyncAccessChecks, asyncAccessAllowedDecisions, asyncAccessRejectedDecisions,
+                asyncAccessBackpressuredDecisions, asyncAccessCallbackDeliveryFailures,
+                ChatPersistenceStats.empty()
+        );
+    }
+
     public ChatServiceStats(long activeChannels, long joinRequests, long leaveRequests, long sendRequests) {
-        this(activeChannels, 0, joinRequests, leaveRequests, sendRequests, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        this(activeChannels, 0, joinRequests, leaveRequests, sendRequests, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ChatServiceStats(
@@ -35,7 +90,7 @@ public record ChatServiceStats(
             long droppedHistoryMessages
     ) {
         this(activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests, mutedRejects, blockedRejects,
-                retainedMessages, droppedHistoryMessages, 0, 0, 0, 0, 0);
+                retainedMessages, droppedHistoryMessages, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ChatServiceStats(
@@ -54,11 +109,34 @@ public record ChatServiceStats(
     ) {
         this(activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests, mutedRejects, blockedRejects,
                 retainedMessages, droppedHistoryMessages, acceptedDeliveryRecipients, droppedDeliveryRecipients,
-                failedDeliveryRecipients, 0, 0);
+                failedDeliveryRecipients, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    public ChatServiceStats(
+            long activeChannels,
+            long activeDirectSessions,
+            long joinRequests,
+            long leaveRequests,
+            long sendRequests,
+            long mutedRejects,
+            long blockedRejects,
+            long retainedMessages,
+            long droppedHistoryMessages,
+            long acceptedDeliveryRecipients,
+            long droppedDeliveryRecipients,
+            long failedDeliveryRecipients,
+            long allianceEventRemovedMembers,
+            long allianceSnapshotRemovedMembers
+    ) {
+        this(activeChannels, activeDirectSessions, joinRequests, leaveRequests, sendRequests, mutedRejects, blockedRejects,
+                retainedMessages, droppedHistoryMessages, acceptedDeliveryRecipients, droppedDeliveryRecipients,
+                failedDeliveryRecipients, allianceEventRemovedMembers, allianceSnapshotRemovedMembers,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public static ChatServiceStats empty() {
-        return new ChatServiceStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new ChatServiceStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public ChatServiceStats plus(ChatServiceStats other) {
@@ -76,7 +154,18 @@ public record ChatServiceStats(
                 droppedDeliveryRecipients + other.droppedDeliveryRecipients,
                 failedDeliveryRecipients + other.failedDeliveryRecipients,
                 allianceEventRemovedMembers + other.allianceEventRemovedMembers,
-                allianceSnapshotRemovedMembers + other.allianceSnapshotRemovedMembers
+                allianceSnapshotRemovedMembers + other.allianceSnapshotRemovedMembers,
+                asyncMessageChecks + other.asyncMessageChecks,
+                asyncMessageSentDecisions + other.asyncMessageSentDecisions,
+                asyncMessageRejectedDecisions + other.asyncMessageRejectedDecisions,
+                asyncMessageBackpressuredDecisions + other.asyncMessageBackpressuredDecisions,
+                asyncMessageCallbackDeliveryFailures + other.asyncMessageCallbackDeliveryFailures,
+                asyncAccessChecks + other.asyncAccessChecks,
+                asyncAccessAllowedDecisions + other.asyncAccessAllowedDecisions,
+                asyncAccessRejectedDecisions + other.asyncAccessRejectedDecisions,
+                asyncAccessBackpressuredDecisions + other.asyncAccessBackpressuredDecisions,
+                asyncAccessCallbackDeliveryFailures + other.asyncAccessCallbackDeliveryFailures,
+                persistence.plus(other.persistence)
         );
     }
 
@@ -95,7 +184,120 @@ public record ChatServiceStats(
                 droppedDeliveryRecipients,
                 failedDeliveryRecipients,
                 allianceEventRemovedMembers,
-                allianceSnapshotRemovedMembers
+                allianceSnapshotRemovedMembers,
+                asyncMessageChecks,
+                asyncMessageSentDecisions,
+                asyncMessageRejectedDecisions,
+                asyncMessageBackpressuredDecisions,
+                asyncMessageCallbackDeliveryFailures,
+                asyncAccessChecks,
+                asyncAccessAllowedDecisions,
+                asyncAccessRejectedDecisions,
+                asyncAccessBackpressuredDecisions,
+                asyncAccessCallbackDeliveryFailures,
+                persistence
+        );
+    }
+
+    public ChatServiceStats withAsyncMessageStats(
+            long checks,
+            long sentDecisions,
+            long rejectedDecisions,
+            long backpressuredDecisions,
+            long callbackDeliveryFailures
+    ) {
+        return new ChatServiceStats(
+                activeChannels,
+                activeDirectSessions,
+                joinRequests,
+                leaveRequests,
+                sendRequests,
+                mutedRejects,
+                blockedRejects,
+                retainedMessages,
+                droppedHistoryMessages,
+                acceptedDeliveryRecipients,
+                droppedDeliveryRecipients,
+                failedDeliveryRecipients,
+                allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers,
+                checks,
+                sentDecisions,
+                rejectedDecisions,
+                backpressuredDecisions,
+                callbackDeliveryFailures,
+                asyncAccessChecks,
+                asyncAccessAllowedDecisions,
+                asyncAccessRejectedDecisions,
+                asyncAccessBackpressuredDecisions,
+                asyncAccessCallbackDeliveryFailures,
+                persistence
+        );
+    }
+
+    public ChatServiceStats withAsyncAccessStats(
+            long checks,
+            long allowedDecisions,
+            long rejectedDecisions,
+            long backpressuredDecisions,
+            long callbackDeliveryFailures
+    ) {
+        return new ChatServiceStats(
+                activeChannels,
+                activeDirectSessions,
+                joinRequests,
+                leaveRequests,
+                sendRequests,
+                mutedRejects,
+                blockedRejects,
+                retainedMessages,
+                droppedHistoryMessages,
+                acceptedDeliveryRecipients,
+                droppedDeliveryRecipients,
+                failedDeliveryRecipients,
+                allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers,
+                asyncMessageChecks,
+                asyncMessageSentDecisions,
+                asyncMessageRejectedDecisions,
+                asyncMessageBackpressuredDecisions,
+                asyncMessageCallbackDeliveryFailures,
+                checks,
+                allowedDecisions,
+                rejectedDecisions,
+                backpressuredDecisions,
+                callbackDeliveryFailures,
+                persistence
+        );
+    }
+
+    public ChatServiceStats withPersistenceStats(ChatPersistenceStats persistence) {
+        return new ChatServiceStats(
+                activeChannels,
+                activeDirectSessions,
+                joinRequests,
+                leaveRequests,
+                sendRequests,
+                mutedRejects,
+                blockedRejects,
+                retainedMessages,
+                droppedHistoryMessages,
+                acceptedDeliveryRecipients,
+                droppedDeliveryRecipients,
+                failedDeliveryRecipients,
+                allianceEventRemovedMembers,
+                allianceSnapshotRemovedMembers,
+                asyncMessageChecks,
+                asyncMessageSentDecisions,
+                asyncMessageRejectedDecisions,
+                asyncMessageBackpressuredDecisions,
+                asyncMessageCallbackDeliveryFailures,
+                asyncAccessChecks,
+                asyncAccessAllowedDecisions,
+                asyncAccessRejectedDecisions,
+                asyncAccessBackpressuredDecisions,
+                asyncAccessCallbackDeliveryFailures,
+                persistence
         );
     }
 

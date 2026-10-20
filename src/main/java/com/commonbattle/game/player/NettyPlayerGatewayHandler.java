@@ -1,6 +1,7 @@
 package com.commonbattle.game.player;
 
 import com.commonbattle.game.session.NettyPlayerOutboundWriter;
+import com.commonbattle.game.session.NettyPlayerWriteTracker;
 import com.commonbattle.game.session.PlayerClientConnectionResult;
 import com.commonbattle.game.session.PlayerClientConnectionService;
 import com.commonbattle.game.session.PlayerClientEnvelope;
@@ -43,6 +44,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
     private final PlayerClientAuthenticator authenticator;
     private final PlayerGatewayConfig config;
     private final NettyPlayerGatewayConnectionIndex connectionIndex;
+    private final NettyPlayerWriteTracker writeTracker;
     private final PlayerGatewayRateLimiter commandRateLimiter;
     private final PlayerGatewayRateLimiter heartbeatRateLimiter;
 
@@ -53,7 +55,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
     ) {
         this(connections, commands, clock, new NettyPlayerGatewayMetrics(),
                 PlayerClientAuthenticator.allowAll(), PlayerGatewayConfig.defaults(),
-                new NettyPlayerGatewayConnectionIndex());
+                new NettyPlayerGatewayConnectionIndex(), new NettyPlayerWriteTracker());
     }
 
     NettyPlayerGatewayHandler(
@@ -65,6 +67,20 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             PlayerGatewayConfig config,
             NettyPlayerGatewayConnectionIndex connectionIndex
     ) {
+        this(connections, commands, clock, metrics, authenticator, config, connectionIndex,
+                new NettyPlayerWriteTracker());
+    }
+
+    NettyPlayerGatewayHandler(
+            PlayerClientConnectionService connections,
+            PlayerClientCommandAcceptor commands,
+            Clock clock,
+            NettyPlayerGatewayMetrics metrics,
+            PlayerClientAuthenticator authenticator,
+            PlayerGatewayConfig config,
+            NettyPlayerGatewayConnectionIndex connectionIndex,
+            NettyPlayerWriteTracker writeTracker
+    ) {
         this.connections = Objects.requireNonNull(connections, "connections");
         this.commands = Objects.requireNonNull(commands, "commands");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -72,6 +88,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         this.authenticator = Objects.requireNonNull(authenticator, "authenticator");
         this.config = Objects.requireNonNull(config, "config");
         this.connectionIndex = Objects.requireNonNull(connectionIndex, "connectionIndex");
+        this.writeTracker = Objects.requireNonNull(writeTracker, "writeTracker");
         this.commandRateLimiter = new PlayerGatewayRateLimiter(config.commandRateLimit(), clock);
         this.heartbeatRateLimiter = new PlayerGatewayRateLimiter(config.heartbeatRateLimit(), clock);
     }
@@ -117,7 +134,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
     }
 
     public NettyPlayerGatewayStats stats() {
-        return metrics.snapshot();
+        return metrics.snapshot(writeTracker.inFlightWrites());
     }
 
     private void login(ChannelHandlerContext context, PlayerClientLoginRequest request) {
@@ -141,12 +158,12 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             PlayerClientConnectionResult result = connections.connect(
                     request.playerId(),
                     request.sessionId(),
-                    new NettyPlayerOutboundWriter(context.channel())
+                    new NettyPlayerOutboundWriter(context.channel(), writeTracker)
             );
             PlayerSession session = result.login().session();
             context.channel().attr(SESSION).set(session);
             io.netty.channel.Channel oldChannel = connectionIndex.bind(session, context.channel());
-            context.writeAndFlush(new PlayerClientEnvelope(
+            writeTracker.writeAndFlush(context.channel(), new PlayerClientEnvelope(
                     session.playerId(),
                     LOGIN_RESPONSE_TOPIC,
                     PlayerClientLoginResponse.success(result.login()),
@@ -171,7 +188,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             PlayerClientErrorCode code,
             String message
     ) {
-        context.writeAndFlush(new PlayerClientEnvelope(
+        writeTracker.writeAndFlush(context.channel(), new PlayerClientEnvelope(
                 request.playerId(),
                 LOGIN_RESPONSE_TOPIC,
                 PlayerClientLoginResponse.failed(request, code, message),
@@ -276,7 +293,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
         }
         metrics.acceptedHeartbeat();
         if (config.heartbeatAckEnabled()) {
-            context.writeAndFlush(new PlayerClientEnvelope(
+            writeTracker.writeAndFlush(context.channel(), new PlayerClientEnvelope(
                     session.playerId(),
                     HEARTBEAT_ACK_TOPIC,
                     new PlayerClientHeartbeatAck(
@@ -389,7 +406,7 @@ public final class NettyPlayerGatewayHandler extends SimpleChannelInboundHandler
             String message,
             Duration retryAfter
     ) {
-        channel.writeAndFlush(new PlayerClientEnvelope(
+        writeTracker.writeAndFlush(channel, new PlayerClientEnvelope(
                 playerId,
                 REJECT_TOPIC,
                 new PlayerClientRejectResponse(code, message, retryAfter == null ? 0 : retryAfter.toMillis(), true),

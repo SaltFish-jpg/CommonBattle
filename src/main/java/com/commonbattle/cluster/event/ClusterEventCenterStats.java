@@ -21,4 +21,12 @@ public record ClusterEventCenterStats(Map<String, ClusterEventTopicStats> topics
     public int totalRetainedEvents() {
         return topics.values().stream().mapToInt(ClusterEventTopicStats::retainedEvents).sum();
     }
+
+    public long totalDuplicatePublishes() {
+        return topics.values().stream().mapToLong(ClusterEventTopicStats::duplicatePublishes).sum();
+    }
+
+    public long totalJournalFailures() {
+        return topics.values().stream().mapToLong(ClusterEventTopicStats::journalFailures).sum();
+    }
 }

@@ -21,14 +21,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 
 /**
  * Game 服玩家 Agent 管理器。
  * 登录、网关命令和本服业务入口都应通过它取得玩家 Agent，避免重复恢复、重复占用 owner 或漏注入事件发布器。
  */
-public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
+public final class PlayerGameAgentManager implements AsyncShopPurchaseView, AsyncBusinessCommandView {
     private final ActorSystem actors;
     private final AgentMessagePort messages;
     private final PlayerStateRepository repository;
@@ -44,12 +47,19 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     private final PlayerPushPort pushes;
     private final PlayerCommandAuditSink asyncCommandAuditSink;
     private final PlayerCommandSequencer commandSequencer;
+    private final AsyncBusinessCommandPolicy asyncCommandPolicy;
     private final ActorScheduleRegistry actorSchedules;
     private final boolean growthStaminaRecoveryEnabled;
     private final Duration growthStaminaInitialDelay;
     private final Duration growthStaminaInterval;
     private final AsyncShopPurchaseMetrics asyncShopPurchases = new AsyncShopPurchaseMetrics();
+    private final AsyncBusinessCommandMetrics asyncBusinessCommands = new AsyncBusinessCommandMetrics();
     private final Map<Long, PlayerGameAgentHandle> agents = new ConcurrentHashMap<>();
+    private final LongAdder fencingConflicts = new LongAdder();
+    private volatile LongConsumer passivationListener = ignored -> {
+    };
+    private volatile java.util.function.LongFunction<PlayerBusinessResponseSnapshot> businessResponseSnapshots =
+            PlayerBusinessResponseSnapshot::empty;
 
     public PlayerGameAgentManager(
             ActorSystem actors,
@@ -233,6 +243,33 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
             Duration growthStaminaInitialDelay,
             Duration growthStaminaInterval
     ) {
+        this(actors, messages, repository, configView, lifecycles, clock, serverOpenTime,
+                domainEventPublisher, domainEventListener, saveListener, shopStockAsyncClient, pushes,
+                asyncCommandAuditSink, commandSequencer, AsyncBusinessCommandPolicy.unlimited(), actorSchedules,
+                growthStaminaRecoveryEnabled, growthStaminaInitialDelay, growthStaminaInterval);
+    }
+
+    public PlayerGameAgentManager(
+            ActorSystem actors,
+            AgentMessagePort messages,
+            PlayerStateRepository repository,
+            GameConfigView configView,
+            AgentLifecycleManager lifecycles,
+            Clock clock,
+            Instant serverOpenTime,
+            EventPublisher domainEventPublisher,
+            PlayerDomainEventListener domainEventListener,
+            PlayerStateSaveListener saveListener,
+            ShopStockAsyncClient shopStockAsyncClient,
+            PlayerPushPort pushes,
+            PlayerCommandAuditSink asyncCommandAuditSink,
+            PlayerCommandSequencer commandSequencer,
+            AsyncBusinessCommandPolicy asyncCommandPolicy,
+            ActorScheduleRegistry actorSchedules,
+            boolean growthStaminaRecoveryEnabled,
+            Duration growthStaminaInitialDelay,
+            Duration growthStaminaInterval
+    ) {
         this.actors = Objects.requireNonNull(actors, "actors");
         this.messages = Objects.requireNonNull(messages, "messages");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -249,6 +286,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         this.pushes = Objects.requireNonNull(pushes, "pushes");
         this.asyncCommandAuditSink = Objects.requireNonNull(asyncCommandAuditSink, "asyncCommandAuditSink");
         this.commandSequencer = commandSequencer;
+        this.asyncCommandPolicy = Objects.requireNonNull(asyncCommandPolicy, "asyncCommandPolicy");
         this.actorSchedules = actorSchedules;
         this.growthStaminaRecoveryEnabled = growthStaminaRecoveryEnabled;
         this.growthStaminaInitialDelay = positiveOrZero(growthStaminaInitialDelay, "growthStaminaInitialDelay");
@@ -277,20 +315,27 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     public PlayerGameAgentHandle restoreMigrated(PlayerStateSnapshot snapshot, ActorRef actorRef) {
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(actorRef, "actorRef");
-        PlayerProfile profile = PlayerProfile.restore(snapshot);
-        PlayerGameAgent agent = createAgent(actorRef, profile, snapshot);
+        String ownerToken = mutationOwnerToken(snapshot.playerId());
+        Optional<PlayerMutationRepository> mutations = mutationRepository();
+        PlayerStateSnapshot restored = mutations
+                .map(repository -> acquireMigratedSnapshot(repository, snapshot, ownerToken))
+                .orElse(snapshot);
+        PlayerProfile profile = PlayerProfile.restore(restored);
+        PlayerGameAgent agent = createAgent(actorRef, profile, restored, mutations.orElse(null), ownerToken);
         PlayerGameAgentHandle handle = new PlayerGameAgentHandle(
                 agent,
-                snapshot,
+                restored,
                 false,
                 scheduleGrowthStaminaRecovery(agent)
         );
-        PlayerGameAgentHandle previous = agents.putIfAbsent(snapshot.playerId(), handle);
+        PlayerGameAgentHandle previous = agents.putIfAbsent(restored.playerId(), handle);
         if (previous != null) {
             handle.cancelTimers();
-            throw new IllegalStateException("player agent already loaded: " + snapshot.playerId());
+            throw new IllegalStateException("player agent already loaded: " + restored.playerId());
         }
-        repository.save(snapshot.playerId(), snapshot);
+        if (mutations.isEmpty()) {
+            repository.save(restored.playerId(), restored);
+        }
         return handle;
     }
 
@@ -301,6 +346,7 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         PlayerGameAgentHandle removed = agents.remove(playerId);
         if (removed != null) {
             removed.cancelTimers();
+            actors.retire(removed.agent().actorRef());
         }
         return Optional.ofNullable(removed);
     }
@@ -309,17 +355,109 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         return agents.size();
     }
 
+    public long fencingConflicts() {
+        return fencingConflicts.sum();
+    }
+
+    /**
+     * 迁移恢复时返回持久化检查点中的权威响应；未启用原子仓库时使用迁移包。
+     */
+    public PlayerBusinessResponseSnapshot migrationBusinessResponses(
+            long playerId,
+            PlayerBusinessResponseSnapshot fallback
+    ) {
+        Objects.requireNonNull(fallback, "fallback");
+        if (fallback.playerId() != playerId) {
+            throw new IllegalArgumentException("fallback playerId mismatch");
+        }
+        return mutationRepository()
+                .flatMap(repository -> repository.loadResponses(playerId))
+                .orElse(fallback);
+    }
+
+    /**
+     * 迁移目标失败并回滚目录后，为仍驻留内存的源 Agent 重新取得 fencing token。
+     */
+    public PlayerGameAgentHandle reclaimAfterMigrationRollback(PlayerStateSnapshot migrationSnapshot) {
+        Objects.requireNonNull(migrationSnapshot, "migrationSnapshot");
+        PlayerGameAgentHandle handle = agents.get(migrationSnapshot.playerId());
+        if (handle == null) {
+            throw new IllegalStateException("player agent not loaded: " + migrationSnapshot.playerId());
+        }
+        Optional<PlayerMutationRepository> mutations = mutationRepository();
+        if (mutations.isEmpty()) {
+            return handle;
+        }
+        String ownerToken = mutationOwnerToken(migrationSnapshot.playerId());
+        PlayerMutationRecord acquired = mutations.orElseThrow()
+                .acquireOwner(migrationSnapshot, ownerToken);
+        PlayerStateSnapshot authoritative = acquired.snapshot();
+        if (authoritative.revision() < migrationSnapshot.revision()) {
+            if (migrationSnapshot.revision() != authoritative.revision() + 1) {
+                throw new PlayerMutationConflictException(
+                        migrationSnapshot.playerId(), migrationSnapshot.revision(), authoritative.revision(),
+                        PlayerMutationConflictReason.REVISION_GAP
+                );
+            }
+            authoritative = mutations.orElseThrow()
+                    .commitOwned(ownerToken, migrationSnapshot, List.of())
+                    .snapshot();
+        }
+        handle.agent().reclaimMutationOwner(ownerToken, authoritative.revision());
+        return new PlayerGameAgentHandle(
+                handle.agent(), authoritative, handle.created(), handle.growthStaminaRecovery()
+        );
+    }
+
+    /**
+     * 注册玩家成功钝化后的内存索引清理器；监听器在状态保存成功后、钝化完成前执行。
+     */
+    public void onPassivated(LongConsumer listener) {
+        passivationListener = Objects.requireNonNull(listener, "listener");
+    }
+
     public List<Long> loadedPlayerIds() {
         return List.copyOf(agents.keySet());
+    }
+
+    /**
+     * 绑定完成响应快照来源，使后续玩家命令可把原响应与状态放入同一原子提交。
+     */
+    public void attachBusinessResponseSnapshots(
+            java.util.function.LongFunction<PlayerBusinessResponseSnapshot> snapshots
+    ) {
+        businessResponseSnapshots = Objects.requireNonNull(snapshots, "snapshots");
+        agents.values().forEach(handle -> handle.agent().attachBusinessResponseSnapshots(snapshots));
+    }
+
+    /**
+     * 为全部已加载玩家投递一次事务事件补交任务；实际发布仍在各自玩家邮箱内串行执行。
+     */
+    public int replayPendingDomainEvents() {
+        int submitted = 0;
+        for (PlayerGameAgentHandle handle : agents.values()) {
+            handle.agent().replayPendingDomainEvents();
+            submitted++;
+        }
+        return submitted;
     }
 
     public AsyncShopPurchaseView asyncShopPurchases() {
         return asyncShopPurchases;
     }
 
+    public AsyncBusinessCommandView asyncBusinessCommands() {
+        return asyncBusinessCommands;
+    }
+
     @Override
     public AsyncShopPurchaseStats stats() {
         return asyncShopPurchases.stats();
+    }
+
+    @Override
+    public AsyncBusinessCommandStats asyncBusinessCommandStats() {
+        return asyncBusinessCommands.asyncBusinessCommandStats();
     }
 
     public boolean save(long playerId, Consumer<PlayerStateSnapshot> callback) {
@@ -392,6 +530,10 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 saveListener.saved(snapshot);
                 agents.remove(playerId, handle);
                 handle.cancelTimers();
+                if (commandSequencer != null) {
+                    commandSequencer.forgetPlayer(playerId);
+                }
+                passivationListener.accept(playerId);
                 callback.saved(snapshot);
             } catch (RuntimeException e) {
                 callback.failed(playerId, e);
@@ -416,13 +558,29 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
     }
 
     private PlayerGameAgentHandle create(long playerId) {
-        PlayerAgentRecovery recovery = recoveryService.recover(playerId);
         ActorRef self = actors.actor(actorId(playerId));
         lifecycles.activate(AgentIdentity.player(playerId), self.id());
-        PlayerStateSnapshot snapshot = recovery.snapshot();
-        restoreCommandSequencer(snapshot);
-        PlayerGameAgent agent = createAgent(self, recovery.profile(), snapshot);
-        return new PlayerGameAgentHandle(agent, snapshot, recovery.created(), scheduleGrowthStaminaRecovery(agent));
+        try {
+            Optional<PlayerMutationRepository> mutations = mutationRepository();
+            String ownerToken = mutationOwnerToken(playerId);
+            PlayerAgentRecovery recovery = recoveryService.recover(playerId);
+            if (mutations.isPresent()) {
+                PlayerMutationRecord acquired = mutations.orElseThrow()
+                        .acquireOwner(recovery.snapshot(), ownerToken);
+                recovery = PlayerAgentRecovery.restore(acquired.snapshot());
+            }
+            PlayerStateSnapshot snapshot = recovery.snapshot();
+            restoreCommandSequencer(snapshot);
+            PlayerGameAgent agent = createAgent(
+                    self, recovery.profile(), snapshot, mutations.orElse(null), ownerToken
+            );
+            return new PlayerGameAgentHandle(
+                    agent, snapshot, recovery.created(), scheduleGrowthStaminaRecovery(agent)
+            );
+        } catch (RuntimeException | Error error) {
+            lifecycles.closeFailedActivation(AgentIdentity.player(playerId), self);
+            throw error;
+        }
     }
 
     private void restoreCommandSequencer(PlayerStateSnapshot snapshot) {
@@ -431,8 +589,14 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
         }
     }
 
-    private PlayerGameAgent createAgent(ActorRef self, PlayerProfile profile, PlayerStateSnapshot snapshot) {
-        return new PlayerGameAgent(
+    private PlayerGameAgent createAgent(
+            ActorRef self,
+            PlayerProfile profile,
+            PlayerStateSnapshot snapshot,
+            PlayerMutationRepository mutations,
+            String ownerToken
+    ) {
+        PlayerGameAgent agent = new PlayerGameAgent(
                 messages,
                 self,
                 profile,
@@ -445,10 +609,68 @@ public final class PlayerGameAgentManager implements AsyncShopPurchaseView {
                 domainEventListener,
                 shopStockAsyncClient,
                 asyncShopPurchases,
+                asyncBusinessCommands,
+                asyncCommandPolicy,
                 pushes,
                 asyncCommandAuditSink,
                 commandSequencer == null ? PlayerCommandSequencerSnapshot::empty : commandSequencer::snapshotForPlayer
         );
+        if (mutations != null) {
+            agent.attachMutationRepository(mutations, ownerToken);
+            agent.onFenced(this::fenceAgent);
+            agent.replayPendingDomainEvents();
+        }
+        agent.attachBusinessResponseSnapshots(businessResponseSnapshots);
+        return agent;
+    }
+
+    private PlayerStateSnapshot acquireMigratedSnapshot(
+            PlayerMutationRepository mutations,
+            PlayerStateSnapshot incoming,
+            String ownerToken
+    ) {
+        PlayerMutationRecord current = mutations.acquireOwner(incoming, ownerToken);
+        long currentRevision = current.snapshot().revision();
+        if (currentRevision >= incoming.revision()) {
+            return current.snapshot();
+        }
+        if (incoming.revision() != currentRevision + 1) {
+            throw new PlayerMutationConflictException(
+                    incoming.playerId(), incoming.revision(), currentRevision,
+                    PlayerMutationConflictReason.REVISION_GAP
+            );
+        }
+        return mutations.commitOwned(ownerToken, incoming, List.of()).snapshot();
+    }
+
+    private void fenceAgent(PlayerGameAgent agent, PlayerMutationConflictException conflict) {
+        long playerId = agent.profile().playerId();
+        fencingConflicts.increment();
+        PlayerGameAgentHandle handle = agents.get(playerId);
+        if (handle != null && handle.agent() == agent && agents.remove(playerId, handle)) {
+            handle.cancelTimers();
+        }
+        if (commandSequencer != null) {
+            commandSequencer.forgetPlayer(playerId);
+        }
+        passivationListener.accept(playerId);
+        lifecycles.fenceCurrent(AgentIdentity.player(playerId), agent.actorRef());
+    }
+
+    private Optional<PlayerMutationRepository> mutationRepository() {
+        if (repository instanceof PlayerMutationRepository mutations) {
+            return Optional.of(mutations);
+        }
+        if (repository instanceof PlayerCheckpointRepository checkpoints) {
+            return checkpoints.mutations();
+        }
+        return Optional.empty();
+    }
+
+    private String mutationOwnerToken(long playerId) {
+        return lifecycles.lease(AgentIdentity.player(playerId))
+                .map(PlayerMutationOwnerToken::encode)
+                .orElseGet(() -> UUID.randomUUID().toString());
     }
 
     private String actorId(long playerId) {

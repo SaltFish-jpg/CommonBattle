@@ -27,14 +27,15 @@ public final class LargeSceneShardAgentMigrationRestoreHandler implements AgentM
     public void restore(AgentMigrationAcceptRequest request, ActorContext context) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(context, "context");
-        if (!AgentIdentity.SCENE.equals(request.identity().type())) {
+        if (!AgentIdentity.SCENE_SHARD.equals(request.identity().type())
+                && !AgentIdentity.SCENE.equals(request.identity().type())) {
             throw new IllegalArgumentException("unsupported migration identity: " + request.identity().type());
         }
         if (!LargeSceneShardAgentMigrationStatePacker.STATE_TYPE.equals(request.stateType())) {
             throw new IllegalArgumentException("unsupported large scene shard migration state type: "
                     + request.stateType());
         }
-        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(request.identity().key());
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(request.identity());
         LargeSceneShardAgentSnapshot snapshot = serializer.deserialize(request.stateBytes());
         if (!snapshot.sceneId().equals(key.sceneId()) || snapshot.shardIndex() != key.shardIndex()) {
             throw new IllegalArgumentException("large scene shard migration snapshot identity mismatch");

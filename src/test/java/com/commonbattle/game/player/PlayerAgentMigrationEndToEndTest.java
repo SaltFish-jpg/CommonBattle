@@ -29,6 +29,7 @@ import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
 import com.commonbattle.cluster.network.LocalClusterTransport;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.bag.BagSnapshot;
@@ -60,6 +61,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerAgentMigrationEndToEndTest {
@@ -74,6 +76,10 @@ class PlayerAgentMigrationEndToEndTest {
             PlayerGameAgent sourceAgent = harness.sourcePlayers.getOrCreate(playerId);
             sourceAgent.profile().bag().restore(new BagSnapshot(Map.of("gold", 77, "exp", 5)));
             harness.sourceSequencer.commit(command(2), PlayerCommandStatus.ACCEPTED);
+            harness.sourceResponses.completed(
+                    command(2),
+                    PlayerBusinessResponse.success(command(2), PlayerBusinessAck.OK)
+            );
 
             AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
             boolean submitted = harness.coordinator.migrate(
@@ -82,7 +88,9 @@ class PlayerAgentMigrationEndToEndTest {
                     new PlayerAgentMigrationStatePacker(
                             harness.sourcePlayers,
                             harness.serializer,
-                            harness.sourceSequencer
+                            harness.sourceSequencer,
+                            harness.sourceResponses,
+                            harness.payloadCodecs
                     ),
                     result::set
             );
@@ -101,6 +109,22 @@ class PlayerAgentMigrationEndToEndTest {
             assertEquals(PlayerCommandStatus.GAP, harness.sourceSequencer.inspect(command(3)));
             assertEquals(PlayerCommandStatus.DUPLICATE, harness.targetSequencer.inspect(command(2)));
             assertEquals(PlayerCommandStatus.ACCEPTED, harness.targetSequencer.inspect(command(3)));
+            AtomicReference<PlayerBusinessResponseDelivery> replay = new AtomicReference<>();
+            harness.targetResponses.expect(command(2), new PlayerBusinessResponseCallback() {
+                @Override
+                public void completed(PlayerBusinessResponse response) {
+                    replay.set(new PlayerBusinessResponseDelivery(response, false));
+                }
+
+                @Override
+                public void completed(PlayerBusinessResponse response, boolean replayed) {
+                    replay.set(new PlayerBusinessResponseDelivery(response, replayed));
+                }
+            });
+            assertTrue(replay.get().replayed());
+            assertEquals(PlayerBusinessAck.OK, replay.get().response().payload());
+            assertTrue(harness.sourceResponses.cachedResponse(
+                    PlayerBusinessResponseQuery.from(command(2))).isEmpty());
             assertEquals(new AgentMigrationTaskStoreStats(1, 1, 0, 0, 1, 0, 0),
                     harness.taskStore.stats(CLOCK.instant()));
             assertEquals(new AgentMigrationCoordinatorStats(1, 1, 0, 1, 0, 0, 0, 0, 0, 0),
@@ -123,7 +147,9 @@ class PlayerAgentMigrationEndToEndTest {
                     new PlayerAgentMigrationStatePacker(
                             harness.sourcePlayers,
                             harness.serializer,
-                            harness.sourceSequencer
+                            harness.sourceSequencer,
+                            harness.sourceResponses,
+                            harness.payloadCodecs
                     ),
                     result::set
             );
@@ -164,7 +190,9 @@ class PlayerAgentMigrationEndToEndTest {
                     new PlayerAgentMigrationStatePacker(
                             harness.sourcePlayers,
                             harness.serializer,
-                            harness.sourceSequencer
+                            harness.sourceSequencer,
+                            harness.sourceResponses,
+                            harness.payloadCodecs
                     ),
                     result::set
             );
@@ -180,6 +208,96 @@ class PlayerAgentMigrationEndToEndTest {
             assertEquals("order-10001-pending", harness.sourceStocks.reserveReservationId);
             assertEquals(new AgentMigrationCoordinatorStats(1, 0, 1, 0, 0, 0, 0, 0, 0, 0),
                     harness.coordinator.stats());
+        }
+    }
+
+    @Test
+    void retryServiceMigratesPlayerAfterPendingAsyncCommandCompletes() {
+        try (Harness harness = new Harness()) {
+            long playerId = 10001L;
+            AgentIdentity player = AgentIdentity.player(playerId);
+            PlayerGameAgent sourceAgent = harness.sourcePlayers.getOrCreate(playerId);
+            sourceAgent.profile().bag().restore(new BagSnapshot(Map.of("gold", 100)));
+            harness.sourceActors.send(new ActorRef("player-10001"), ignored -> sourceAgent.buyShopItemAsync(
+                    command(1),
+                    "order-10001-pending",
+                    "limited_pack",
+                    1,
+                    PlayerBusinessResultSink.NOOP
+            ));
+            PlayerAgentMigrationRetryService retries = new PlayerAgentMigrationRetryService(harness.coordinator);
+            AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
+
+            boolean submitted = retries.migrate(
+                    player,
+                    harness.targetLocation(player),
+                    new PlayerAgentMigrationStatePacker(
+                            harness.sourcePlayers,
+                            harness.serializer,
+                            harness.sourceSequencer,
+                            harness.sourceResponses,
+                            harness.payloadCodecs
+                    ),
+                    result::set
+            );
+
+            assertTrue(submitted);
+            assertNull(result.get());
+            assertEquals(1, retries.stats().pendingRetries());
+            assertEquals(1, retries.stats().retryableSourceFailures());
+            assertEquals(harness.sourceGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
+
+            harness.sourceStocks.reserveCallback.success(new ShopStockReserveResponse(true, 0));
+            assertEquals(1, retries.retryPending());
+
+            assertEquals(AgentMigrationResultStatus.TARGET_ACCEPTED, result.get().status());
+            assertEquals(0, retries.stats().pendingRetries());
+            assertEquals(1, retries.stats().retryCompleted());
+            assertEquals(harness.targetGame.id(), harness.agents.locate(player).orElseThrow().serviceId());
+            assertTrue(harness.sourcePlayers.get(playerId).isEmpty());
+            assertTrue(harness.targetPlayers.get(playerId).isPresent());
+            assertEquals(50, harness.targetPlayers.getOrCreate(playerId).profile().bag().count("gold"));
+        }
+    }
+
+    @Test
+    void retryServiceWaitsForPendingBusinessResponseBeforeMigration() {
+        try (Harness harness = new Harness()) {
+            long playerId = 10001L;
+            AgentIdentity player = AgentIdentity.player(playerId);
+            harness.sourcePlayers.getOrCreate(playerId);
+            PlayerCommand command = command(1);
+            harness.sourceResponses.expect(command, ignored -> {
+            });
+            PlayerAgentMigrationRetryService retries = new PlayerAgentMigrationRetryService(harness.coordinator);
+            AtomicReference<AgentMigrationResult> result = new AtomicReference<>();
+
+            boolean submitted = retries.migrate(
+                    player,
+                    harness.targetLocation(player),
+                    new PlayerAgentMigrationStatePacker(
+                            harness.sourcePlayers,
+                            harness.serializer,
+                            harness.sourceSequencer,
+                            harness.sourceResponses,
+                            harness.payloadCodecs
+                    ),
+                    result::set
+            );
+
+            assertTrue(submitted);
+            assertNull(result.get());
+            assertEquals(1, retries.stats().pendingRetries());
+            harness.sourceResponses.completed(
+                    command,
+                    PlayerBusinessResponse.success(command, PlayerBusinessAck.OK)
+            );
+
+            assertEquals(1, retries.retryPending());
+
+            assertEquals(AgentMigrationResultStatus.TARGET_ACCEPTED, result.get().status());
+            assertEquals(PlayerBusinessAck.OK, harness.targetResponses.cachedResponse(
+                    PlayerBusinessResponseQuery.from(command)).orElseThrow().payload());
         }
     }
 
@@ -203,6 +321,10 @@ class PlayerAgentMigrationEndToEndTest {
                 new ProtostuffPlayerStateSnapshotSerializer();
         private final PlayerCommandSequencer sourceSequencer = new PlayerCommandSequencer();
         private final PlayerCommandSequencer targetSequencer = new PlayerCommandSequencer();
+        private final PlayerBusinessResponseHub sourceResponses = new PlayerBusinessResponseHub();
+        private final PlayerBusinessResponseHub targetResponses = new PlayerBusinessResponseHub();
+        private final PayloadCodecRegistry payloadCodecs = PlayerBusinessCommandPayloadCodecs.registerTo(
+                PayloadCodecRegistry.commonDefaults());
         private final InMemoryAgentMigrationTaskStore taskStore = new InMemoryAgentMigrationTaskStore();
         private final AgentLifecycleManager sourceLifecycles =
                 new AgentLifecycleManager(sourceGame.id(), sourceActors, agents, CLOCK);
@@ -252,7 +374,13 @@ class PlayerAgentMigrationEndToEndTest {
                             ? (request, context) -> {
                                 throw new IllegalStateException("restore failed");
                             }
-                            : new PlayerAgentMigrationRestoreHandler(targetPlayers, serializer, targetSequencer)
+                            : new PlayerAgentMigrationRestoreHandler(
+                                    targetPlayers,
+                                    serializer,
+                                    targetSequencer,
+                                    targetResponses,
+                                    payloadCodecs
+                            )
             ).bind(targetGateway);
             coordinator = new AgentMigrationCoordinator(
                     sourceLifecycles,
@@ -263,7 +391,13 @@ class PlayerAgentMigrationEndToEndTest {
                     taskStore,
                     AgentMigrationTaskIdGenerator.defaultGenerator(),
                     CLOCK,
-                    new PlayerAgentMigrationSourceHook(sourcePlayers, serializer, sourceSequencer)
+                    new PlayerAgentMigrationSourceHook(
+                            sourcePlayers,
+                            serializer,
+                            sourceSequencer,
+                            sourceResponses,
+                            payloadCodecs
+                    )
             );
         }
 

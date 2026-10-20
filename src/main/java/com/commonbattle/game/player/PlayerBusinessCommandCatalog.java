@@ -2,6 +2,7 @@ package com.commonbattle.game.player;
 
 import com.commonbattle.game.achievement.AchievementClaimResult;
 import com.commonbattle.game.activity.ActivityClaimResult;
+import com.commonbattle.game.activity.AsyncActivityClaimResult;
 import com.commonbattle.game.bag.BagResult;
 import com.commonbattle.game.battle.BattleSettlementResult;
 import com.commonbattle.game.growth.GrowthResult;
@@ -27,6 +28,8 @@ public final class PlayerBusinessCommandCatalog {
                     ActivityProgressCommand.class, PlayerBusinessAck.class),
             new PlayerBusinessCommandDescriptor("activity", PlayerBusinessOperations.ACTIVITY_CLAIM,
                     ClaimActivityCommand.class, ActivityClaimResult.class),
+            new PlayerBusinessCommandDescriptor("activity", PlayerBusinessOperations.ACTIVITY_CLAIM,
+                    ClaimActivityAsyncCommand.class, AsyncActivityClaimResult.class),
             new PlayerBusinessCommandDescriptor("growth", PlayerBusinessOperations.GROWTH_USE_EXP_ITEMS,
                     UseExpItemsCommand.class, GrowthResult.class),
             new PlayerBusinessCommandDescriptor("shop", PlayerBusinessOperations.SHOP_BUY,

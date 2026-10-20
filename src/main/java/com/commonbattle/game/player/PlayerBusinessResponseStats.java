@@ -23,7 +23,15 @@ public record PlayerBusinessResponseStats(
         long failedResponses,
         Map<String, Long> failedResponsesByCode,
         long rejectedBusinessResults,
-        Map<String, Long> rejectedBusinessResultsByCode
+        Map<String, Long> rejectedBusinessResultsByCode,
+        int loadedResponsePlayers,
+        long checkpointAttempts,
+        long checkpointSucceeded,
+        long checkpointFailures,
+        long storeLoadAttempts,
+        long storeLoadHits,
+        long storeLoadMisses,
+        long storeLoadFailures
 ) {
     public PlayerBusinessResponseStats {
         failedResponsesByCode = sortedCopy(failedResponsesByCode);
@@ -31,7 +39,8 @@ public record PlayerBusinessResponseStats(
     }
 
     public static PlayerBusinessResponseStats empty() {
-        return new PlayerBusinessResponseStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), 0, Map.of());
+        return new PlayerBusinessResponseStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), 0, Map.of(),
+                0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     public PlayerBusinessResponseStats plus(PlayerBusinessResponseStats other) {
@@ -49,7 +58,15 @@ public record PlayerBusinessResponseStats(
                 failedResponses + other.failedResponses,
                 merge(failedResponsesByCode, other.failedResponsesByCode),
                 rejectedBusinessResults + other.rejectedBusinessResults,
-                merge(rejectedBusinessResultsByCode, other.rejectedBusinessResultsByCode)
+                merge(rejectedBusinessResultsByCode, other.rejectedBusinessResultsByCode),
+                loadedResponsePlayers + other.loadedResponsePlayers,
+                checkpointAttempts + other.checkpointAttempts,
+                checkpointSucceeded + other.checkpointSucceeded,
+                checkpointFailures + other.checkpointFailures,
+                storeLoadAttempts + other.storeLoadAttempts,
+                storeLoadHits + other.storeLoadHits,
+                storeLoadMisses + other.storeLoadMisses,
+                storeLoadFailures + other.storeLoadFailures
         );
     }
 

@@ -11,6 +11,7 @@ public record AgentIdentity(String type, String key) {
     public static final String PROFILE = "profile";
     public static final String FRIEND = "friend";
     public static final String SCENE = "scene";
+    public static final String SCENE_SHARD = "scene-shard";
     public static final String ALLIANCE = "alliance";
 
     public AgentIdentity {
@@ -38,6 +39,13 @@ public record AgentIdentity(String type, String key) {
 
     public static AgentIdentity scene(String sceneId) {
         return new AgentIdentity(SCENE, sceneId);
+    }
+
+    public static AgentIdentity sceneShard(String sceneId, int shardIndex) {
+        if (shardIndex < 0) {
+            throw new IllegalArgumentException("shardIndex must not be negative");
+        }
+        return new AgentIdentity(SCENE_SHARD, sceneId + ":" + shardIndex);
     }
 
     public static AgentIdentity alliance(long allianceId) {

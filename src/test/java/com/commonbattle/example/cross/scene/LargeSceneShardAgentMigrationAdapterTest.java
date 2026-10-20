@@ -24,6 +24,14 @@ class LargeSceneShardAgentMigrationAdapterTest {
             new ProtoLargeSceneShardAgentSnapshotSerializer();
 
     @Test
+    void canonicalAndLegacyShardIdentitiesResolveToSameKey() {
+        LargeSceneShardAgentKey expected = new LargeSceneShardAgentKey("world-1", 3);
+
+        assertEquals(expected, LargeSceneShardAgentKey.fromIdentity(AgentIdentity.sceneShard("world-1", 3)));
+        assertEquals(expected, LargeSceneShardAgentKey.fromIdentity(AgentIdentity.scene(expected.wireName())));
+    }
+
+    @Test
     void packerSerializesOnlyRequestedShardSnapshot() {
         Fixture fixture = new Fixture("scene-1");
         fixture.scenes.enter(10001L, "world-1", 0, 0);
@@ -32,7 +40,7 @@ class LargeSceneShardAgentMigrationAdapterTest {
         LargeSceneShardAgentMigrationStatePacker packer =
                 new LargeSceneShardAgentMigrationStatePacker(fixture.scenes, serializer);
 
-        AgentIdentity identity = AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", 0).wireName());
+        AgentIdentity identity = AgentIdentity.sceneShard("world-1", 0);
         AgentMigrationSnapshot migration = packInShardMailbox(
                 fixture,
                 packer,
@@ -55,7 +63,7 @@ class LargeSceneShardAgentMigrationAdapterTest {
         fixture.scenes.enter(10002L, "world-1", 1, 0);
         LargeSceneShardAgentMigrationStatePacker packer =
                 new LargeSceneShardAgentMigrationStatePacker(fixture.scenes, serializer);
-        AgentIdentity identity = AgentIdentity.scene(new LargeSceneShardAgentKey("world-1", 0).wireName());
+        AgentIdentity identity = AgentIdentity.sceneShard("world-1", 0);
         AgentMigrationSnapshot snapshot = packInShardMailbox(
                 fixture,
                 packer,
@@ -111,7 +119,7 @@ class LargeSceneShardAgentMigrationAdapterTest {
             AgentIdentity identity,
             AgentLocation target
     ) {
-        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.parse(identity.key());
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(identity);
         AtomicReference<AgentMigrationSnapshot> snapshot = new AtomicReference<>();
         fixture.actors.send(new ActorRef(fixture.scenes.actorId(key.shardIndex())),
                 context -> snapshot.set(packer.pack(identity, target, context)));

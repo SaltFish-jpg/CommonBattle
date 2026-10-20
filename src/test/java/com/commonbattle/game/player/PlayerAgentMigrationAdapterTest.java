@@ -16,6 +16,7 @@ import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.cluster.ServiceId;
 import com.commonbattle.cluster.ServiceKind;
+import com.commonbattle.cluster.protocol.PayloadCodecRegistry;
 import com.commonbattle.example.config.ExampleGameConfigs;
 import com.commonbattle.game.bag.BagSnapshot;
 import com.commonbattle.game.config.GameConfigRuntime;
@@ -61,6 +62,57 @@ class PlayerAgentMigrationAdapterTest {
         assertEquals(1, snapshot.revision());
         assertEquals(1, snapshot.commandSequencer().watermarks().size());
         assertEquals(2, snapshot.commandSequencer().watermarks().getFirst().lastSequence());
+    }
+
+    @Test
+    void runtimePackerRoundTripsCompletedResponses() {
+        Fixture fixture = new Fixture(ServiceId.of(ServiceKind.GAME, "r1", "game-1"));
+        PlayerBusinessResponseHub sourceResponses = new PlayerBusinessResponseHub();
+        PlayerBusinessResponseHub targetResponses = new PlayerBusinessResponseHub();
+        PayloadCodecRegistry codecs = PlayerBusinessCommandPayloadCodecs.registerTo(
+                PayloadCodecRegistry.commonDefaults());
+        PlayerCommand completed = command(1);
+        fixture.manager.getOrCreate(10001L);
+        fixture.commandSequencer.commit(completed, PlayerCommandStatus.ACCEPTED);
+        sourceResponses.completed(completed, PlayerBusinessResponse.success(completed, PlayerBusinessAck.OK));
+        PlayerAgentMigrationStatePacker packer = new PlayerAgentMigrationStatePacker(
+                fixture.manager,
+                fixture.serializer,
+                fixture.commandSequencer,
+                sourceResponses,
+                codecs
+        );
+
+        AgentMigrationSnapshot migration = packInPlayerMailbox(
+                fixture,
+                packer,
+                AgentIdentity.player(10001L),
+                new AgentLocation(ServiceId.of(ServiceKind.GAME, "r1", "game-2"), new ActorRef("player-10001"))
+        );
+        PlayerAgentMigrationPayload payload = new PlayerAgentMigrationPayloadCodec(fixture.serializer, codecs)
+                .decode(migration.stateBytes());
+
+        assertEquals(PlayerAgentMigrationStatePacker.RUNTIME_STATE_TYPE, migration.stateType());
+        assertEquals(PlayerBusinessAck.OK, payload.completedResponses().responses().getFirst().payload());
+
+        Fixture target = new Fixture(ServiceId.of(ServiceKind.GAME, "r1", "game-2"));
+        AgentIdentity player = AgentIdentity.player(10001L);
+        ActorRef actor = new ActorRef("player-10001");
+        target.directory.claim(player, new AgentLocation(target.localService, actor));
+        PlayerAgentMigrationRestoreHandler handler = new PlayerAgentMigrationRestoreHandler(
+                target.manager,
+                target.serializer,
+                target.commandSequencer,
+                targetResponses,
+                codecs
+        );
+        AgentMigrationAcceptRequest request = new AgentMigrationAcceptRequest(
+                player, actor.id(), migration.stateType(), migration.stateBytes());
+
+        target.lifecycles.acceptMigrated(player, actor.id(), context -> handler.restore(request, context));
+
+        assertEquals(PlayerBusinessAck.OK,
+                targetResponses.cachedResponse(PlayerBusinessResponseQuery.from(completed)).orElseThrow().payload());
     }
 
     @Test

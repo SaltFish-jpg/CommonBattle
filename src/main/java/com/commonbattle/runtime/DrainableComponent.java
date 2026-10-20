@@ -11,6 +11,9 @@ public interface DrainableComponent {
 
     void beginDrain();
 
+    default void onDrainPoll() {
+    }
+
     void resumeAccepting();
 
     boolean isDraining();

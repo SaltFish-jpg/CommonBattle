@@ -6,13 +6,20 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 final class ActorMailbox {
     private final ActorRef ref;
     private final Queue<ActorTask> tasks = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean scheduled = new AtomicBoolean();
+    private final AtomicBoolean retirementRequested = new AtomicBoolean();
+    private final AtomicBoolean retired = new AtomicBoolean();
     private final AtomicInteger size = new AtomicInteger();
     private final EnumMap<ActorTaskCategory, AtomicInteger> categorySizes = new EnumMap<>(ActorTaskCategory.class);
+    private final LongAdder drainCycles = new LongAdder();
+    private final LongAdder drainProcessedTasks = new LongAdder();
+    private final LongAdder batchYields = new LongAdder();
+    private final AtomicInteger maxTasksPerDrain = new AtomicInteger();
 
     ActorMailbox(ActorRef ref) {
         this.ref = ref;
@@ -26,6 +33,9 @@ final class ActorMailbox {
     }
 
     ActorMailboxEnqueueResult enqueue(ActorTask task, ActorSystemConfig config) {
+        if (retirementRequested.get()) {
+            return ActorMailboxEnqueueResult.rejected(DeadLetterReason.ACTOR_RETIRED);
+        }
         ActorTaskCategory category = categoryOf(task);
         int categoryCapacity = config.capacityFor(category);
         if (categoryCapacity < config.mailboxCapacity()) {
@@ -68,6 +78,18 @@ final class ActorMailbox {
         return scheduled.compareAndSet(false, true);
     }
 
+    boolean tryRetireIdle() {
+        if (!scheduled.compareAndSet(false, true)) {
+            return false;
+        }
+        if (hasTasks()) {
+            scheduled.set(false);
+            return false;
+        }
+        markRetired();
+        return true;
+    }
+
     void markIdle() {
         scheduled.set(false);
     }
@@ -87,6 +109,44 @@ final class ActorMailbox {
 
     int size() {
         return size.get();
+    }
+
+    boolean requestRetirement() {
+        return retirementRequested.compareAndSet(false, true);
+    }
+
+    void markRetired() {
+        retirementRequested.set(true);
+        retired.set(true);
+    }
+
+    boolean retirementRequested() {
+        return retirementRequested.get();
+    }
+
+    boolean retired() {
+        return retired.get();
+    }
+
+    void recordDrain(int processedTasks, boolean yieldedByBatch) {
+        drainCycles.increment();
+        drainProcessedTasks.add(processedTasks);
+        maxTasksPerDrain.accumulateAndGet(processedTasks, Math::max);
+        if (yieldedByBatch) {
+            batchYields.increment();
+        }
+    }
+
+    ActorMailboxStats stats() {
+        return new ActorMailboxStats(
+                ref,
+                size(),
+                categorySizes(),
+                drainCycles.sum(),
+                drainProcessedTasks.sum(),
+                maxTasksPerDrain.get(),
+                batchYields.sum()
+        );
     }
 
     Map<ActorTaskCategory, Integer> categorySizes() {

@@ -285,6 +285,54 @@ class AllianceAwareChatChannelAccessPolicyTest {
 
         assertEquals(ChatJoinStatus.JOINED, joined.get().status());
         assertEquals(Set.of(10001L), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+        assertEquals(1, fixture.channels.stats().asyncAccessChecks());
+        assertEquals(1, fixture.channels.stats().asyncAccessAllowedDecisions());
+        assertEquals(0, fixture.channels.stats().asyncAccessRejectedDecisions());
+    }
+
+    @Test
+    void asyncAllianceAccessReadsOutsideChannelMailboxAndReentersForJoin() {
+        Fixture fixture = Fixture.createAsyncAccess();
+        fixture.refreshAlliance(900L, 1, Set.of(10001L));
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+
+        fixture.channels.join(new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L), joined::set);
+
+        assertEquals(null, joined.get());
+        assertEquals(1, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(null, joined.get());
+        assertEquals(1, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(ChatJoinStatus.JOINED, joined.get().status());
+        assertEquals(Set.of(10001L), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+    }
+
+    @Test
+    void asyncAllianceAccessReportsBackpressureWhenChannelMailboxCannotAcceptCallback() {
+        Fixture fixture = Fixture.createAsyncAccessWithMailboxCapacity(1);
+        fixture.refreshAlliance(900L, 1, Set.of(10001L));
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+
+        fixture.channels.join(new ChatJoinRequest(ChatChannelIds.alliance(900L), 10001L, 900L), joined::set);
+        fixture.actors.send(fixture.actors.actor(ChatActorIds.channelActorId(ChatChannelIds.alliance(900L))), ignored -> {
+        });
+
+        assertEquals(2, fixture.executor.queued());
+
+        fixture.executor.runNext();
+
+        assertEquals(ChatJoinStatus.BACKPRESSURED, joined.get().status());
+        assertEquals(Set.of(), fixture.channels.channel(ChatChannelIds.alliance(900L)).snapshotNow().members());
+        assertEquals(1, fixture.channels.stats().asyncAccessChecks());
+        assertEquals(1, fixture.channels.stats().asyncAccessAllowedDecisions());
+        assertEquals(1, fixture.channels.stats().asyncAccessCallbackDeliveryFailures());
+
+        fixture.executor.runAll();
     }
 
     @Test
@@ -312,6 +360,7 @@ class AllianceAwareChatChannelAccessPolicyTest {
 
     private record Fixture(
             RecordingExecutor executor,
+            ActorSystem actors,
             SceneAllianceAwarenessAgent allianceAwareness,
             ChatChannelManager channels
     ) {
@@ -319,9 +368,32 @@ class AllianceAwareChatChannelAccessPolicyTest {
             return create(allianceId -> java.util.Optional.empty());
         }
 
+        private static Fixture createAsyncAccess() {
+            return create(allianceId -> java.util.Optional.empty(), true);
+        }
+
+        private static Fixture createAsyncAccessWithMailboxCapacity(int mailboxCapacity) {
+            return create(allianceId -> java.util.Optional.empty(), true, mailboxCapacity);
+        }
+
         private static Fixture create(com.commonbattle.game.social.AllianceSnapshotReader snapshotReader) {
+            return create(snapshotReader, false);
+        }
+
+        private static Fixture create(
+                com.commonbattle.game.social.AllianceSnapshotReader snapshotReader,
+                boolean asyncAccess
+        ) {
+            return create(snapshotReader, asyncAccess, com.commonbattle.actor.ActorSystemConfig.DEFAULT_MAILBOX_CAPACITY);
+        }
+
+        private static Fixture create(
+                com.commonbattle.game.social.AllianceSnapshotReader snapshotReader,
+                boolean asyncAccess,
+                int mailboxCapacity
+        ) {
             RecordingExecutor executor = new RecordingExecutor();
-            ActorSystem actors = new ActorSystem(executor, 64);
+            ActorSystem actors = new ActorSystem(executor, 64, mailboxCapacity);
             DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
             SceneAllianceAwarenessAgent allianceAwareness = new SceneAllianceAwarenessAgent(
                     messages,
@@ -352,8 +424,25 @@ class AllianceAwareChatChannelAccessPolicyTest {
                     ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
                     (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept()
             );
+            if (asyncAccess) {
+                AllianceAwareChatChannelAccessPolicy accessPolicy =
+                        new AllianceAwareChatChannelAccessPolicy(allianceAwareness);
+                channels = new ChatChannelManager(
+                        actors,
+                        messages,
+                        interests,
+                        accessPolicy,
+                        accessPolicy,
+                        messagePolicy,
+                        null,
+                        ChatDeliverySink.noop(),
+                        CLOCK,
+                        ChatRouteConfig.DEFAULT_MAX_HISTORY_MESSAGES,
+                        (target, operation) -> com.commonbattle.actor.backpressure.AdmissionDecision.accept()
+                );
+            }
             allianceAwareness.attachMembershipChanges(new ChatAllianceMembershipProjector(channels));
-            return new Fixture(executor, allianceAwareness, channels);
+            return new Fixture(executor, actors, allianceAwareness, channels);
         }
 
         private void refreshAlliance(long allianceId, long revision, Set<Long> members) {
@@ -378,6 +467,14 @@ class AllianceAwareChatChannelAccessPolicyTest {
             while (!commands.isEmpty()) {
                 commands.removeFirst().run();
             }
+        }
+
+        private void runNext() {
+            commands.removeFirst().run();
+        }
+
+        private int queued() {
+            return commands.size();
         }
     }
 

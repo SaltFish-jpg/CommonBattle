@@ -8,9 +8,15 @@ import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
 import com.commonbattle.actor.rpc.RpcRequest;
 import com.commonbattle.game.activity.ActivityCatalog;
+import com.commonbattle.game.activity.ActivityClaimResult;
 import com.commonbattle.game.activity.ActivityDefinition;
+import com.commonbattle.game.activity.ActivityEligibilityAsyncClient;
+import com.commonbattle.game.activity.ActivityEligibilityCallback;
+import com.commonbattle.game.activity.ActivityEligibilityDecision;
 import com.commonbattle.game.activity.ActivityService;
 import com.commonbattle.game.activity.ActivityType;
+import com.commonbattle.game.activity.AsyncActivityClaimResult;
+import com.commonbattle.game.activity.AsyncActivityClaimStatus;
 import com.commonbattle.game.bag.BagService;
 import com.commonbattle.game.bag.ItemCatalog;
 import com.commonbattle.game.bag.ItemDefinition;
@@ -57,6 +63,44 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlayerGameAgentTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+
+    @Test
+    void commandCommitsSnapshotBeforeFlushingClientPushes() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, CLOCK, Instant.EPOCH, pushes);
+        SerializedPlayerMutationRepository mutations = new SerializedPlayerMutationRepository(
+                new com.commonbattle.persistence.InMemoryAtomicBytesStore(),
+                new InMemoryPlayerStateRepository(),
+                new ProtostuffPlayerStateSnapshotSerializer()
+        );
+        agent.attachMutationRepository(mutations);
+
+        agent.onLogin("daily-login", ignored -> {
+        });
+        executor.runNext();
+
+        PlayerStateSnapshot committed = mutations.load(10001L).orElseThrow();
+        assertEquals(100, committed.bag().itemCounts().get("gold"));
+        assertEquals(1, committed.revision());
+        assertEquals(2, pushes.messages.size());
+    }
+
+    @Test
+    void failedAtomicCommitRestoresAggregateAndDropsStagedPushes() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, CLOCK, Instant.EPOCH, pushes);
+        agent.attachMutationRepository(new FailingMutationRepository());
+        AtomicReference<ActivityClaimResult> callbackResult = new AtomicReference<>();
+
+        agent.onLogin("daily-login", callbackResult::set);
+
+        executor.runNext();
+        assertEquals(0, agent.profile().bag().count("gold"));
+        assertEquals(List.of(), pushes.messages);
+        assertNull(callbackResult.get());
+    }
 
     @Test
     void loginActivityGrantsRewardIntoBagThroughPlayerMailbox() {
@@ -236,6 +280,62 @@ class PlayerGameAgentTest {
         });
         executor.runNext();
         assertEquals(5, agent.profile().bag().count("gem"));
+    }
+
+    @Test
+    void asyncActivityEligibilityClaimsRewardOnlyAfterPlayerMailboxRuns() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingPushPort pushes = new RecordingPushPort();
+        PlayerGameAgent agent = createAgent(executor, CLOCK, Instant.EPOCH, pushes);
+        RecordingActivityEligibilityClient eligibility = new RecordingActivityEligibilityClient();
+        AtomicReference<AsyncActivityClaimResult> result = new AtomicReference<>();
+        agent.addActivityProgress("kill-3", 3);
+        executor.runNext();
+        pushes.messages.clear();
+
+        agent.claimActivityAsync("kill-3", eligibility, result::set);
+
+        assertEquals(10001L, eligibility.playerId);
+        assertEquals("kill-3", eligibility.activityId);
+        assertNull(result.get());
+        assertEquals(0, executor.queued());
+
+        eligibility.callback.success(ActivityEligibilityDecision.allow());
+
+        assertNull(result.get());
+        assertEquals(1, executor.queued());
+        assertEquals(0, agent.profile().bag().count("gem"));
+
+        executor.runNext();
+
+        assertEquals(AsyncActivityClaimStatus.CLAIMED, result.get().status());
+        assertEquals(5, result.get().claim().orElseThrow().bagResult().changes().getFirst().after());
+        assertEquals(5, agent.profile().bag().count("gem"));
+        assertEquals(true, agent.profile().activities().progress("kill-3").claimed());
+        assertEquals(PlayerOutboundTopicPolicies.ACTIVITY_PROGRESS, pushes.messages.get(0).topic());
+        assertEquals(PlayerOutboundTopicPolicies.BAG_SNAPSHOT, pushes.messages.get(1).topic());
+    }
+
+    @Test
+    void asyncActivityEligibilityReportsBackpressureWhenPlayerMailboxIsFull() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64, 1);
+        PlayerGameAgent agent = createAgent(actors, executor, CLOCK, Instant.EPOCH, PlayerPushPort.NOOP);
+        RecordingActivityEligibilityClient eligibility = new RecordingActivityEligibilityClient();
+        AtomicReference<AsyncActivityClaimResult> result = new AtomicReference<>();
+        agent.addActivityProgress("kill-3", 3);
+        executor.runNext();
+
+        agent.claimActivityAsync("kill-3", eligibility, result::set);
+        actors.send(actors.actor("player-10001"), ignored -> {
+        });
+        eligibility.callback.success(ActivityEligibilityDecision.allow());
+
+        assertEquals(AsyncActivityClaimStatus.BACKPRESSURED, result.get().status());
+        assertEquals(0, agent.profile().bag().count("gem"));
+        assertEquals(false, agent.profile().activities().progress("kill-3").claimed());
+
+        executor.runNext();
     }
 
     @Test
@@ -780,6 +880,49 @@ class PlayerGameAgentTest {
         public PlayerOutboundDeliveryResult push(Set<Long> recipients, String topic, Object payload) {
             messages.add(new PushedMessage(Set.copyOf(recipients), topic, payload));
             return PlayerOutboundDeliveryResult.empty();
+        }
+    }
+
+    private static final class FailingMutationRepository implements PlayerMutationRepository {
+        @Override
+        public PlayerMutationRecord commit(
+                PlayerStateSnapshot snapshot,
+                List<com.commonbattle.game.player.event.PlayerDomainVersionedEvent> events
+        ) {
+            throw new IllegalStateException("mutation store unavailable");
+        }
+
+        @Override
+        public PlayerMutationRecord markEventEnqueued(long playerId, long eventRevision) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public java.util.Optional<PlayerMutationRecord> loadRecord(long playerId) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public java.util.Optional<PlayerStateSnapshot> load(Long key) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public void save(Long key, PlayerStateSnapshot snapshot) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class RecordingActivityEligibilityClient implements ActivityEligibilityAsyncClient {
+        private long playerId;
+        private String activityId;
+        private ActivityEligibilityCallback callback;
+
+        @Override
+        public void check(long playerId, String activityId, ActivityEligibilityCallback callback) {
+            this.playerId = playerId;
+            this.activityId = activityId;
+            this.callback = callback;
         }
     }
 

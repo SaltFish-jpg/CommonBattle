@@ -6,6 +6,8 @@ import com.commonbattle.actor.ActorScheduleKey;
 import com.commonbattle.actor.ActorScheduleRegistry;
 import com.commonbattle.actor.ActorSystem;
 import com.commonbattle.actor.ActorTimerHandle;
+import com.commonbattle.actor.agent.AgentIdentity;
+import com.commonbattle.actor.agent.lifecycle.AgentLifecycleManager;
 import com.commonbattle.cluster.ServiceDescriptor;
 import com.commonbattle.cluster.ServiceEndpoint;
 import com.commonbattle.cluster.ServiceId;
@@ -16,8 +18,10 @@ import com.commonbattle.game.scene.SceneRuntimeStats;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,6 +39,8 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     private final String sceneId;
     private final Clock clock;
     private final Map<Long, ScenePlacement> placementsByPlayer = new ConcurrentHashMap<>();
+    private final Map<Long, SceneChunk> chunksByPlayer = new ConcurrentHashMap<>();
+    private final Map<Long, PendingShardTransfer> pendingTransfersByPlayer = new ConcurrentHashMap<>();
     private final Map<Integer, Set<Long>> playersByShard = new ConcurrentHashMap<>();
     private final Map<Integer, SceneShardAoiRuntime> aoiByShard = new ConcurrentHashMap<>();
     private final Map<Long, Integer> hitPointsByPlayer = new ConcurrentHashMap<>();
@@ -42,6 +48,8 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     private final AtomicLong scheduledTickJobs = new AtomicLong();
     private final AtomicLong completedTicks = new AtomicLong();
     private final AtomicLong failedTicks = new AtomicLong();
+    private final AtomicLong failedShardTransfers = new AtomicLong();
+    private volatile AgentLifecycleManager lifecycles;
 
     public LargeSceneShardService(
             ActorSystem actors,
@@ -201,19 +209,83 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     }
 
     @Override
+    public synchronized void attachLifecycles(AgentLifecycleManager lifecycles) {
+        Objects.requireNonNull(lifecycles, "lifecycles");
+        if (this.lifecycles != null) {
+            if (this.lifecycles != lifecycles) {
+                throw new IllegalStateException("scene lifecycles already attached");
+            }
+            return;
+        }
+        for (int i = 0; i < shards.length; i++) {
+            lifecycles.activate(AgentIdentity.sceneShard(sceneId, i), shards[i].id());
+        }
+        this.lifecycles = lifecycles;
+    }
+
+    @Override
     public SceneRuntimeStats stats() {
         int activePlayers = placementsByPlayer.size();
         int maxShardPlayers = playersByShard.values().stream()
                 .mapToInt(Set::size)
                 .max()
                 .orElse(0);
-        return new SceneRuntimeStats(activePlayers == 0 ? 0 : 1, activePlayers, shards.length, maxShardPlayers);
+        return new SceneRuntimeStats(
+                activePlayers == 0 ? 0 : 1,
+                activePlayers,
+                shards.length,
+                maxShardPlayers,
+                pendingTransfersByPlayer.size(),
+                failedShardTransfers.get(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+        );
     }
 
     @Override
     public ScenePlacement place(String requestedSceneId, int chunkX, int chunkY) {
         LargeSceneShardRoute route = planner.route(requestedSceneId, chunkX, chunkY);
         return new ScenePlacement(sceneId, shards[route.shardIndex()], route.shardIndex(), route.shardCount());
+    }
+
+    @Override
+    public AgentIdentity routingIdentity(String requestedSceneId) {
+        planner.route(requestedSceneId, 0, 0);
+        return AgentIdentity.sceneShard(sceneId, 0);
+    }
+
+    @Override
+    public Optional<AgentIdentity> identityOfActor(String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return Optional.empty();
+        }
+        for (int i = 0; i < shards.length; i++) {
+            if (shards[i].id().equals(actorId)) {
+                return Optional.of(AgentIdentity.sceneShard(sceneId, i));
+            }
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public String migrationTargetActorId(AgentIdentity identity, ServiceId targetServiceId) {
+        LargeSceneShardAgentKey key = LargeSceneShardAgentKey.fromIdentity(identity);
+        return actorId(targetServiceId.node(), key.sceneId(), key.shardIndex());
     }
 
     public LargeSceneShardRoute route(String requestedSceneId, int chunkX, int chunkY) {
@@ -247,7 +319,9 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         if (placement == null) {
             return java.util.List.of();
         }
-        return aoi(placement.shardIndex()).visiblePlayers(playerId);
+        java.util.Set<Long> visible = new java.util.TreeSet<>(aoi(placement.shardIndex()).visiblePlayers(playerId));
+        visible.addAll(crossShardVisiblePlayers(playerId, placement));
+        return java.util.List.copyOf(visible);
     }
 
     public void registerCombatant(long playerId, int hitPoints) {
@@ -347,6 +421,47 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         return java.util.List.copyOf(handles);
     }
 
+    public int repairExpiredShardTransfers(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("timeout must not be negative");
+        }
+        Instant expiredBefore = clock.instant().minus(timeout);
+        int scheduledRepairs = 0;
+        for (PendingShardTransfer transfer : pendingTransfersByPlayer.values()) {
+            if (transfer.startedAt().isAfter(expiredBefore)) {
+                continue;
+            }
+            if (actors.trySend(transfer.previous.actor(), ignored -> rollbackExpiredShardTransfer(transfer))) {
+                scheduledRepairs++;
+            } else {
+                failedShardTransfers.incrementAndGet();
+            }
+        }
+        return scheduledRepairs;
+    }
+
+    public ActorTimerHandle scheduleShardTransferRepairs(
+            ActorScheduleRegistry schedules,
+            Duration initialDelay,
+            Duration interval,
+            Duration timeout
+    ) {
+        Objects.requireNonNull(schedules, "schedules");
+        Objects.requireNonNull(timeout, "timeout");
+        ActorScheduleKey key = new ActorScheduleKey(
+                "scene.shard.transfer.repair",
+                descriptor.id() + ":" + sceneId
+        );
+        return schedules.scheduleAtFixedRate(
+                key,
+                shards[0],
+                initialDelay,
+                interval,
+                ignored -> repairExpiredShardTransfers(timeout)
+        );
+    }
+
     @Override
     public ScenePlacement enter(long playerId, String requestedSceneId, int chunkX, int chunkY) {
         ScenePlacement next = place(requestedSceneId, chunkX, chunkY);
@@ -356,6 +471,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             aoi(previous.shardIndex()).leave(playerId);
         }
         playersByShard.computeIfAbsent(next.shardIndex(), ignored -> ConcurrentHashMap.newKeySet()).add(playerId);
+        chunksByPlayer.put(playerId, new SceneChunk(chunkX, chunkY));
         SceneAoiChangeSet aoiChange = aoi(next.shardIndex()).enter(playerId, chunkX, chunkY);
         publishEnter(playerId, next, chunkX, chunkY, aoiChange);
         return next;
@@ -395,6 +511,8 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             return false;
         }
         hitPointsByPlayer.remove(playerId);
+        chunksByPlayer.remove(playerId);
+        pendingTransfersByPlayer.remove(playerId);
         Set<Long> players = playersByShard.get(previous.shardIndex());
         if (players != null) {
             players.remove(playerId);
@@ -452,6 +570,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
         } else {
             aoiChange = aoi(next.shardIndex()).move(playerId, chunkX, chunkY);
         }
+        chunksByPlayer.put(playerId, new SceneChunk(chunkX, chunkY));
         publishMove(playerId, next, chunkX, chunkY, aoiChange);
         return new SceneMoveOutcome(
                 sceneId,
@@ -484,10 +603,30 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             callback.accept(SceneMoveOutcome.rejected(requestedSceneId, chunkX, chunkY));
             return;
         }
-        actorsSend(placement.actor(), () -> {
-            ActorContext.requireCurrent(placement.actor());
-            callback.accept(move(playerId, requestedSceneId, chunkX, chunkY));
-        }, failure);
+        ScenePlacement next;
+        try {
+            next = place(requestedSceneId, chunkX, chunkY);
+        } catch (RuntimeException e) {
+            failure.accept(e);
+            return;
+        }
+        if (placement.shardIndex() == next.shardIndex()) {
+            actorsSend(placement.actor(), () -> {
+                ActorContext.requireCurrent(placement.actor());
+                callback.accept(move(playerId, requestedSceneId, chunkX, chunkY));
+            }, failure);
+            return;
+        }
+        actorsSend(placement.actor(), () -> moveAcrossShardFromSource(
+                playerId,
+                requestedSceneId,
+                chunkX,
+                chunkY,
+                placement,
+                next,
+                callback,
+                failure
+        ), failure);
     }
 
     public SceneCombatDamageOutcome applyDamage(long attackerId, long targetId, int damage) {
@@ -537,10 +676,54 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             callback.accept(SceneCombatDamageOutcome.rejected(sceneId, attackerId, targetId));
             return;
         }
-        actorsSend(placement.actor(), () -> {
-            ActorContext.requireCurrent(placement.actor());
-            callback.accept(applyDamage(attackerId, targetId, damage));
+        ScenePlacement targetPlacement = placementsByPlayer.get(targetId);
+        if (targetPlacement == null) {
+            callback.accept(SceneCombatDamageOutcome.rejected(sceneId, attackerId, targetId));
+            return;
+        }
+        if (placement.shardIndex() == targetPlacement.shardIndex()) {
+            actorsSend(placement.actor(), () -> {
+                ActorContext.requireCurrent(placement.actor());
+                callback.accept(applyDamage(attackerId, targetId, damage));
+            }, failure);
+            return;
+        }
+        actorsSend(targetPlacement.actor(), () -> {
+            ActorContext.requireCurrent(targetPlacement.actor());
+            callback.accept(applyCrossShardDamageOnTarget(attackerId, targetId, damage, targetPlacement));
         }, failure);
+    }
+
+    private SceneCombatDamageOutcome applyCrossShardDamageOnTarget(
+            long attackerId,
+            long targetId,
+            int damage,
+            ScenePlacement expectedTargetPlacement
+    ) {
+        ScenePlacement attacker = placementsByPlayer.get(attackerId);
+        ScenePlacement target = placementsByPlayer.get(targetId);
+        if (attacker == null || target == null || target.shardIndex() != expectedTargetPlacement.shardIndex()
+                || !visiblePlayers(attackerId).contains(targetId)) {
+            return SceneCombatDamageOutcome.rejected(sceneId, attackerId, targetId);
+        }
+        Integer hpBefore = hitPointsByPlayer.get(targetId);
+        if (hpBefore == null || hpBefore <= 0) {
+            return SceneCombatDamageOutcome.rejected(sceneId, attackerId, targetId);
+        }
+        int hpAfter = Math.max(0, hpBefore - damage);
+        hitPointsByPlayer.put(targetId, hpAfter);
+        SceneCombatDamageOutcome outcome = new SceneCombatDamageOutcome(
+                sceneId,
+                attackerId,
+                targetId,
+                target.shardIndex(),
+                damage,
+                hpBefore,
+                hpAfter,
+                true
+        );
+        publishCombatDamage(outcome);
+        return outcome;
     }
 
     private void publishCombatDamage(SceneCombatDamageOutcome outcome) {
@@ -561,7 +744,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     }
 
     private void publishEnter(long playerId, ScenePlacement placement, int chunkX, int chunkY, SceneAoiChangeSet aoi) {
-        publish(aoi.observerEnter(), new SceneBroadcastEvent(
+        publish(merge(aoi.observerEnter(), crossShardVisiblePlayers(playerId, placement)), new SceneBroadcastEvent(
                 SceneBroadcastEventType.ENTER_VIEW,
                 sceneId,
                 playerId,
@@ -572,7 +755,7 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
     }
 
     private void publishLeave(long playerId, ScenePlacement placement, SceneAoiChangeSet aoi) {
-        publish(aoi.observerLeave(), new SceneBroadcastEvent(
+        publish(merge(aoi.observerLeave(), crossShardVisiblePlayers(playerId, placement)), new SceneBroadcastEvent(
                 SceneBroadcastEventType.LEAVE_VIEW,
                 sceneId,
                 playerId,
@@ -614,6 +797,133 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
             return;
         }
         broadcastSink.publish(new SceneBroadcastEnvelope(Set.copyOf(recipients), event));
+    }
+
+    private java.util.List<Long> crossShardVisiblePlayers(long playerId, ScenePlacement placement) {
+        SceneChunk chunk = chunksByPlayer.get(playerId);
+        if (chunk == null) {
+            return java.util.List.of();
+        }
+        int viewRange = Math.max(1, planner.chunkSize());
+        return chunksByPlayer.entrySet().stream()
+                .filter(entry -> entry.getKey() != playerId)
+                .filter(entry -> {
+                    ScenePlacement otherPlacement = placementsByPlayer.get(entry.getKey());
+                    return otherPlacement != null && otherPlacement.shardIndex() != placement.shardIndex();
+                })
+                .filter(entry -> chunk.visible(entry.getValue(), viewRange))
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+    }
+
+    private static java.util.List<Long> merge(java.util.Collection<Long> first, java.util.Collection<Long> second) {
+        if (first.isEmpty()) {
+            return second.stream().sorted().toList();
+        }
+        if (second.isEmpty()) {
+            return first.stream().sorted().toList();
+        }
+        java.util.Set<Long> merged = new java.util.TreeSet<>(first);
+        merged.addAll(second);
+        return java.util.List.copyOf(merged);
+    }
+
+    private void moveAcrossShardFromSource(
+            long playerId,
+            String requestedSceneId,
+            int chunkX,
+            int chunkY,
+            ScenePlacement previous,
+            ScenePlacement next,
+            Consumer<SceneMoveOutcome> callback,
+            Consumer<Throwable> failure
+    ) {
+        ActorContext.requireCurrent(previous.actor());
+        ScenePlacement current = placementsByPlayer.get(playerId);
+        if (current == null || !sceneId.equals(requestedSceneId) || current.shardIndex() != previous.shardIndex()) {
+            callback.accept(SceneMoveOutcome.rejected(requestedSceneId, chunkX, chunkY));
+            return;
+        }
+        SceneChunk previousChunk = chunksByPlayer.get(playerId);
+        if (previousChunk == null) {
+            callback.accept(SceneMoveOutcome.rejected(requestedSceneId, chunkX, chunkY));
+            return;
+        }
+        PendingShardTransfer transfer = new PendingShardTransfer(playerId, previous, previousChunk, next,
+                new SceneChunk(chunkX, chunkY), clock.instant());
+        if (pendingTransfersByPlayer.putIfAbsent(playerId, transfer) != null) {
+            callback.accept(SceneMoveOutcome.rejected(requestedSceneId, chunkX, chunkY));
+            return;
+        }
+        removeFromShard(playerId, previous.shardIndex());
+        SceneAoiChangeSet leave = aoi(previous.shardIndex()).leave(playerId);
+        // 跨 shard 转移分两段投递：旧 shard 只移除本地状态，新 shard 在自己的 mailbox 内接管玩家。
+        try {
+            actors.send(next.actor(), ignored -> commitMoveAcrossShardOnTarget(
+                    transfer,
+                    requestedSceneId,
+                    leave,
+                    callback
+            ));
+        } catch (RuntimeException e) {
+            rollbackMoveAcrossShardOnSource(transfer);
+            failedShardTransfers.incrementAndGet();
+            failure.accept(e);
+        }
+    }
+
+    private void commitMoveAcrossShardOnTarget(
+            PendingShardTransfer transfer,
+            String requestedSceneId,
+            SceneAoiChangeSet leave,
+            Consumer<SceneMoveOutcome> callback
+    ) {
+        ActorContext.requireCurrent(transfer.next.actor());
+        PendingShardTransfer currentTransfer = pendingTransfersByPlayer.remove(transfer.playerId);
+        if (!transfer.equals(currentTransfer)) {
+            callback.accept(SceneMoveOutcome.rejected(requestedSceneId, transfer.nextChunk.x, transfer.nextChunk.y));
+            return;
+        }
+        placementsByPlayer.put(transfer.playerId, transfer.next);
+        chunksByPlayer.put(transfer.playerId, transfer.nextChunk);
+        playersByShard.computeIfAbsent(transfer.next.shardIndex(), ignored -> ConcurrentHashMap.newKeySet())
+                .add(transfer.playerId);
+        SceneAoiChangeSet enter = aoi(transfer.next.shardIndex())
+                .enter(transfer.playerId, transfer.nextChunk.x, transfer.nextChunk.y);
+        SceneAoiChangeSet aoiChange = leave.plus(enter);
+        publishMove(transfer.playerId, transfer.next, transfer.nextChunk.x, transfer.nextChunk.y, aoiChange);
+        callback.accept(new SceneMoveOutcome(
+                sceneId,
+                transfer.nextChunk.x,
+                transfer.nextChunk.y,
+                transfer.previous.shardIndex(),
+                transfer.next.shardIndex(),
+                true,
+                aoiChange
+        ));
+    }
+
+    private void rollbackMoveAcrossShardOnSource(PendingShardTransfer transfer) {
+        pendingTransfersByPlayer.remove(transfer.playerId, transfer);
+        placementsByPlayer.put(transfer.playerId, transfer.previous);
+        chunksByPlayer.put(transfer.playerId, transfer.previousChunk);
+        playersByShard.computeIfAbsent(transfer.previous.shardIndex(), ignored -> ConcurrentHashMap.newKeySet())
+                .add(transfer.playerId);
+        aoi(transfer.previous.shardIndex()).enter(
+                transfer.playerId,
+                transfer.previousChunk.x,
+                transfer.previousChunk.y
+        );
+    }
+
+    private void rollbackExpiredShardTransfer(PendingShardTransfer transfer) {
+        ActorContext.requireCurrent(transfer.previous.actor());
+        if (!pendingTransfersByPlayer.remove(transfer.playerId, transfer)) {
+            return;
+        }
+        failedShardTransfers.incrementAndGet();
+        rollbackMoveAcrossShardOnSource(transfer);
     }
 
     private SceneShardAoiRuntime aoi(int shardIndex) {
@@ -686,5 +996,21 @@ public final class LargeSceneShardService implements SceneServiceStrategy {
 
     private static String actorId(String node, String sceneId, int shardIndex) {
         return "scene:" + node + ":" + sceneId + ":shard-" + shardIndex;
+    }
+
+    private record SceneChunk(int x, int y) {
+        private boolean visible(SceneChunk other, int range) {
+            return Math.abs(x - other.x) <= range && Math.abs(y - other.y) <= range;
+        }
+    }
+
+    private record PendingShardTransfer(
+            long playerId,
+            ScenePlacement previous,
+            SceneChunk previousChunk,
+            ScenePlacement next,
+            SceneChunk nextChunk,
+            Instant startedAt
+    ) {
     }
 }

@@ -9,6 +9,8 @@ import com.commonbattle.actor.agent.migration.AgentMigrationTaskStoreStats;
 import com.commonbattle.actor.agent.migration.AgentMigrationTaskRetentionStats;
 import com.commonbattle.cluster.rpc.RpcGatewayStats;
 import com.commonbattle.game.session.PlayerCommandStats;
+import com.commonbattle.game.player.PlayerMutationRepositoryStats;
+import com.commonbattle.game.player.PlayerMutationReplaySchedulerStats;
 
 import java.time.Instant;
 import java.util.List;
@@ -30,6 +32,7 @@ public record RuntimeHealthSnapshot(
         RpcResilienceHealthStats rpcResilience,
         RpcRouteHealthStats rpcRoutes,
         ActorRpcHealthStats actorRpc,
+        AgentMessagePortHealthStats agentMessagePorts,
         BusinessAgentMessageHealthStats businessAgentMessages,
         BusinessAgentRpcEndpointHealthStats businessAgentRpcEndpoints,
         PlayerCommandStats commands,
@@ -39,14 +42,18 @@ public record RuntimeHealthSnapshot(
         PlayerOutboundDeliveryHealthStats playerOutboundDeliveries,
         PlayerGatewayHealthStats playerGateways,
         AsyncShopPurchaseHealthStats asyncShopPurchases,
+        AsyncBusinessCommandHealthStats asyncBusinessCommands,
         AgentLifecycleStats agents,
         PlayerAgentHealthStats playerAgents,
         AgentMigrationCoordinatorStats agentMigrations,
+        PlayerAgentMigrationRetryHealthStats playerAgentMigrationRetries,
         AgentMigrationExecutorStats agentMigrationExecutors,
         AgentMigrationRecoveryStats agentMigrationRecoveries,
         AgentMigrationRecoverySchedulerStats agentMigrationRecoverySchedulers,
         AgentMigrationTaskRetentionStats agentMigrationTaskRetentions,
         AgentMigrationTaskStoreStats agentMigrationTaskStores,
+        PlayerMutationRepositoryStats playerMutations,
+        PlayerMutationReplaySchedulerStats playerMutationReplays,
         EventOutboxStats outbox,
         ClusterServiceStats cluster,
         RegistryLeaseHealthStats registryLeases,

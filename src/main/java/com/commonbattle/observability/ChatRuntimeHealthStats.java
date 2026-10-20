@@ -1,6 +1,7 @@
 package com.commonbattle.observability;
 
 import com.commonbattle.game.chat.ChatServiceStats;
+import com.commonbattle.game.chat.ChatPersistenceStats;
 
 /**
  * Chat 运行时聚合健康统计。
@@ -21,10 +22,22 @@ public record ChatRuntimeHealthStats(
         long failedDeliveryRecipients,
         long allianceRemovedMembers,
         long allianceEventRemovedMembers,
-        long allianceSnapshotRemovedMembers
+        long allianceSnapshotRemovedMembers,
+        long asyncMessageChecks,
+        long asyncMessageSentDecisions,
+        long asyncMessageRejectedDecisions,
+        long asyncMessageBackpressuredDecisions,
+        long asyncMessageCallbackDeliveryFailures,
+        long asyncAccessChecks,
+        long asyncAccessAllowedDecisions,
+        long asyncAccessRejectedDecisions,
+        long asyncAccessBackpressuredDecisions,
+        long asyncAccessCallbackDeliveryFailures,
+        ChatPersistenceStats persistence
 ) {
     public static ChatRuntimeHealthStats empty() {
-        return new ChatRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new ChatRuntimeHealthStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ChatPersistenceStats.empty());
     }
 
     public static ChatRuntimeHealthStats from(int runtimeCount, ChatServiceStats stats) {
@@ -44,7 +57,18 @@ public record ChatRuntimeHealthStats(
                 stats.failedDeliveryRecipients(),
                 stats.allianceRemovedMembers(),
                 stats.allianceEventRemovedMembers(),
-                stats.allianceSnapshotRemovedMembers()
+                stats.allianceSnapshotRemovedMembers(),
+                stats.asyncMessageChecks(),
+                stats.asyncMessageSentDecisions(),
+                stats.asyncMessageRejectedDecisions(),
+                stats.asyncMessageBackpressuredDecisions(),
+                stats.asyncMessageCallbackDeliveryFailures(),
+                stats.asyncAccessChecks(),
+                stats.asyncAccessAllowedDecisions(),
+                stats.asyncAccessRejectedDecisions(),
+                stats.asyncAccessBackpressuredDecisions(),
+                stats.asyncAccessCallbackDeliveryFailures(),
+                stats.persistence()
         );
     }
 }

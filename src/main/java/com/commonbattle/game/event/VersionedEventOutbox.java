@@ -1,5 +1,6 @@
 package com.commonbattle.game.event;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -11,7 +12,36 @@ public interface VersionedEventOutbox {
 
     List<PendingVersionedEvent> pending();
 
+    default List<PendingVersionedEvent> ready(Instant now, int limit) {
+        return pending().stream()
+                .filter(entry -> !entry.nextAttemptAt().isAfter(now))
+                .limit(limit)
+                .toList();
+    }
+
+    default List<DeadLetteredVersionedEvent> deadLetters() {
+        return List.of();
+    }
+
     void markPublished(long outboxId);
 
+    default OutboxFailureResult markAttemptFailed(
+            long outboxId,
+            Throwable failure,
+            Instant failedAt,
+            Instant nextAttemptAt,
+            int maxAttempts
+    ) {
+        markAttemptFailed(outboxId);
+        return OutboxFailureResult.RETRY_SCHEDULED;
+    }
+
+    /**
+     * 兼容旧实现的立即重试标记；新代码应传入失败原因和退避时间。
+     */
     void markAttemptFailed(long outboxId);
+
+    default boolean redriveDeadLetter(long outboxId, Instant nextAttemptAt) {
+        return false;
+    }
 }

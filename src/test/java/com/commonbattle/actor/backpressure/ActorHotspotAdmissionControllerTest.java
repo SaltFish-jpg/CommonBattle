@@ -7,6 +7,7 @@ import com.commonbattle.actor.ActorTask;
 import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.agent.AgentIdentity;
 import com.commonbattle.observability.ActorHotspotPolicy;
+import com.commonbattle.observability.ActorHotspotReason;
 import com.commonbattle.observability.InMemoryActorSlowTaskLog;
 import org.junit.jupiter.api.Test;
 
@@ -56,6 +57,34 @@ class ActorHotspotAdmissionControllerTest {
         assertEquals(1, stats.rejectedByTargetType().get(AgentIdentity.PLAYER));
         assertEquals(1, stats.rejectedByActorGroup().get("player"));
         assertEquals(1, stats.rejectedByReason().get(ActorHotspotAdmissionController.THROTTLE_REASON));
+        assertEquals(1, stats.rejectedByHotspotReason().get(ActorHotspotReason.QUEUE_BACKLOG.name()));
+    }
+
+    @Test
+    void rejectsTargetWhenMailboxKeepsYieldingByBatch() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 2);
+        ActorRef actor = actors.actor("player-10004");
+        for (int i = 0; i < 5; i++) {
+            actors.send(actor, ActorTask.categorized(ActorTaskCategory.PLAYER_COMMAND, ignored -> {
+            }));
+        }
+        executor.runNext();
+        ActorHotspotAdmissionController controller = new ActorHotspotAdmissionController(
+                (target, operation) -> AdmissionDecision.accept(),
+                actors,
+                List.of(),
+                new ActorHotspotPolicy(1, 10, 100, 2, 5, 100, 500, 1, 3),
+                Duration.ofMillis(75)
+        );
+
+        AdmissionDecision decision = controller.admit(AgentIdentity.player(10004L), "activity.claim");
+
+        assertFalse(decision.accepted());
+        assertEquals(ActorHotspotAdmissionController.THROTTLE_REASON, decision.reason());
+        ActorHotspotAdmissionStats stats = controller.hotspotAdmissionStats();
+        assertEquals(1, stats.throttleRejected());
+        assertEquals(1, stats.rejectedByHotspotReason().get(ActorHotspotReason.MAILBOX_BATCH_YIELD.name()));
     }
 
     @Test
@@ -177,6 +206,10 @@ class ActorHotspotAdmissionControllerTest {
         @Override
         public void execute(Runnable command) {
             commands.add(command);
+        }
+
+        private void runNext() {
+            commands.removeFirst().run();
         }
     }
 

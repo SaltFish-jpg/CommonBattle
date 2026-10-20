@@ -2,6 +2,7 @@ package com.commonbattle.game.chat;
 
 import com.commonbattle.game.social.AllianceMemberChangedEvent;
 import com.commonbattle.game.social.FriendChangedEvent;
+import com.commonbattle.runtime.DrainableComponent;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -11,7 +12,7 @@ import java.util.function.Consumer;
  * 游戏语义层 Chat 路由服务。
  * 对外暴露世界、联盟、私聊，内部把它们稳定映射到对应业务实体 Actor。
  */
-public final class RoutedChatService implements ChatRuntimeView {
+public final class RoutedChatService implements ChatRuntimeView, DrainableComponent {
     private final ChatChannelManager channels;
     private final DirectChatSessionManager directSessions;
     private final ChatRouteConfig config;
@@ -131,5 +132,22 @@ public final class RoutedChatService implements ChatRuntimeView {
         return Optional.ofNullable(accessControl)
                 .map(control -> stats.withAccessRejects(control.mutedRejects(), control.blockedRejects()))
                 .orElse(stats);
+    }
+
+    @Override
+    public void beginDrain() {
+        channels.beginDrain();
+        directSessions.beginDrain();
+    }
+
+    @Override
+    public void resumeAccepting() {
+        channels.resumeAccepting();
+        directSessions.resumeAccepting();
+    }
+
+    @Override
+    public boolean isDraining() {
+        return channels.isDraining() || directSessions.isDraining();
     }
 }

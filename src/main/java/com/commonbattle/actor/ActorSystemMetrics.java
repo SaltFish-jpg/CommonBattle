@@ -13,6 +13,13 @@ final class ActorSystemMetrics {
     private final LongAdder rejectedTasks = new LongAdder();
     private final LongAdder droppedTasks = new LongAdder();
     private final LongAdder slowTasks = new LongAdder();
+    private final LongAdder mailboxDrainCycles = new LongAdder();
+    private final LongAdder mailboxDrainProcessedTasks = new LongAdder();
+    private final LongAdder mailboxBatchYields = new LongAdder();
+    private final LongAdder schedulerRejectedMailboxes = new LongAdder();
+    private final LongAdder schedulerRejectedTasks = new LongAdder();
+    private final LongAdder retiredMailboxes = new LongAdder();
+    private final LongAdder retiredQueuedTasks = new LongAdder();
     private final EnumMap<ActorTaskCategory, LongAdder> rejectedTasksByCategory =
             new EnumMap<>(ActorTaskCategory.class);
     private final EnumMap<ActorTaskCategory, LongAdder> droppedTasksByCategory =
@@ -21,6 +28,7 @@ final class ActorSystemMetrics {
     private final AtomicInteger runningMailboxes = new AtomicInteger();
     private final AtomicInteger peakQueuedTasks = new AtomicInteger();
     private final AtomicInteger peakRunningMailboxes = new AtomicInteger();
+    private final AtomicInteger maxTasksPerMailboxDrain = new AtomicInteger();
     private final AtomicLong slowestTaskNanos = new AtomicLong();
     private volatile String slowestTaskActorId = "";
     private volatile ActorTaskCategory slowestTaskCategory = ActorTaskCategory.DEFAULT;
@@ -83,7 +91,33 @@ final class ActorSystemMetrics {
         runningMailboxes.decrementAndGet();
     }
 
+    void schedulerRejectedMailbox() {
+        schedulerRejectedMailboxes.increment();
+    }
+
+    void schedulerRejectedTask() {
+        schedulerRejectedTasks.increment();
+    }
+
+    void mailboxRetired() {
+        retiredMailboxes.increment();
+    }
+
+    void retiredQueuedTask() {
+        retiredQueuedTasks.increment();
+    }
+
+    void mailboxDrained(int processedTasks, boolean yieldedByBatch) {
+        mailboxDrainCycles.increment();
+        mailboxDrainProcessedTasks.add(processedTasks);
+        updatePeak(maxTasksPerMailboxDrain, processedTasks);
+        if (yieldedByBatch) {
+            mailboxBatchYields.increment();
+        }
+    }
+
     ActorSystemStats snapshot(
+            int registeredMailboxes,
             int activeMailboxes,
             int largestMailboxQueuedTasks,
             String largestMailboxActorId,
@@ -97,6 +131,7 @@ final class ActorSystemMetrics {
                 droppedTasks.sum(),
                 queuedTasks.get(),
                 runningMailboxes.get(),
+                registeredMailboxes,
                 activeMailboxes,
                 largestMailboxQueuedTasks,
                 largestMailboxActorId,
@@ -106,6 +141,14 @@ final class ActorSystemMetrics {
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(slowestTaskNanos.get()),
                 slowestTaskActorId,
                 slowestTaskCategory,
+                mailboxDrainCycles.sum(),
+                mailboxDrainProcessedTasks.sum(),
+                maxTasksPerMailboxDrain.get(),
+                mailboxBatchYields.sum(),
+                schedulerRejectedMailboxes.sum(),
+                schedulerRejectedTasks.sum(),
+                retiredMailboxes.sum(),
+                retiredQueuedTasks.sum(),
                 Map.copyOf(queuedTasksByCategory),
                 sumByCategory(rejectedTasksByCategory),
                 sumByCategory(droppedTasksByCategory)

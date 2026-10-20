@@ -1,5 +1,6 @@
 package com.commonbattle.game.event;
 
+import java.time.Clock;
 import java.util.Objects;
 import java.util.function.Consumer;
 
@@ -34,6 +35,21 @@ public final class ReliableSnapshotEventPublisher<S, E extends VersionedEvent> i
         this.snapshotWriter = Objects.requireNonNull(snapshotWriter, "snapshotWriter");
         this.afterSnapshotSaved = Objects.requireNonNull(afterSnapshotSaved, "afterSnapshotSaved");
         this.reliablePublisher = new ReliableVersionedEventPublisher(outbox, delegate);
+    }
+
+    public ReliableSnapshotEventPublisher(
+            Class<E> eventType,
+            Consumer<S> snapshotWriter,
+            Consumer<S> afterSnapshotSaved,
+            VersionedEventOutbox outbox,
+            EventPublisher delegate,
+            VersionedEventRetryPolicy retryPolicy,
+            Clock clock
+    ) {
+        this.eventType = Objects.requireNonNull(eventType, "eventType");
+        this.snapshotWriter = Objects.requireNonNull(snapshotWriter, "snapshotWriter");
+        this.afterSnapshotSaved = Objects.requireNonNull(afterSnapshotSaved, "afterSnapshotSaved");
+        this.reliablePublisher = new ReliableVersionedEventPublisher(outbox, delegate, retryPolicy, clock);
     }
 
     @Override

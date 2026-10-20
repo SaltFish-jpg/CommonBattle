@@ -158,6 +158,32 @@ class RoutedChatServiceTest {
     }
 
     @Test
+    void drainRejectsNewIngressAndResumeReopensIt() {
+        Fixture fixture = Fixture.create(new ChatRouteConfig(4));
+        AtomicReference<ChatJoinResult> joined = new AtomicReference<>();
+        AtomicReference<ChatLeaveResult> left = new AtomicReference<>();
+        AtomicReference<ChatSendResult> direct = new AtomicReference<>();
+
+        fixture.chat.beginDrain();
+        fixture.chat.joinWorld(new WorldChatJoinRequest("r1", 10001L, 900L), joined::set);
+        fixture.chat.leaveWorld(new WorldChatLeaveRequest("r1", 10001L), left::set);
+        fixture.chat.sendDirect(new DirectChatSendRequest(10001L, 10002L, "private", 0), direct::set);
+
+        assertEquals(ChatJoinStatus.BACKPRESSURED, joined.get().status());
+        assertEquals(ChatLeaveStatus.BACKPRESSURED, left.get().status());
+        assertEquals(ChatSendStatus.BACKPRESSURED, direct.get().status());
+        assertEquals(0, fixture.channels.stats().activeChannels());
+        assertEquals(0, fixture.directSessions.activeSessions());
+
+        fixture.chat.resumeAccepting();
+        joined.set(null);
+        fixture.chat.joinWorld(new WorldChatJoinRequest("r1", 10001L, 900L), joined::set);
+        fixture.executor.runAll();
+
+        assertEquals(ChatJoinStatus.JOINED, joined.get().status());
+    }
+
+    @Test
     void slowConsumerQueueDropsOldestDelivery() {
         BoundedInMemoryChatDeliverySink sink = new BoundedInMemoryChatDeliverySink(
                 2,

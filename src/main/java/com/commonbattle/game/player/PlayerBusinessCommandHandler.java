@@ -2,6 +2,7 @@ package com.commonbattle.game.player;
 
 import com.commonbattle.actor.ActorContext;
 import com.commonbattle.game.GameBusinessResultStatus;
+import com.commonbattle.game.activity.ActivityEligibilityAsyncClient;
 import com.commonbattle.game.session.PlayerCommand;
 import com.commonbattle.game.session.PlayerCommandAuditContext;
 import com.commonbattle.game.session.PlayerCommandHandler;
@@ -16,20 +17,31 @@ import java.util.function.LongFunction;
 public final class PlayerBusinessCommandHandler implements PlayerCommandHandler {
     private final LongFunction<PlayerGameAgent> agents;
     private final PlayerBusinessResultSink results;
+    private final ActivityEligibilityAsyncClient activityEligibility;
 
     public PlayerBusinessCommandHandler(LongFunction<PlayerGameAgent> agents) {
         this(agents, PlayerBusinessResultSink.NOOP);
     }
 
     public PlayerBusinessCommandHandler(LongFunction<PlayerGameAgent> agents, PlayerBusinessResultSink results) {
+        this(agents, results, null);
+    }
+
+    public PlayerBusinessCommandHandler(
+            LongFunction<PlayerGameAgent> agents,
+            PlayerBusinessResultSink results,
+            ActivityEligibilityAsyncClient activityEligibility
+    ) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.results = Objects.requireNonNull(results, "results");
+        this.activityEligibility = activityEligibility;
     }
 
     @Override
     public void handle(ActorContext context, PlayerCommand command) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(command, "command");
+        PlayerGameAgent agent = null;
         try {
             if (!(command.payload() instanceof PlayerBusinessCommand<?> businessCommand)) {
                 throw new IllegalArgumentException("payload must be PlayerBusinessCommand");
@@ -37,17 +49,26 @@ public final class PlayerBusinessCommandHandler implements PlayerCommandHandler 
             if (!command.operation().equals(businessCommand.operation())) {
                 throw new IllegalArgumentException("player command operation does not match payload");
             }
-            PlayerGameAgent agent = Objects.requireNonNull(agents.apply(command.playerId()), "player agent");
+            agent = Objects.requireNonNull(agents.apply(command.playerId()), "player agent");
+            if (businessCommand instanceof ClaimActivityAsyncCommand asyncActivity) {
+                if (activityEligibility == null) {
+                    throw new IllegalStateException("activity eligibility async client is not available");
+                }
+                agent.claimActivityAsync(command, asyncActivity.activityId(), activityEligibility, results);
+                return;
+            }
             if (businessCommand instanceof AsyncPlayerBusinessCommand<?> asyncCommand) {
                 asyncCommand.executeAsync(agent, command, results);
                 return;
             }
-            Object response = agent.executeBusiness(businessCommand);
-            PlayerBusinessResponse envelope = PlayerBusinessResponse.success(command, response);
+            PlayerBusinessResponse envelope = agent.executeBusiness(command, businessCommand);
             recordAuditResult(envelope);
             results.completed(command, envelope);
         } catch (RuntimeException | Error e) {
             PlayerBusinessResponse envelope = PlayerBusinessResponse.failure(command, e);
+            if (agent != null) {
+                agent.commitBusinessResponse(envelope);
+            }
             recordAuditResult(envelope);
             results.completed(command, envelope);
             throw e;

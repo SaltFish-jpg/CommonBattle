@@ -170,6 +170,44 @@ class CenterRegistryEndpointTest {
     }
 
     @Test
+    void remoteRegistryFallsBackToSnapshotWhenCenterVersionResetsAfterRestart() {
+        LocalClusterTransport transport = new LocalClusterTransport();
+        ClusterTopology topology = ClusterTopology.defaultCrossServer();
+        ServiceDescriptor center = descriptor(ServiceKind.CENTER, "center-1", 9000, Set.of(
+                RegistryOperations.REGISTER,
+                RegistryOperations.HEARTBEAT,
+                RegistryOperations.UNREGISTER,
+                RegistryOperations.LIST,
+                RegistryOperations.SUBSCRIBE,
+                RegistryOperations.UNSUBSCRIBE,
+                RegistryOperations.REPLAY
+        ));
+        ServiceDescriptor game = descriptor(ServiceKind.GAME, "game-1", 9001, Set.of("game.resume"));
+        ServiceDescriptor scene = descriptor(ServiceKind.SCENE, "scene-1", 9002, Set.of(SceneOperations.ENTER));
+
+        InMemoryServiceRegistry firstCenterStorage = new InMemoryServiceRegistry();
+        firstCenterStorage.register(center);
+        bindCenter(center, firstCenterStorage, topology, transport);
+        ClusterDirectory gameDirectory = new ClusterDirectory(new InMemoryServiceRegistry());
+        gameDirectory.seed(center);
+        ClusterRpcGateway gameGateway = new ClusterRpcGateway(game, gameDirectory, topology, transport);
+        RemoteServiceRegistry gameRegistry = new RemoteServiceRegistry(game.id(), gameGateway, gameDirectory);
+        gameRegistry.register(game);
+        gameRegistry.subscribe(ServiceKind.SCENE, event -> {
+        });
+        firstCenterStorage.register(scene);
+        assertEquals(List.of(scene), gameRegistry.list(ServiceKind.SCENE));
+
+        InMemoryServiceRegistry restartedCenterStorage = new InMemoryServiceRegistry();
+        restartedCenterStorage.register(center);
+        bindCenter(center, restartedCenterStorage, topology, transport);
+
+        assertEquals(1, gameRegistry.recoverSubscriptions());
+        assertEquals(List.of(), gameRegistry.list(ServiceKind.SCENE));
+        assertEquals(restartedCenterStorage.version(), gameDirectory.version(ServiceKind.SCENE));
+    }
+
+    @Test
     void remoteRegistryUnsubscribeStopsFutureRegistryEvents() throws Exception {
         LocalClusterTransport transport = new LocalClusterTransport();
         ClusterTopology topology = ClusterTopology.defaultCrossServer();
@@ -347,6 +385,21 @@ class CenterRegistryEndpointTest {
             directory.watch(kind);
         }
         return directory;
+    }
+
+    private static void bindCenter(
+            ServiceDescriptor center,
+            InMemoryServiceRegistry storage,
+            ClusterTopology topology,
+            ClusterTransport transport
+    ) {
+        ClusterRpcGateway gateway = new ClusterRpcGateway(
+                center,
+                watchedDirectory(storage),
+                topology,
+                transport
+        );
+        new CenterRegistryEndpoint(center, storage, transport, gateway);
     }
 
     private static RemoteServiceRegistry remoteRegistry(

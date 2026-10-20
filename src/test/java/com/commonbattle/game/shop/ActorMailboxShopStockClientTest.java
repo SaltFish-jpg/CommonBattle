@@ -1,7 +1,10 @@
 package com.commonbattle.game.shop;
 
 import com.commonbattle.actor.ActorRef;
+import com.commonbattle.actor.ActorTaskCategory;
 import com.commonbattle.actor.ActorSystem;
+import com.commonbattle.actor.message.AgentDeliveryResult;
+import com.commonbattle.actor.message.AgentDeliveryStatus;
 import com.commonbattle.actor.message.DefaultAgentMessagePort;
 import com.commonbattle.actor.rpc.RpcCallback;
 import com.commonbattle.actor.rpc.RpcGateway;
@@ -84,8 +87,46 @@ class ActorMailboxShopStockClientTest {
         assertEquals(error, failure.get());
     }
 
+    @Test
+    void reservedStockIsReleasedWhenOwnerMailboxRejectsCallback() {
+        RecordingExecutor executor = new RecordingExecutor();
+        ActorSystem actors = new ActorSystem(executor, 64, 1);
+        ActorRef owner = actors.actor("player-10001");
+        DefaultAgentMessagePort messages = new DefaultAgentMessagePort(actors, new NoopRpcGateway());
+        messages.tellLocal(owner, ActorTaskCategory.DEFAULT, ignored -> {
+        });
+        RecordingAsyncClient async = new RecordingAsyncClient();
+        List<AgentDeliveryResult> failures = new ArrayList<>();
+        ActorMailboxShopStockClient client = new ActorMailboxShopStockClient(
+                async,
+                messages,
+                owner,
+                failures::add
+        );
+        AtomicReference<ShopStockReserveResponse> response = new AtomicReference<>();
+
+        client.reserve("order-10001-1", "limited_pack", 1, new ActorShopStockCallback<>() {
+            @Override
+            public void success(com.commonbattle.actor.ActorContext context, ShopStockReserveResponse result) {
+                response.set(result);
+            }
+
+            @Override
+            public void failure(com.commonbattle.actor.ActorContext context, Throwable error) {
+                throw new AssertionError(error);
+            }
+        });
+        async.reserveCallback.success(new ShopStockReserveResponse(true, 0));
+
+        assertNull(response.get());
+        assertEquals(1, failures.size());
+        assertEquals(AgentDeliveryStatus.MAILBOX_FULL, failures.getFirst().status());
+        assertEquals(List.of("order-10001-1:limited_pack:1"), async.releases);
+    }
+
     private static final class RecordingAsyncClient implements ShopStockAsyncClient {
         private ShopStockCallback<ShopStockReserveResponse> reserveCallback;
+        private final List<String> releases = new ArrayList<>();
 
         @Override
         public void reserve(
@@ -104,6 +145,8 @@ class ActorMailboxShopStockClientTest {
                 int count,
                 ShopStockCallback<ShopStockReleaseResponse> callback
         ) {
+            releases.add(reservationId + ":" + sku + ":" + count);
+            callback.success(new ShopStockReleaseResponse(count));
         }
 
         @Override

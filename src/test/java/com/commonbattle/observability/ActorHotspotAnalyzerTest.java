@@ -46,4 +46,33 @@ class ActorHotspotAnalyzerTest {
         assertEquals(ActorHotspotAction.OBSERVE, candidates.get(3).action());
         assertEquals(Set.of(ActorHotspotReason.QUEUE_BACKLOG), candidates.get(3).reasons());
     }
+
+    @Test
+    void batchYieldPressureContributesToHotspotActionAndScore() {
+        ActorHotspotPolicy policy = new ActorHotspotPolicy(1, 10, 100, 2, 3, 100, 500, 2, 4);
+
+        List<ActorHotspotCandidate> candidates = ActorHotspotAnalyzer.analyze(
+                List.of(
+                        new ActorMailboxStats(new ActorRef("player-10001"), 0, Map.of(), 3, 6, 2, 1),
+                        new ActorMailboxStats(new ActorRef("player-10002"), 1, Map.of(), 5, 10, 2, 2),
+                        new ActorMailboxStats(new ActorRef("scene-shard:world-1:0"), 1, Map.of(), 8, 16, 2, 4)
+                ),
+                List.of(),
+                policy
+        );
+
+        assertEquals(3, candidates.size());
+        assertEquals("scene-shard:world-1:0", candidates.get(0).actorId());
+        assertEquals(ActorHotspotAction.MIGRATION_CANDIDATE, candidates.get(0).action());
+        assertEquals(Set.of(ActorHotspotReason.MAILBOX_BATCH_YIELD), candidates.get(0).reasons());
+        assertEquals(4, candidates.get(0).mailboxBatchYields());
+        assertEquals(3_000_030_000L, candidates.get(0).score());
+        assertEquals("player-10002", candidates.get(1).actorId());
+        assertEquals(ActorHotspotAction.THROTTLE, candidates.get(1).action());
+        assertEquals(Set.of(ActorHotspotReason.MAILBOX_BATCH_YIELD), candidates.get(1).reasons());
+        assertEquals(2_000_020_000L, candidates.get(1).score());
+        assertEquals("player-10001", candidates.get(2).actorId());
+        assertEquals(ActorHotspotAction.OBSERVE, candidates.get(2).action());
+        assertEquals(Set.of(ActorHotspotReason.MAILBOX_BATCH_YIELD), candidates.get(2).reasons());
+    }
 }

@@ -11,11 +11,38 @@ public record RpcGovernanceConfig(
         Duration defaultTimeout,
         int maxPendingRequests,
         Duration slowCallThreshold,
-        int idempotencyCacheCapacity
+        int idempotencyCacheCapacity,
+        Duration idempotencyCacheTtl,
+        Duration idempotencyLeaseDuration,
+        Duration idempotencyPollInterval
 ) {
+    public RpcGovernanceConfig(
+            Duration defaultTimeout,
+            int maxPendingRequests,
+            Duration slowCallThreshold,
+            int idempotencyCacheCapacity
+    ) {
+        this(defaultTimeout, maxPendingRequests, slowCallThreshold, idempotencyCacheCapacity,
+                Duration.ofMinutes(5), Duration.ofSeconds(10), Duration.ofMillis(25));
+    }
+
+    public RpcGovernanceConfig(
+            Duration defaultTimeout,
+            int maxPendingRequests,
+            Duration slowCallThreshold,
+            int idempotencyCacheCapacity,
+            Duration idempotencyCacheTtl
+    ) {
+        this(defaultTimeout, maxPendingRequests, slowCallThreshold, idempotencyCacheCapacity,
+                idempotencyCacheTtl, Duration.ofSeconds(10), Duration.ofMillis(25));
+    }
+
     public RpcGovernanceConfig {
         Objects.requireNonNull(defaultTimeout, "defaultTimeout");
         Objects.requireNonNull(slowCallThreshold, "slowCallThreshold");
+        Objects.requireNonNull(idempotencyCacheTtl, "idempotencyCacheTtl");
+        Objects.requireNonNull(idempotencyLeaseDuration, "idempotencyLeaseDuration");
+        Objects.requireNonNull(idempotencyPollInterval, "idempotencyPollInterval");
         if (defaultTimeout.isZero() || defaultTimeout.isNegative()) {
             throw new IllegalArgumentException("defaultTimeout must be positive");
         }
@@ -28,9 +55,21 @@ public record RpcGovernanceConfig(
         if (idempotencyCacheCapacity < 0) {
             throw new IllegalArgumentException("idempotencyCacheCapacity must not be negative");
         }
+        if (idempotencyCacheTtl.isZero() || idempotencyCacheTtl.isNegative()) {
+            throw new IllegalArgumentException("idempotencyCacheTtl must be positive");
+        }
+        if (idempotencyLeaseDuration.isZero() || idempotencyLeaseDuration.isNegative()) {
+            throw new IllegalArgumentException("idempotencyLeaseDuration must be positive");
+        }
+        if (idempotencyPollInterval.isZero() || idempotencyPollInterval.isNegative()) {
+            throw new IllegalArgumentException("idempotencyPollInterval must be positive");
+        }
     }
 
     public static RpcGovernanceConfig defaults() {
-        return new RpcGovernanceConfig(Duration.ofSeconds(3), 10_000, Duration.ofMillis(200), 10_000);
+        return new RpcGovernanceConfig(
+                Duration.ofSeconds(3), 10_000, Duration.ofMillis(200), 10_000, Duration.ofMinutes(5),
+                Duration.ofSeconds(10), Duration.ofMillis(25)
+        );
     }
 }

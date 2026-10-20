@@ -10,13 +10,26 @@ import java.util.Objects;
 public record ActorMailboxStats(
         ActorRef actor,
         int queuedTasks,
-        Map<ActorTaskCategory, Integer> queuedTasksByCategory
+        Map<ActorTaskCategory, Integer> queuedTasksByCategory,
+        long drainCycles,
+        long drainProcessedTasks,
+        int maxTasksPerDrain,
+        long batchYields
 ) {
+    public ActorMailboxStats(
+            ActorRef actor,
+            int queuedTasks,
+            Map<ActorTaskCategory, Integer> queuedTasksByCategory
+    ) {
+        this(actor, queuedTasks, queuedTasksByCategory, 0, 0, 0, 0);
+    }
+
     public ActorMailboxStats {
         Objects.requireNonNull(actor, "actor");
         Objects.requireNonNull(queuedTasksByCategory, "queuedTasksByCategory");
-        if (queuedTasks < 0) {
-            throw new IllegalArgumentException("queuedTasks must not be negative");
+        if (queuedTasks < 0 || drainCycles < 0 || drainProcessedTasks < 0
+                || maxTasksPerDrain < 0 || batchYields < 0) {
+            throw new IllegalArgumentException("mailbox stats must not be negative");
         }
         queuedTasksByCategory = Map.copyOf(queuedTasksByCategory);
     }

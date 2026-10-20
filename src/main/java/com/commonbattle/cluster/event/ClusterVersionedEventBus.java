@@ -8,6 +8,8 @@ import com.commonbattle.cluster.rpc.ClusterRpcGateway;
 import com.commonbattle.game.event.VersionedEvent;
 import com.commonbattle.game.event.VersionedEventBus;
 import com.commonbattle.game.event.VersionedEventSubscriber;
+import com.commonbattle.game.event.ConfirmableEventPublisher;
+import com.commonbattle.game.event.EventPublishCallback;
 
 import java.time.Duration;
 import java.util.HashSet;
@@ -23,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 跨服版本事件总线客户端。
  * 本地订阅者接收 event.deliver；发布和订阅请求通过中心事件服务 RPC 完成。
  */
-public final class ClusterVersionedEventBus implements VersionedEventBus {
+public final class ClusterVersionedEventBus implements VersionedEventBus, ConfirmableEventPublisher {
     private final ServiceId local;
     private final ClusterRpcGateway gateway;
     private final Duration subscriptionLeaseTtl;
@@ -48,12 +50,29 @@ public final class ClusterVersionedEventBus implements VersionedEventBus {
 
     @Override
     public void publish(VersionedEvent event) {
+        publish(event, ConfirmableEventPublisher.IgnoreEventPublishCallback.INSTANCE);
+    }
+
+    @Override
+    public void publish(VersionedEvent event, EventPublishCallback callback) {
+        Objects.requireNonNull(event, "event");
+        Objects.requireNonNull(callback, "callback");
         gateway.call(new RpcRequest<>(
                 ServiceKind.CENTER.name(),
                 ClusterEventOperations.PUBLISH,
                 new EventPublishRequest(event),
                 String.class
-        ), IgnoreCallback.INSTANCE);
+        ), new RpcCallback<>() {
+            @Override
+            public void success(String response) {
+                callback.success();
+            }
+
+            @Override
+            public void failure(Throwable error) {
+                callback.failure(error);
+            }
+        });
     }
 
     @Override
